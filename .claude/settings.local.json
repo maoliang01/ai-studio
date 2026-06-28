@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 /home/aircas/.claude/skills/ui-ux-pro-max/scripts/search.py \"chat interface message bubble\" --stack shadcn)",
+      "Bash(python3 /home/aircas/.claude/skills/ui-ux-pro-max/scripts/search.py \"dark mode professional dashboard\" --domain color)",
+      "Bash(python3 /home/aircas/.claude/skills/ui-ux-pro-max/scripts/search.py \"animation loading skeleton\" --domain ux)",
+      "Bash(npm run *)",
+      "Bash(apt list *)",
+      "Bash(python3 -m pip --version)",
+      "Bash(curl -s http://localhost:8000/chat/models)",
+      "Bash(curl -s http://localhost:8000/health)",
+      "Bash(which python3 *)",
+      "Read(//usr/bin/**)",
+      "Bash(sudo apt-get update)",
+      "Bash(sudo apt-get install -y python3-pip)",
+      "Read(//home/aircas/**)",
+      "Read(//root/**)",
+      "Bash(conda info *)",
+      "Bash(/usr/bin/python3 -m pip --version)",
+      "Bash(/usr/bin/python3.10 -m pip --version)",
+      "Bash(sudo -S apt-get install -y python3-pip)",
+      "Bash(pkill -f uvicorn)",
+      "Bash(curl -X POST http://localhost:8000/chat -H 'Content-Type: application/json' -d '{\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}],\"stream\":false}')",
+      "Bash(sudo -S pip3 install httpx[socks])",
+      "Bash(curl -s http://localhost:8000/models)",
+      "Bash(python3 -m json.tool)",
+      "WebFetch(domain:uni-api.cstcloud.cn)",
+      "Bash(tail -30 /tmp/backend.log)",
+      "Read(//tmp/**)",
+      "Bash(curl -s http://localhost:3001)",
+      "Bash(curl -X POST http://localhost:8000/chat -H 'Content-Type: application/json' -d '{\"model_id\":\"deepseek-v4-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}],\"stream\":false}' --max-time 90)",
+      "Bash(curl -s -X OPTIONS http://localhost:8000/chat -H 'Origin: http://localhost:3001' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: Content-Type' -i)",
+      "Bash(curl -X POST http://localhost:8000/chat -H 'Content-Type: application/json' -d '{\"model_id\":\"test\",\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}],\"stream\":false,\"model_config\":{\"name\":\"test\",\"type\":\"llm\",\"base_url\":\"https://uni-api.cstcloud.cn/v1\",\"api_key\":\"c37fd396c3f2da91e6fe7ac162e8af45fcaee11cc8aab80c0e40a63479f5f36e\",\"model_name\":\"deepseek-v4-flash\"}}' --max-time 60)",
+      "Bash(curl -X POST http://localhost:8000/chat -H 'Content-Type: application/json' -d '{\"model_id\":\"test\",\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}],\"stream\":false,\"model_config\":{\"name\":\"test\",\"type\":\"llm\",\"base_url\":\"https://uni-api.cstcloud.cn/v1\",\"api_key\":\"\",\"model_name\":\"deepseek-v4-flash\"}}' --max-time 30)"
+    ]
+  }
+}
