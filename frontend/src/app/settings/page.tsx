@@ -39,8 +39,14 @@ const colorOptions = [
 ];
 
 export default function SettingsPage() {
-  const { settings, setTheme, setPrimaryColor, apiKeys, saveApiKey, deleteApiKey } =
-    useSettingsStore();
+  const {
+    settings,
+    setTheme,
+    setPrimaryColor,
+    apiKeys,
+    saveApiKey,
+    deleteApiKey,
+  } = useSettingsStore();
 
   const [showApiKeys, setShowApiKeys] = useState<Record<string, boolean>>({});
   const [apiKeyInputs, setApiKeyInputs] = useState<Record<string, { key: string; baseUrl: string }>>({});

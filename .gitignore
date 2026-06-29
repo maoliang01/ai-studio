@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Node.js
+node_modules/
+.next/
+out/
+.vercel
+
+# Logs
+*.log
+backend/app.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Sensitive files
+backend/models_config.json
+.env
+.env.local
+*.env
+
+# Build artifacts
+*.bundle.js
+*.map
+
+# Test
+.coverage
+htmlcov/
+*.cover
+
+# Claude Code
+.claude/sessions/
+.claude/plans/used/

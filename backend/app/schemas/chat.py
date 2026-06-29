@@ -33,6 +33,7 @@ class ModelInfo(BaseModel):
     name: str
     type: str
     base_url: str
+    api_key: Optional[str] = None
     model_name: Optional[str] = None
     is_connected: bool = False
     latency: Optional[int] = None

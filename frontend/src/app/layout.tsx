@@ -6,6 +6,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { AppHeader } from "@/components/layout/app-header";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
+import { InitProvider } from "@/components/init-provider";
 
 const plusJakarta = Plus_Jakarta_Sans({
   variable: "--font-sans",
@@ -33,18 +34,20 @@ export default function RootLayout({
       <body
         className={`${plusJakarta.variable} ${geistMono.variable} h-full antialiased`}
       >
-        <TooltipProvider>
-          <SidebarProvider defaultOpen={true}>
-            <AppSidebar />
-            <SidebarInset>
-              <AppHeader />
-              <main className="flex-1 overflow-hidden">
-                {children}
-              </main>
-            </SidebarInset>
-          </SidebarProvider>
-          <Toaster />
-        </TooltipProvider>
+        <InitProvider>
+          <TooltipProvider>
+            <SidebarProvider defaultOpen={true}>
+              <AppSidebar />
+              <SidebarInset>
+                <AppHeader />
+                <main className="flex-1 overflow-hidden">
+                  {children}
+                </main>
+              </SidebarInset>
+            </SidebarProvider>
+            <Toaster />
+          </TooltipProvider>
+        </InitProvider>
       </body>
     </html>
   );

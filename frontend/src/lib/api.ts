@@ -1,57 +1,32 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+/**
+ * API 客户端封装
+ * 统一处理与后端的 API 通信
+ */
+import type {
+  ChatRequestAPI,
+  ChatResponseAPI,
+  ModelInfo,
+  ModelConfigInput,
+  TestResult,
+  ScrapeOptions,
+  ScrapeResult,
+} from "@/types";
 
-interface ChatMessage {
-  role: string;
-  content: string;
-}
+const API_BASE = "/api";
 
-interface ChatRequest {
-  model_id?: string;
-  messages: ChatMessage[];
-  stream?: boolean;
-  temperature?: number;
-  max_tokens?: number;
-  model_config?: {
-    name: string;
-    type: string;
-    base_url: string;
-    api_key?: string;
-    model_name?: string;
-  };
-}
-
-interface ChatResponse {
-  content: string;
-  model?: string;
-}
-
-interface ModelInfo {
-  id: string;
-  name: string;
-  type: string;
-  base_url: string;
-  model_name?: string;
-  is_connected?: boolean;
-  latency?: number;
-  last_tested_at?: string;
-}
-
-interface TestResult {
-  success: boolean;
-  latency?: number;
-  error?: string;
-}
+// ================================================
+// 对话 API
+// ================================================
 
 /**
  * 发送对话请求
  */
-export async function sendChat(request: ChatRequest): Promise<ChatResponse> {
+export async function sendChat(request: ChatRequestAPI, signal?: AbortSignal): Promise<ChatResponseAPI> {
   const response = await fetch(`${API_BASE}/chat`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
+    signal,
   });
 
   if (!response.ok) {
@@ -64,13 +39,15 @@ export async function sendChat(request: ChatRequest): Promise<ChatResponse> {
 /**
  * 发送流式对话请求 (SSE)
  */
-export async function* streamChat(request: ChatRequest): AsyncGenerator<string, void, unknown> {
+export async function* streamChat(
+  request: ChatRequestAPI,
+  signal?: AbortSignal
+): AsyncGenerator<string, void, unknown> {
   const response = await fetch(`${API_BASE}/chat/stream`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
+    signal,
   });
 
   if (!response.ok) {
@@ -85,39 +62,53 @@ export async function* streamChat(request: ChatRequest): AsyncGenerator<string, 
   const decoder = new TextDecoder();
   let buffer = "";
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (signal?.aborted) break;
 
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
 
-    for (const line of lines) {
-      if (line.startsWith("event: message")) {
-        // 跳过事件头部
-        continue;
-      }
-      if (line.startsWith("data: ")) {
-        const data = line.slice(6);
-        try {
-          const parsed = JSON.parse(data);
-          if (parsed.content || parsed.done) {
-            yield parsed.content;
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          const data = line.slice(6);
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.content || parsed.done) {
+              yield parsed.content;
+            }
+            if (parsed.done) return;
+          } catch {
+            // 忽略解析错误
           }
-          if (parsed.done) {
-            return;
-          }
-        } catch {
-          // 忽略解析错误
         }
       }
     }
+  } finally {
+    reader.cancel().catch(() => {});
   }
 }
 
 /**
- * 获取可用模型列表
+ * 获取后端可用模型列表
+ */
+export async function fetchAvailableModels(): Promise<{ id: string; name: string; model_name?: string }[]> {
+  const response = await fetch(`${API_BASE}/chat/models`);
+  if (!response.ok) {
+    throw new Error(`获取可用模型失败: ${response.status}`);
+  }
+  return response.json();
+}
+
+// ================================================
+// 模型管理 API
+// ================================================
+
+/**
+ * 获取已配置的模型列表
  */
 export async function fetchModels(): Promise<ModelInfo[]> {
   const response = await fetch(`${API_BASE}/models`);
@@ -130,18 +121,10 @@ export async function fetchModels(): Promise<ModelInfo[]> {
 /**
  * 添加模型
  */
-export async function createModel(config: {
-  name: string;
-  type: string;
-  base_url: string;
-  api_key?: string;
-  model_name?: string;
-}): Promise<ModelInfo> {
+export async function createModel(config: ModelConfigInput): Promise<ModelInfo> {
   const response = await fetch(`${API_BASE}/models`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
   });
 
@@ -155,21 +138,10 @@ export async function createModel(config: {
 /**
  * 更新模型配置
  */
-export async function updateModel(
-  modelId: string,
-  config: {
-    name: string;
-    type: string;
-    base_url: string;
-    api_key?: string;
-    model_name?: string;
-  }
-): Promise<ModelInfo> {
+export async function updateModel(modelId: string, config: ModelConfigInput): Promise<ModelInfo> {
   const response = await fetch(`${API_BASE}/models/${modelId}`, {
     method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
   });
 
@@ -209,12 +181,88 @@ export async function testModel(modelId: string): Promise<TestResult> {
 }
 
 /**
- * 获取后端可用模型列表
+ * 同步模型配置到后端
  */
-export async function fetchAvailableModels(): Promise<{ id: string; name: string; model_name?: string }[]> {
-  const response = await fetch(`${API_BASE}/chat/models`);
+export async function syncModels(models: ModelConfigInput[]): Promise<{ message: string }> {
+  const response = await fetch(`${API_BASE}/models/sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(models),
+  });
+
   if (!response.ok) {
-    throw new Error(`获取可用模型失败: ${response.status}`);
+    throw new Error(`同步模型失败: ${response.status}`);
   }
+
+  return response.json();
+}
+
+// ================================================
+// 爬取 API
+// ================================================
+
+/**
+ * 爬取单个 URL
+ */
+export async function scrapeUrl(url: string, options?: Partial<ScrapeOptions>): Promise<ScrapeResult> {
+  const response = await fetch(`${API_BASE}/scrape`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url, options }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`爬取失败: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * 批量爬取多个 URL
+ */
+export async function scrapeBatch(urls: string[], options?: Partial<ScrapeOptions>): Promise<ScrapeResult[]> {
+  const response = await fetch(`${API_BASE}/scrape/batch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ urls, options }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`批量爬取失败: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+// ================================================
+// 设置 API
+// ================================================
+
+/**
+ * 获取设置
+ */
+export async function fetchSettings(): Promise<Record<string, unknown>> {
+  const response = await fetch(`${API_BASE}/settings`);
+  if (!response.ok) {
+    throw new Error(`获取设置失败: ${response.status}`);
+  }
+  return response.json();
+}
+
+/**
+ * 保存设置
+ */
+export async function saveSettings(data: Record<string, unknown>): Promise<{ message: string }> {
+  const response = await fetch(`${API_BASE}/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+
+  if (!response.ok) {
+    throw new Error(`保存设置失败: ${response.status}`);
+  }
+
   return response.json();
 }

@@ -1,9 +1,21 @@
 import os
 import json
+import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
 from pydantic import BaseModel
 from dotenv import load_dotenv
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('/home/aircas/AI/AI Studio/backend/app.log'),
+    ]
+)
+logger = logging.getLogger("ai-studio")
 
 load_dotenv()
 
@@ -59,6 +71,7 @@ def save_config_to_file(config: LLMConfig) -> None:
 
 def init_llm_config() -> LLMConfig:
     """初始化 LLM 配置"""
+    logger.info("正在初始化 LLM 配置...")
     # 默认模型
     default_models = {
         "default-gpt-4o": ModelConfig(
@@ -86,9 +99,11 @@ def init_llm_config() -> LLMConfig:
     if data.get("models"):
         for k, v in data["models"].items():
             config.models[k] = ModelConfig(**v)
+        logger.info(f"从文件加载了 {len(data['models'])} 个模型")
     # 如果没有，加载默认模型
     if not config.models:
         config.models = default_models
+        logger.info("使用默认模型")
     # 设置默认模型
     config.default_llm = data.get("default_llm") or "default-gpt-4o"
 
@@ -111,9 +126,11 @@ def update_model_config(model_id: str, config: ModelConfig) -> None:
 
 
 def add_model_config(config: ModelConfig) -> None:
-    """添加模型配置"""
+    """添加模型配置（如果已存在则覆盖）"""
+    logger.info(f"添加/更新模型: id={config.id}, name={config.name}, type={config.type}")
     llm_config.models[config.id] = config
     save_config_to_file(llm_config)
+    logger.info(f"当前模型列表: {list(llm_config.models.keys())}")
 
 
 def delete_model_config(model_id: str) -> bool:

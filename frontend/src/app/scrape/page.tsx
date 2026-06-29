@@ -1,9 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useScrapeStore } from "@/stores/scrape-store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Card } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
@@ -15,7 +16,6 @@ import {
   Link2,
   Copy,
   Download,
-  BookOpen,
   ChevronDown,
   ChevronUp,
   Clock,
@@ -24,94 +24,91 @@ import {
   Loader2,
   FileText,
   History,
+  Trash2,
+  User,
+  Calendar,
+  Tag,
+  AlignLeft,
+  Eye,
+  EyeOff,
+  Layers,
+  FileDown,
+  Sparkles,
 } from "lucide-react";
-
-interface ScrapedResult {
-  id: string;
-  url: string;
-  title: string;
-  content: string;
-  wordCount: number;
-  status: "pending" | "success" | "error";
-  errorMessage?: string;
-  scrapedAt: Date;
-}
-
-const mockHistory: ScrapedResult[] = [
-  {
-    id: "1",
-    url: "https://example.com/article-1",
-    title: "示例文章 1",
-    content: "这是文章的内容摘要...",
-    wordCount: 3256,
-    status: "success",
-    scrapedAt: new Date(Date.now() - 3600000),
-  },
-  {
-    id: "2",
-    url: "https://example.com/article-2",
-    title: "示例文章 2",
-    content: "这是另一篇文章...",
-    wordCount: 2156,
-    status: "success",
-    scrapedAt: new Date(Date.now() - 7200000),
-  },
-];
+import { cn } from "@/lib/utils";
+import type { ScrapeResult } from "@/types";
 
 export default function ScrapePage() {
   const [url, setUrl] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [result, setResult] = useState<ScrapedResult | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [expandedCard, setExpandedCard] = useState<string | null>(null);
+  const [maxArticles, setMaxArticles] = useState(10);
   const [advancedOptions, setAdvancedOptions] = useState({
     extractContent: true,
-    rawHtml: false,
-    keepFormat: false,
-    maxDepth: 3,
+    fetchHtml: false,
+    preserveFormat: false,
+    maxDepth: 0,
     timeout: 30,
   });
 
+  const {
+    results,
+    isScraping,
+    currentResult,
+    error,
+    progress,
+    scrapeUrl,
+    deepScrape,
+    clearResults,
+    setCurrentResult,
+  } = useScrapeStore();
+
+  // 页面加载时选择最新结果
+  useEffect(() => {
+    if (results.length > 0 && !currentResult) {
+      setCurrentResult(results[0]);
+    }
+  }, [results, currentResult, setCurrentResult]);
+
+  // 判断是否为文章详情页URL（而非列表页）
+  const isArticleUrl = (urlStr: string): boolean => {
+    // 文章页特征：URL 包含日期目录 + 文件名模式
+    // 如 /202606/t20260618_xxx.shtml 或 /p/123456789
+    const patterns = [
+      /\/[0-9]{6}\/t\w+\.shtml?$/i,    // /202606/t20260618_xxx.shtml (中科院等政府网站)
+      /\/P0\d+\.shtml?$/i,             // /P020250618123456789.shtml
+      /\/info\/P0\d+\.shtml?$/i,       // /info/P020210615123456789.shtml
+      /\/p\/\d+$/,                     // /p/123456789 (知乎等)
+      /\/article\/\d+$/,               // /article/123456789 (CSDN博客等)
+    ];
+    return patterns.some(p => p.test(urlStr));
+  };
+
   const handleScrape = async () => {
     if (!url.trim()) return;
+    await scrapeUrl(url, advancedOptions);
+  };
 
-    setIsLoading(true);
-    setResult(null);
+  const handleDeepScrape = async () => {
+    if (!url.trim()) return;
+    setExpandedCard(null); // 重置展开状态
 
-    // 模拟爬取
-    setTimeout(() => {
-      setResult({
-        id: Date.now().toString(),
-        url: url,
-        title: "抓取结果 - " + new URL(url).hostname,
-        content: `这是一个示例抓取结果。
+    // 智能选择爬取方式
+    if (isArticleUrl(url)) {
+      // 如果是文章详情页，直接单页爬取
+      console.log('检测到文章详情页，使用单页爬取');
+      await scrapeUrl(url, advancedOptions);
+    } else {
+      // 如果是列表页，使用深度爬取
+      console.log('检测到列表页，使用深度爬取');
+      await deepScrape(url, maxArticles, advancedOptions);
+    }
+  };
 
-文章正文内容：
-
-## 标题
-
-这是网页的主要内容。它可能包含多paragraph。
-
-### 子标题
-
-更多的内容段落。
-
-\`\`\`
-代码块示例
-\`\`\`
-
-1. 列表项 1
-2. 列表项 2
-3. 列表项 3
-
-[这是一个链接](https://example.com)
-
-更多内容...`,
-        wordCount: 3256,
-        status: "success",
-        scrapedAt: new Date(),
-      });
-      setIsLoading(false);
-    }, 2000);
+  const handleCopy = () => {
+    if (currentResult?.content) {
+      navigator.clipboard.writeText(currentResult.content);
+    }
   };
 
   const getStatusIcon = (status: string) => {
@@ -125,15 +122,272 @@ export default function ScrapePage() {
     }
   };
 
+  const formatTime = (dateStr: string) => {
+    try {
+      return new Date(dateStr).toLocaleString("zh-CN", {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+    } catch {
+      return dateStr;
+    }
+  };
+
+  const toggleExpand = (cardUrl: string) => {
+    setExpandedCard(expandedCard === cardUrl ? null : cardUrl);
+  };
+
+  // 导出单个结果为文件
+  const exportAsFile = (item: ScrapeResult) => {
+    const blob = new Blob(
+      [
+        `# ${item.title}\n\n`,
+        `URL: ${item.url}\n`,
+        item.author ? `作者: ${item.author}\n` : "",
+        item.publishedAt ? `发布时间: ${item.publishedAt}\n` : "",
+        item.keywords?.length ? `关键字: ${item.keywords.join(", ")}\n` : "",
+        `\n## 摘要\n\n${item.summary || ""}\n\n`,
+        `## 正文\n\n${item.content}`,
+      ],
+      { type: "text/markdown" }
+    );
+    const filename = `${item.title.replace(/[^a-zA-Z0-9一-龥]/g, "_").substring(0, 30)}.md`;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+  };
+
+  // 批量导出所有结果
+  const exportAllResults = () => {
+    results.forEach((item, index) => {
+      setTimeout(() => exportAsFile(item), index * 500);
+    });
+  };
+
+  // 渲染单个文章卡片
+  const renderArticleCard = (item: ScrapeResult, isSelected: boolean) => (
+    <Card
+      key={`${item.url}-${item.scrapedAt}`}
+      className={cn(
+        "transition-all cursor-pointer hover:shadow-md",
+        isSelected && "ring-2 ring-primary"
+      )}
+      onClick={() => setCurrentResult(item)}
+    >
+      <CardHeader className="pb-2">
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 mb-1">
+              {getStatusIcon(item.status)}
+              <CardTitle className="text-base font-semibold line-clamp-2">
+                {item.title || "无标题"}
+              </CardTitle>
+            </div>
+            <a
+              href={item.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-primary hover:underline flex items-center gap-1"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <Link2 className="h-3 w-3" />
+              <span className="truncate">{item.url}</span>
+            </a>
+          </div>
+          <Badge variant="secondary" className="text-xs shrink-0">
+            {item.wordCount.toLocaleString()} 字
+          </Badge>
+        </div>
+      </CardHeader>
+
+      <CardContent className="space-y-3">
+        {/* 文章元信息 */}
+        <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+          {item.author && (
+            <div className="flex items-center gap-1">
+              <User className="h-3 w-3" />
+              <span>{item.author}</span>
+            </div>
+          )}
+          {item.publishedAt && (
+            <div className="flex items-center gap-1">
+              <Calendar className="h-3 w-3" />
+              <span>{item.publishedAt}</span>
+            </div>
+          )}
+          <div className="flex items-center gap-1">
+            <Clock className="h-3 w-3" />
+            <span>{formatTime(item.scrapedAt)}</span>
+          </div>
+        </div>
+
+        {/* 摘要 */}
+        {item.summary && (
+          <p className="text-sm text-muted-foreground line-clamp-2">
+            {item.summary}
+          </p>
+        )}
+
+        {/* 关键词标签 */}
+        {item.keywords && item.keywords.length > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {item.keywords.slice(0, 5).map((keyword, index) => (
+              <Badge key={index} variant="outline" className="text-xs">
+                <Tag className="h-2 w-2 mr-1" />
+                {keyword}
+              </Badge>
+            ))}
+            {item.keywords.length > 5 && (
+              <Badge variant="outline" className="text-xs">
+                +{item.keywords.length - 5}
+              </Badge>
+            )}
+          </div>
+        )}
+
+        <Separator />
+
+        {/* 操作按钮 */}
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1"
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleExpand(item.url);
+            }}
+          >
+            {expandedCard === item.url ? (
+              <>
+                <EyeOff className="h-3 w-3" />
+                收起
+              </>
+            ) : (
+              <>
+                <AlignLeft className="h-3 w-3" />
+                摘要 MD
+              </>
+            )}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1"
+            onClick={async (e) => {
+              e.stopPropagation();
+              try {
+                await navigator.clipboard.writeText(item.content || "");
+              } catch (err) {
+                console.error("复制失败:", err);
+                // fallback: 创建临时 textarea
+                const textarea = document.createElement("textarea");
+                textarea.value = item.content || "";
+                document.body.appendChild(textarea);
+                textarea.select();
+                document.execCommand("copy");
+                document.body.removeChild(textarea);
+              }
+            }}
+          >
+            <Copy className="h-3 w-3" />
+            复制
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1"
+            onClick={(e) => {
+              e.stopPropagation();
+              exportAsFile(item);
+            }}
+          >
+            <FileDown className="h-3 w-3" />
+            导出
+          </Button>
+        </div>
+
+        {/* 展开的 MD 文档内容 */}
+        {expandedCard === item.url && (
+          <div className="mt-2 p-3 bg-muted/50 rounded-lg">
+            <div className="text-xs max-h-96 overflow-y-auto prose prose-sm dark:prose-invert max-w-none">
+              {/* MD 文档头部：标题 */}
+              <h1 className="text-lg font-bold mb-2">{item.title || "无标题"}</h1>
+
+              {/* 元信息 */}
+              <div className="flex flex-wrap gap-3 text-xs text-muted-foreground mb-3 pb-2 border-b">
+                <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline flex items-center gap-1">
+                  <Link2 className="h-3 w-3" />
+                  {item.url}
+                </a>
+                {item.author && (
+                  <span className="flex items-center gap-1">
+                    <User className="h-3 w-3" />
+                    {item.author}
+                  </span>
+                )}
+                {item.publishedAt && (
+                  <span className="flex items-center gap-1">
+                    <Calendar className="h-3 w-3" />
+                    {item.publishedAt}
+                  </span>
+                )}
+              </div>
+
+              {/* 摘要 */}
+              {item.summary && (
+                <>
+                  <h2 className="text-sm font-semibold mb-1">摘要</h2>
+                  <p className="text-sm text-muted-foreground mb-3">{item.summary}</p>
+                </>
+              )}
+
+              {/* 关键字 */}
+              {item.keywords && item.keywords.length > 0 && (
+                <>
+                  <h2 className="text-sm font-semibold mb-1">关键字</h2>
+                  <div className="flex flex-wrap gap-1 mb-3">
+                    {item.keywords.map((keyword, index) => (
+                      <Badge key={index} variant="outline" className="text-xs">
+                        <Tag className="h-2 w-2 mr-1" />
+                        {keyword}
+                      </Badge>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {/* 正文 */}
+              <h2 className="text-sm font-semibold mb-1">正文</h2>
+              <div className="whitespace-pre-wrap text-sm leading-relaxed">
+                {item.content || "未获取到内容"}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 错误信息 */}
+        {item.status === "error" && item.errorMessage && (
+          <div className="p-2 bg-destructive/10 text-destructive rounded text-sm">
+            {item.errorMessage}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+
   return (
     <div className="flex h-full">
-      {/* 主内容区 */}
-      <div className="flex-1 flex flex-col">
+      {/* 左侧文章列表 */}
+      <div className="flex-1 flex flex-col overflow-hidden">
         <div className="p-6 border-b border-border">
-          <div className="max-w-3xl mx-auto">
-            <h1 className="text-2xl font-semibold mb-4">网页爬取</h1>
+          <div className="max-w-4xl mx-auto">
+            <h1 className="text-2xl font-semibold mb-4">智能网页爬取</h1>
             <p className="text-muted-foreground mb-6">
-              输入网页 URL，自动提取正文内容并导入知识库
+              输入列表页 URL，自动识别并爬取所有文章，提取标题、作者、时间、摘要和关键字
             </p>
 
             {/* URL 输入 */}
@@ -145,28 +399,49 @@ export default function ScrapePage() {
                     <Input
                       value={url}
                       onChange={(e) => setUrl(e.target.value)}
-                      placeholder="输入网址，例如：https://example.com/article"
+                      placeholder="输入列表页 URL，例如：https://news.ycombinator.com"
                       className="pl-9"
-                      onKeyDown={(e) => e.key === "Enter" && handleScrape()}
+                      onKeyDown={(e) => e.key === "Enter" && !isScraping && handleDeepScrape()}
                     />
                   </div>
                   <Button
-                    onClick={handleScrape}
-                    disabled={!url.trim() || isLoading}
+                    onClick={handleDeepScrape}
+                    disabled={!url.trim() || isScraping}
                     className="gap-2"
                   >
-                    {isLoading ? (
+                    {isScraping ? (
                       <>
                         <Loader2 className="h-4 w-4 animate-spin" />
-                        抓取中...
+                        爬取中...
                       </>
                     ) : (
                       <>
-                        <Search className="h-4 w-4" />
-                        抓取
+                        <Sparkles className="h-4 w-4" />
+                        智能爬取
                       </>
                     )}
                   </Button>
+                </div>
+
+                {/* 深度爬取选项 */}
+                <div className="flex items-center gap-4 p-3 bg-primary/10 rounded-lg">
+                  <div className="flex items-center gap-2">
+                    <Layers className="h-4 w-4 text-primary" />
+                    <span className="text-sm">自动识别文章链接并爬取</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Label className="text-sm">最多</Label>
+                    <select
+                      value={maxArticles}
+                      onChange={(e) => setMaxArticles(parseInt(e.target.value))}
+                      className="h-8 px-2 rounded-md border border-input bg-background text-sm"
+                    >
+                      <option value={5}>5 篇</option>
+                      <option value={10}>10 篇</option>
+                      <option value={20}>20 篇</option>
+                      <option value={30}>30 篇</option>
+                    </select>
+                  </div>
                 </div>
 
                 {/* 高级选项 */}
@@ -204,55 +479,22 @@ export default function ScrapePage() {
                         </div>
                         <div className="flex items-center space-x-2">
                           <Checkbox
-                            id="raw-html"
-                            checked={advancedOptions.rawHtml}
+                            id="fetch-html"
+                            checked={advancedOptions.fetchHtml}
                             onCheckedChange={(checked) =>
                               setAdvancedOptions({
                                 ...advancedOptions,
-                                rawHtml: checked as boolean,
+                                fetchHtml: checked as boolean,
                               })
                             }
                           />
-                          <Label htmlFor="raw-html" className="text-sm cursor-pointer">
-                            仅获取 HTML
-                          </Label>
-                        </div>
-                        <div className="flex items-center space-x-2">
-                          <Checkbox
-                            id="keep-format"
-                            checked={advancedOptions.keepFormat}
-                            onCheckedChange={(checked) =>
-                              setAdvancedOptions({
-                                ...advancedOptions,
-                                keepFormat: checked as boolean,
-                              })
-                            }
-                          />
-                          <Label htmlFor="keep-format" className="text-sm cursor-pointer">
-                            保留原始格式
+                          <Label htmlFor="fetch-html" className="text-sm cursor-pointer">
+                            获取原始 HTML
                           </Label>
                         </div>
                       </div>
 
                       <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                          <Label className="text-sm">最大深度</Label>
-                          <select
-                            value={advancedOptions.maxDepth}
-                            onChange={(e) =>
-                              setAdvancedOptions({
-                                ...advancedOptions,
-                                maxDepth: parseInt(e.target.value),
-                              })
-                            }
-                            className="w-full h-9 px-3 rounded-md border border-input bg-background text-sm"
-                          >
-                            <option value={1}>1</option>
-                            <option value={2}>2</option>
-                            <option value={3}>3</option>
-                            <option value={5}>5</option>
-                          </select>
-                        </div>
                         <div className="space-y-2">
                           <Label className="text-sm">超时时间</Label>
                           <select
@@ -277,84 +519,69 @@ export default function ScrapePage() {
                 </div>
               </div>
             </Card>
+
+            {/* 错误提示 */}
+            {error && (
+              <Card className="mt-4 p-4 border-destructive">
+                <div className="flex items-center gap-2 text-destructive">
+                  <AlertCircle className="h-4 w-4" />
+                  <span>{error}</span>
+                </div>
+              </Card>
+            )}
           </div>
         </div>
 
-        {/* 抓取结果 */}
+        {/* 文章列表 */}
         <ScrollArea className="flex-1">
-          <div className="p-6 max-w-3xl mx-auto">
-            {isLoading && (
+          <div className="p-6 max-w-4xl mx-auto">
+            {/* 加载状态 */}
+            {isScraping && (
               <Card className="p-8">
                 <div className="flex flex-col items-center text-center">
                   <Loader2 className="h-8 w-8 animate-spin text-primary mb-4" />
-                  <p className="text-muted-foreground">正在抓取网页内容...</p>
+                  <p className="text-muted-foreground">正在智能识别并爬取文章...</p>
                   <p className="text-xs text-muted-foreground mt-2">
-                    预计需要几秒钟
+                    1. 解析列表页 → 2. 识别文章链接 → 3. 爬取正文内容 → 4. 提取元信息
                   </p>
                 </div>
               </Card>
             )}
 
-            {result && !isLoading && (
-              <div className="space-y-6">
-                <Card className="p-6">
-                  <div className="flex items-start justify-between mb-4">
-                    <div>
-                      <div className="flex items-center gap-2 mb-2">
-                        {getStatusIcon(result.status)}
-                        <h2 className="text-lg font-semibold">{result.title}</h2>
-                      </div>
-                      <a
-                        href={result.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-sm text-primary hover:underline flex items-center gap-1"
-                      >
-                        <Link2 className="h-3.5 w-3.5" />
-                        {result.url}
-                      </a>
-                    </div>
-                    <Badge variant="secondary">
-                      {result.wordCount.toLocaleString()} 字
-                    </Badge>
-                  </div>
-
-                  <Separator className="my-4" />
-
-                  <div className="prose prose-sm dark:prose-invert max-w-none">
-                    <pre className="whitespace-pre-wrap bg-muted/50 p-4 rounded-lg text-sm max-h-96 overflow-y-auto">
-                      {result.content}
-                    </pre>
-                  </div>
-
-                  <Separator className="my-4" />
-
+            {/* 文章卡片列表 */}
+            {!isScraping && results.length > 0 && (
+              <div className="space-y-4">
+                {/* 批量操作栏 */}
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-muted-foreground">
+                    共 {results.length} 篇文章
+                  </span>
                   <div className="flex items-center gap-2">
-                    <Button className="gap-2">
+                    <Button variant="outline" size="sm" className="gap-2" onClick={exportAllResults}>
                       <Download className="h-4 w-4" />
-                      导入到知识库
+                      全部导出
                     </Button>
-                    <Button variant="outline" className="gap-2">
-                      <Copy className="h-4 w-4" />
-                      复制文本
-                    </Button>
-                    <Button variant="outline" className="gap-2">
-                      <FileText className="h-4 w-4" />
-                      查看全文
+                    <Button variant="outline" size="sm" className="gap-2">
+                      <Download className="h-4 w-4" />
+                      批量导入知识库
                     </Button>
                   </div>
-                </Card>
+                </div>
+
+                {/* 文章卡片 */}
+                {results.map((item) => renderArticleCard(item, currentResult === item))}
               </div>
             )}
 
-            {!result && !isLoading && (
+            {/* 空状态 */}
+            {!isScraping && results.length === 0 && (
               <Card className="p-8 text-center">
                 <div className="w-16 h-16 rounded-full bg-muted mx-auto flex items-center justify-center mb-4">
                   <Globe className="h-8 w-8 text-muted-foreground" />
                 </div>
-                <h3 className="text-lg font-medium mb-2">输入网址开始抓取</h3>
+                <h3 className="text-lg font-medium mb-2">输入列表页 URL 开始智能爬取</h3>
                 <p className="text-muted-foreground text-sm">
-                  支持抓取新闻、文档、博客等网页内容
+                  支持爬取新闻列表、博客列表等，自动识别所有文章链接并爬取正文内容
                 </p>
               </Card>
             )}
@@ -363,50 +590,63 @@ export default function ScrapePage() {
       </div>
 
       {/* 右侧历史记录 */}
-      <div className="w-80 border-l border-border flex flex-col bg-card/50">
+      <div className="w-72 border-l border-border flex flex-col bg-card/50">
         <div className="p-4 border-b border-border flex items-center justify-between">
           <h3 className="font-semibold flex items-center gap-2">
             <History className="h-4 w-4" />
             历史记录
           </h3>
+          {results.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={clearResults}
+              className="text-muted-foreground hover:text-destructive"
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          )}
         </div>
 
         <ScrollArea className="flex-1">
-          <div className="p-2 space-y-1">
-            {mockHistory.map((item) => (
-              <button
-                key={item.id}
-                onClick={() => {
-                  setUrl(item.url);
-                  setResult(item);
-                }}
-                className="w-full text-left p-3 rounded-lg hover:bg-accent transition-colors"
-              >
-                <div className="flex items-start gap-2">
-                  {getStatusIcon(item.status)}
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium text-sm truncate">{item.title}</p>
-                    <p className="text-xs text-muted-foreground truncate mt-1">
-                      {item.url}
-                    </p>
-                    <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground">
-                      <span className="flex items-center gap-1">
-                        <Clock className="h-3 w-3" />
-                        {new Date(item.scrapedAt).toLocaleString("zh-CN", {
-                          month: "short",
-                          day: "numeric",
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })}
-                      </span>
-                      <span>·</span>
-                      <span>{item.wordCount.toLocaleString()} 字</span>
+          {results.length === 0 ? (
+            <div className="p-4 text-center text-sm text-muted-foreground">
+              暂无爬取记录
+            </div>
+          ) : (
+            <div className="p-2 space-y-1">
+              {results.map((item, index) => (
+                <button
+                  key={`${item.url}-${item.scrapedAt}-${index}`}
+                  onClick={() => setCurrentResult(item)}
+                  className={cn(
+                    "w-full text-left p-3 rounded-lg hover:bg-accent transition-colors",
+                    currentResult === item && "bg-accent"
+                  )}
+                >
+                  <div className="flex items-start gap-2">
+                    {getStatusIcon(item.status)}
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-sm truncate">
+                        {item.title || "无标题"}
+                      </p>
+                      <p className="text-xs text-muted-foreground truncate mt-1">
+                        {item.url}
+                      </p>
+                      <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground">
+                        <span className="flex items-center gap-1">
+                          <Clock className="h-3 w-3" />
+                          {formatTime(item.scrapedAt)}
+                        </span>
+                        <span>·</span>
+                        <span>{item.wordCount.toLocaleString()} 字</span>
+                      </div>
                     </div>
                   </div>
-                </div>
-              </button>
-            ))}
-          </div>
+                </button>
+              ))}
+            </div>
+          )}
         </ScrollArea>
       </div>
     </div>

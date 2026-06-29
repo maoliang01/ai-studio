@@ -1,5 +1,8 @@
 from fastapi import APIRouter, HTTPException
 from typing import List
+import logging
+
+logger = logging.getLogger("ai-studio")
 
 from app.schemas.chat import ModelConfigRequest, ModelInfo, TestResult
 from app.core.config import (
@@ -15,12 +18,23 @@ router = APIRouter(prefix="/models", tags=["模型配置"])
 
 @router.post("/sync")
 async def sync_models(models: List[ModelConfigRequest]):
-    """同步前端模型配置到后端"""
-    from app.core.config import ModelConfig
+    """同步前端模型配置到后端（覆盖模式）"""
+    logger.info(f"=== 收到同步模型请求 ===")
+    logger.info(f"待同步模型数量: {len(models)}")
+
+    from app.core.config import ModelConfig, get_llm_config, save_config_to_file
     import re
+
+    # 获取当前配置
+    config = get_llm_config()
+    logger.info(f"同步前模型数量: {len(config.models)}")
+
+    # 构建新模型字典
+    new_models = {}
     for req in models:
         # 生成简洁的 ID
         model_id = re.sub(r'\s+', '-', req.name.lower())
+        logger.info(f"同步模型: {req.name} -> id={model_id}")
         model = ModelConfig(
             id=model_id,
             name=req.name,
@@ -29,21 +43,31 @@ async def sync_models(models: List[ModelConfigRequest]):
             api_key=req.api_key,
             model_name=req.model_name,
         )
-        add_model_config(model)
+        new_models[model_id] = model
+
+    # 覆盖模式：替换所有模型
+    config.models = new_models
+    save_config_to_file(config)
+    logger.info(f"同步后模型数量: {len(config.models)}")
+
     return {"message": f"已同步 {len(models)} 个模型"}
 
 
 @router.get("", response_model=List[ModelInfo])
 async def list_models():
     """获取所有已配置的模型"""
+    import re
     config = get_llm_config()
     models = []
     for model_id, model in config.models.items():
+        # 使用 name 生成一致的 ID
+        display_id = re.sub(r'\s+', '-', model.name.lower())
         models.append(ModelInfo(
-            id=model.id,
+            id=display_id,  # 使用 name 生成一致的 ID
             name=model.name,
             type=model.type,
             base_url=model.base_url,
+            api_key=model.api_key,
             model_name=model.model_name,
             is_connected=model.is_connected,
             latency=model.latency,
@@ -54,11 +78,17 @@ async def list_models():
 
 @router.post("", response_model=ModelInfo)
 async def create_model(config_request: ModelConfigRequest):
-    """添加新模型"""
-    import uuid
-    model_id = f"model-{uuid.uuid4().hex[:8]}"
+    """添加新模型（如果同名模型已存在则更新）"""
+    logger.info(f"=== 收到添加模型请求 ===")
+    logger.info(f"请求数据: name={config_request.name}, type={config_request.type}, base_url={config_request.base_url}")
 
-    from app.core.config import ModelConfig
+    import re
+    # 使用名称生成 ID（与 sync 端点保持一致）
+    model_id = re.sub(r'\s+', '-', config_request.name.lower())
+    logger.info(f"生成模型ID: {model_id}")
+
+    from app.core.config import ModelConfig, get_llm_config
+
     model = ModelConfig(
         id=model_id,
         name=config_request.name,
@@ -69,6 +99,11 @@ async def create_model(config_request: ModelConfigRequest):
     )
 
     add_model_config(model)
+
+    # 获取当前模型列表
+    config = get_llm_config()
+    logger.info(f"添加后共有 {len(config.models)} 个模型: {list(config.models.keys())}")
+
     return ModelInfo(
         id=model.id,
         name=model.name,
@@ -81,13 +116,15 @@ async def create_model(config_request: ModelConfigRequest):
 @router.get("/{model_id}", response_model=ModelInfo)
 async def get_model(model_id: str):
     """获取指定模型信息"""
+    import re
     config = get_llm_config()
     if model_id not in config.models:
         raise HTTPException(status_code=404, detail="模型不存在")
 
     model = config.models[model_id]
+    display_id = re.sub(r'\s+', '-', model.name.lower())
     return ModelInfo(
-        id=model.id,
+        id=display_id,
         name=model.name,
         type=model.type,
         base_url=model.base_url,

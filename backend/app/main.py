@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import chat, models
+from app.api import chat, models, settings, scrape
 
 app = FastAPI(
     title="AI Studio API",
@@ -9,10 +9,10 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS 配置
+# CORS 配置 - 允许所有前端访问
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3001", "http://127.0.0.1:3001"],
+    allow_origins=["*"],  # 允许所有来源
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -21,6 +21,8 @@ app.add_middleware(
 # 注册路由
 app.include_router(chat.router)
 app.include_router(models.router)
+app.include_router(settings.router)
+app.include_router(scrape.router)
 
 
 @app.get("/")

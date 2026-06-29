@@ -43,6 +43,7 @@ const navItems = [
 const settingsSubItems = [
   { href: "/settings", icon: Sliders, label: "基础设置" },
   { href: "/settings/models", icon: BotIcon, label: "大模型配置" },
+  { href: "/settings/scrape", icon: Globe, label: "网页爬取配置" },
 ];
 
 export function AppSidebar() {

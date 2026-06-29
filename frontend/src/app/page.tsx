@@ -29,8 +29,8 @@ import {
   MessageSquare,
   BookOpen,
   Star,
-  MapPin,
   AlertCircle,
+  Square,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -55,6 +55,7 @@ export default function ChatPage() {
     loadModels,
     error,
     setError,
+    stopStreaming,
   } = useChatStore();
 
   // 初始化时加载模型列表，如果没有会话则自动创建
@@ -131,11 +132,14 @@ export default function ChatPage() {
               </div>
             ) : (
               sessions.map((session) => (
-                <button
+                <div
                   key={session.id}
+                  role="button"
+                  tabIndex={0}
                   onClick={() => setCurrentSession(session.id)}
+                  onKeyDown={(e) => e.key === "Enter" && setCurrentSession(session.id)}
                   className={cn(
-                    "w-full text-left px-3 py-2 rounded-lg text-sm transition-colors group",
+                    "w-full text-left px-3 py-2 rounded-lg text-sm transition-colors group cursor-pointer",
                     currentSessionId === session.id
                       ? "bg-primary/10 text-primary"
                       : "hover:bg-accent"
@@ -158,7 +162,7 @@ export default function ChatPage() {
                   <div className="text-xs text-muted-foreground mt-1">
                     {new Date(session.updatedAt).toLocaleDateString("zh-CN")}
                   </div>
-                </button>
+                </div>
               ))
             )}
           </div>
@@ -358,32 +362,50 @@ export default function ChatPage() {
         {/* 输入区域 */}
         <div className="border-t border-border p-4">
           <div className="max-w-4xl mx-auto space-y-3">
-            {/* 模型选择 */}
-            <div className="flex items-center gap-2">
-              <Bot className="h-4 w-4 text-muted-foreground" />
-              <Select value={selectedModel} onValueChange={(value) => value && setModel(value)}>
-                <SelectTrigger className="w-[180px] h-8">
-                  <SelectValue placeholder="选择模型" />
-                </SelectTrigger>
-                <SelectContent>
-                  {availableModels.length === 0 ? (
-                    <div className="p-2 text-sm text-muted-foreground">
-                      暂无可用模型
-                    </div>
-                  ) : (
-                    availableModels.map((model) => (
-                      <SelectItem key={model.id} value={model.id}>
-                        {model.name}
-                      </SelectItem>
-                    ))
-                  )}
-                </SelectContent>
-              </Select>
-              {currentModel && (
-                <span className="text-xs text-muted-foreground">
-                  {currentModel.provider}
-                </span>
-              )}
+            {/* 模型选择和 RAG 开关 */}
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <Bot className="h-4 w-4 text-muted-foreground" />
+                <Select value={selectedModel} onValueChange={(value) => value && setModel(value)}>
+                  <SelectTrigger className="w-[180px] h-8">
+                    <SelectValue placeholder="选择模型" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableModels.length === 0 ? (
+                      <div className="p-2 text-sm text-muted-foreground">
+                        暂无可用模型
+                      </div>
+                    ) : (
+                      availableModels.map((model) => (
+                        <SelectItem key={model.id} value={model.id}>
+                          {model.name}
+                        </SelectItem>
+                      ))
+                    )}
+                  </SelectContent>
+                </Select>
+                {currentModel && (
+                  <span className="text-xs text-muted-foreground">
+                    {currentModel.provider}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <BookOpen className="h-4 w-4 text-muted-foreground" />
+                <Label htmlFor="rag-mode" className="text-sm cursor-pointer">
+                  RAG
+                </Label>
+                <Switch
+                  id="rag-mode"
+                  checked={currentSession?.useRag || false}
+                  onCheckedChange={() =>
+                    currentSessionId &&
+                    useChatStore.getState().toggleRag(currentSessionId)
+                  }
+                  className="scale-90"
+                />
+              </div>
             </div>
 
             {/* 输入框 */}
@@ -399,14 +421,24 @@ export default function ChatPage() {
                   rows={1}
                   disabled={isStreaming}
                 />
-                <Button
-                  size="icon"
-                  onClick={handleSend}
-                  disabled={!input.trim() || isStreaming}
-                  className="shrink-0 h-8 w-8"
-                >
-                  <Send className="h-4 w-4" />
-                </Button>
+                {isStreaming ? (
+                  <Button
+                    size="icon"
+                    onClick={stopStreaming}
+                    className="shrink-0 h-8 w-8 bg-destructive hover:bg-destructive/90"
+                  >
+                    <Square className="h-4 w-4" />
+                  </Button>
+                ) : (
+                  <Button
+                    size="icon"
+                    onClick={handleSend}
+                    disabled={!input.trim() || isStreaming}
+                    className="shrink-0 h-8 w-8"
+                  >
+                    <Send className="h-4 w-4" />
+                  </Button>
+                )}
               </div>
             </Card>
             <p className="text-xs text-muted-foreground text-center">
@@ -414,100 +446,6 @@ export default function ChatPage() {
             </p>
           </div>
         </div>
-      </div>
-
-      {/* 右侧信息面板 */}
-      <div className="w-80 border-l border-border flex flex-col bg-card/50">
-        <div className="p-4 border-b border-border">
-          <h3 className="font-semibold">会话信息</h3>
-        </div>
-
-        <ScrollArea className="flex-1 p-4">
-          <div className="space-y-6">
-            {/* 基本信息 */}
-            <div className="space-y-3">
-              <h4 className="text-sm font-medium text-muted-foreground">
-                基本信息
-              </h4>
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">模型</span>
-                  <span>{currentModel?.name || "未选择"}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">消息数</span>
-                  <span>{currentSession?.messages.length || 0}</span>
-                </div>
-              </div>
-            </div>
-
-            <Separator />
-
-            {/* RAG 设置 */}
-            <div className="space-y-3">
-              <h4 className="text-sm font-medium text-muted-foreground">
-                知识库检索
-              </h4>
-              <div className="flex items-center justify-between">
-                <Label htmlFor="rag-mode" className="cursor-pointer">
-                  启用 RAG
-                </Label>
-                <Switch
-                  id="rag-mode"
-                  checked={currentSession?.useRag || false}
-                  onCheckedChange={() =>
-                    currentSessionId &&
-                    useChatStore.getState().toggleRag(currentSessionId)
-                  }
-                />
-              </div>
-              {currentSession?.useRag && (
-                <div className="space-y-2">
-                  <p className="text-sm text-muted-foreground">
-                    关联文档：
-                  </p>
-                  <div className="space-y-1">
-                    {["产品使用手册 v2.0", "API 开发文档"].map((doc) => (
-                      <div
-                        key={doc}
-                        className="flex items-center gap-2 text-xs p-2 rounded bg-accent/50"
-                      >
-                        <BookOpen className="h-3 w-3" />
-                        <span className="truncate">{doc}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <Separator />
-
-            {/* 操作 */}
-            <div className="space-y-2">
-              {currentSession && currentSession.messages.length > 0 && (
-                <Button
-                  variant="outline"
-                  className="w-full justify-start gap-2 text-destructive hover:text-destructive"
-                  onClick={() => {
-                    if (currentSessionId) clearSession(currentSessionId);
-                  }}
-                >
-                  <Trash2 className="h-4 w-4" />
-                  清空对话
-                </Button>
-              )}
-              <Button variant="outline" className="w-full justify-start gap-2">
-                <Copy className="h-4 w-4" />
-                导出对话
-              </Button>
-              <Button variant="outline" className="w-full justify-start gap-2">
-                <MapPin className="h-4 w-4" />
-                分享对话
-              </Button>
-            </div>
-          </div>
-        </ScrollArea>
       </div>
     </div>
   );

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useSettingsStore } from "@/stores/settings-store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -30,7 +30,21 @@ import {
   Clock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { ModelConfig, ModelType } from "@/types";
+import type { ModelType } from "@/types";
+
+// 模型配置类型（与 settings-store 保持一致）
+interface ModelConfig {
+  id: string;
+  name: string;
+  type: "llm" | "embedding" | "multimodal";
+  baseUrl: string;
+  apiKey?: string;
+  modelName?: string;
+  isConnected?: boolean;
+  latency?: number;
+  lastTestedAt?: Date;
+  createdAt: Date;
+}
 
 const modelTypeInfo: Record<ModelType, { label: string; icon: typeof Bot; color: string }> = {
   llm: { label: "大语言模型", icon: Brain, color: "text-blue-500 bg-blue-500/10" },
@@ -39,11 +53,16 @@ const modelTypeInfo: Record<ModelType, { label: string; icon: typeof Bot; color:
 };
 
 export default function ModelsPage() {
-  const { models, addModel, updateModel, deleteModel, testModel } = useSettingsStore();
+  const { models, addModel, updateModel, deleteModel, testModel, syncModelsFromBackend } = useSettingsStore();
 
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [editingModel, setEditingModel] = useState<ModelConfig | null>(null);
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set());
+
+  // 页面加载时从后端同步模型
+  useEffect(() => {
+    syncModelsFromBackend();
+  }, [syncModelsFromBackend]);
 
   const [formData, setFormData] = useState<{
     name: string;

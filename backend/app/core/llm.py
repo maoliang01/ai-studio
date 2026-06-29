@@ -93,18 +93,35 @@ class LLMService:
                 model_config.get("base_url", ""),
                 model_config.get("api_key", "")
             )
-            response = await client.chat.completions.create(
-                model=model_config.get("model_name", "gpt-4o"),
-                messages=[{"role": "user", "content": "Hi"}],
-                max_tokens=5,
-            )
-            latency = int((time.time() - start_time) * 1000)
+            model_type = model_config.get("type", "")
+            model_name = model_config.get("model_name", "gpt-4o")
 
-            return {
-                "success": True,
-                "latency": latency,
-                "model": response.model,
-            }
+            # 根据模型类型选择不同的测试方式
+            if model_type == "embedding":
+                # Embedding 模型使用 embeddings API
+                response = await client.embeddings.create(
+                    model=model_name,
+                    input="Hello world",
+                )
+                latency = int((time.time() - start_time) * 1000)
+                return {
+                    "success": True,
+                    "latency": latency,
+                    "model": model_name,
+                }
+            else:
+                # LLM 和多模态模型使用 chat API
+                response = await client.chat.completions.create(
+                    model=model_name,
+                    messages=[{"role": "user", "content": "Hi"}],
+                    max_tokens=5,
+                )
+                latency = int((time.time() - start_time) * 1000)
+                return {
+                    "success": True,
+                    "latency": latency,
+                    "model": response.model,
+                }
         except Exception as e:
             return {"success": False, "error": str(e)}
 
