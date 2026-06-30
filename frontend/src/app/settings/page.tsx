@@ -1,7 +1,5 @@
 "use client";
 
-import Link from "next/link";
-import { useState } from "react";
 import { useSettingsStore } from "@/stores/settings-store";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -12,12 +10,8 @@ import {
   Sun,
   Moon,
   Monitor,
-  Bot,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-
-// Bot 重命名为 BotIcon 避免与类型冲突
-const BotIcon = Bot;
 
 const colorOptions = [
   { id: "indigo", name: "靛蓝", color: "bg-indigo-500" },
@@ -153,40 +147,6 @@ export default function SettingsPage() {
                 </Button>
               </Card>
             </div>
-          </div>
-        </Card>
-
-        {/* 模型配置入口 */}
-        <Card className="p-6">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
-              <BotIcon className="h-5 w-5 text-primary" />
-            </div>
-            <div className="flex-1">
-              <h2 className="text-lg font-semibold">大模型配置</h2>
-              <p className="text-sm text-muted-foreground">
-                管理 AI 模型连接，支持添加自定义模型和测速
-              </p>
-            </div>
-            <Link
-              href="/settings/models"
-              className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium border border-input background-transparent hover:bg-accent hover:text-accent-foreground h-9 px-4 py-2"
-            >
-              管理模型
-            </Link>
-          </div>
-
-          <div className="grid grid-cols-3 gap-4">
-            {[
-              { type: "llm", label: "大语言模型", count: 1 },
-              { type: "embedding", label: "向量模型", count: 1 },
-              { type: "multimodal", label: "多模态模型", count: 0 },
-            ].map((item) => (
-              <div key={item.type} className="p-3 rounded-lg bg-muted/50 text-center">
-                <p className="text-2xl font-bold">{item.count}</p>
-                <p className="text-xs text-muted-foreground">{item.label}</p>
-              </div>
-            ))}
           </div>
         </Card>
       </div>
