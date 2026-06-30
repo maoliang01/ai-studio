@@ -1,27 +1,5 @@
 {
   "models": {
-    "minimax-abab6-chat": {
-      "id": "minimax-abab6-chat",
-      "name": "MiniMax-abab6-chat",
-      "type": "llm",
-      "base_url": "https://api.minimax.chat/v1",
-      "api_key": "",
-      "model_name": "abab6-chat",
-      "is_connected": false,
-      "latency": null,
-      "last_tested_at": null
-    },
-    "test-model": {
-      "id": "test-model",
-      "name": "Test Model",
-      "type": "llm",
-      "base_url": "https://api.test.com/v1",
-      "api_key": "test-key",
-      "model_name": "test-model",
-      "is_connected": false,
-      "latency": null,
-      "last_tested_at": null
-    },
     "minimax-m27": {
       "id": "minimax-m27",
       "name": "minimax-m27",
@@ -33,17 +11,39 @@
       "latency": null,
       "last_tested_at": null
     },
+    "gpt-oss-120b": {
+      "id": "gpt-oss-120b",
+      "name": "gpt-oss-120b",
+      "type": "llm",
+      "base_url": "https://uni-api.cstcloud.cn/v1",
+      "api_key": "c37fd396c3f2da91e6fe7ac162e8af45fcaee11cc8aab80c0e40a63479f5f36e",
+      "model_name": "gpt-oss-120b",
+      "is_connected": false,
+      "latency": null,
+      "last_tested_at": null
+    },
     "deepseek-v4-flash": {
       "id": "deepseek-v4-flash",
       "name": "deepseek-v4-flash",
       "type": "llm",
       "base_url": "https://uni-api.cstcloud.cn/v1",
-      "api_key": "c37fd396c3f2da91e6fe7ac162e8af45fcaee11cc8aab80c0e40a63479f5f36e",
+      "api_key": "c37fd396c3f2da91e6fe7ac162e8af45fcaee11cc8aaa80c0e40a63479f5f36e",
       "model_name": "deepseek-v4-flash",
+      "is_connected": false,
+      "latency": null,
+      "last_tested_at": null
+    },
+    "qwen3.5": {
+      "id": "qwen3.5",
+      "name": "qwen3.5",
+      "type": "multimodal",
+      "base_url": "https://uni-api.cstcloud.cn/v1",
+      "api_key": "c37fd396c3f2da91e6fe7ac162e8af45fcaee11cc8aab80c0e40a63479f5f36e",
+      "model_name": "qwen3.5",
       "is_connected": false,
       "latency": null,
       "last_tested_at": null
     }
   },
-  "default_llm": "minimax-abab6-chat"
+  "default_llm": "minimax-m27"
 }

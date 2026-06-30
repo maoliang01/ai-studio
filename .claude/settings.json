@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(kill -9 592376)",
+      "Bash(nohup python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(f'✅ 后端已启动，运行 {len\\(d\\)} 个模型'\\)\")",
+      "Bash(kill -9 592553)",
+      "Bash(curl -s -X POST \"http://localhost:8000/models/qwen3.5/test\")",
+      "Bash(curl -s -X POST http://localhost:8000/scrape -H \"Content-Type: application/json\" -d '{\"url\": \"https://news.ycombinator.com\"}')",
+      "Bash(curl -s -X POST http://localhost:8000/scrape -H \"Content-Type: application/json\" -d '{\"url\": \"https://news.ycombinator.com\"}' -v)",
+      "Bash(pip install *)",
+      "Bash(pkill -f \"uvicorn app.main:app\")",
+      "Bash(curl -s -X POST http://localhost:8000/scrape -H 'Content-Type: application/json' -d '{\"url\": \"https://www.cas.cn/yw/2026/t20260618_5112884.shtml\"}')",
+      "Bash(pkill -f uvicorn)",
+      "Bash(python3 -m uvicorn app.main:app --reload --port 8000)",
+      "Bash(curl -s http://localhost:8000/docs)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3001/)",
+      "Bash(curl -s -X POST http://localhost:8000/api/scrape/deep -H 'Content-Type: application/json' -d '{\"url\": \"https://www.qstheory.cn/cpc/index.htm\", \"max_articles\": 5}')",
+      "Bash(curl -s http://localhost:8000/api/scrape/deep)",
+      "Bash(curl -s -X POST http://localhost:8000/scrape/deep -H 'Content-Type: application/json' -d '{\"url\": \"https://www.qstheory.cn/cpc/index.htm\", \"max_articles\": 5}')",
+      "Bash(timeout 15 curl -s -m 10 -X POST http://localhost:8000/scrape/deep -H 'Content-Type: application/json' -d '{\"url\": \"https://www.qstheory.cn/cpc/index.htm\", \"max_articles\": 5}')",
+      "Bash(curl -s -X POST http://localhost:8000/scrape/deep -H 'Content-Type: application/json' -d '{\"url\": \"https://www.qstheory.cn/cpc/index.htm\", \"max_articles\": 5}' --max-time 5)"
+    ]
+  }
+}

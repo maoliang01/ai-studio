@@ -2,6 +2,9 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
+import json
+import os
+from pathlib import Path
 
 router = APIRouter(prefix="/settings", tags=["设置"])
 
@@ -39,7 +42,10 @@ class SaveSettingsRequest(BaseModel):
     scrape_sources: Optional[List[ScrapeSourceRequest]] = None
 
 
-# ============ 内存存储（生产环境应使用数据库）============
+# ============ 文件持久化存储 ============
+
+SETTINGS_FILE = Path(__file__).parent.parent.parent / "data" / "settings.json"
+
 
 class SettingsStore:
     def __init__(self):
@@ -49,6 +55,45 @@ class SettingsStore:
         }
         self.scrape_sources = {}
         self._source_counter = 0
+        self._load_from_file()
+
+    def _ensure_data_dir(self):
+        """确保数据目录存在"""
+        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    def _load_from_file(self):
+        """从文件加载配置"""
+        if SETTINGS_FILE.exists():
+            try:
+                with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.settings = data.get("settings", self.settings)
+                    self.scrape_sources = data.get("scrape_sources", {})
+                    # 更新计数器到最大值
+                    for source_id in self.scrape_sources.keys():
+                        try:
+                            parts = source_id.split("_")
+                            if len(parts) >= 2:
+                                counter = int(parts[1])
+                                if counter > self._source_counter:
+                                    self._source_counter = counter
+                        except:
+                            pass
+            except Exception as e:
+                print(f"加载配置文件失败: {e}")
+
+    def _save_to_file(self):
+        """保存配置到文件"""
+        self._ensure_data_dir()
+        try:
+            data = {
+                "settings": self.settings,
+                "scrape_sources": self.scrape_sources,
+            }
+            with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"保存配置文件失败: {e}")
 
     def get_settings(self) -> dict:
         sources = []
@@ -73,6 +118,7 @@ class SettingsStore:
             self.settings["theme"] = data["theme"]
         if "primary_color" in data and data["primary_color"]:
             self.settings["primary_color"] = data["primary_color"]
+        self._save_to_file()
 
     def add_scrape_source(self, source: dict) -> ScrapeSourceResponse:
         self._source_counter += 1
@@ -89,6 +135,7 @@ class SettingsStore:
             "updated_at": now,
         }
         self.scrape_sources[source_id] = new_source
+        self._save_to_file()
         return ScrapeSourceResponse(**new_source)
 
     def update_scrape_source(self, source_id: str, updates: dict) -> Optional[ScrapeSourceResponse]:
@@ -99,11 +146,13 @@ class SettingsStore:
             if key != "id" and key != "created_at":
                 source[key] = value
         source["updated_at"] = datetime.now().isoformat()
+        self._save_to_file()
         return ScrapeSourceResponse(**source)
 
     def delete_scrape_source(self, source_id: str) -> bool:
         if source_id in self.scrape_sources:
             del self.scrape_sources[source_id]
+            self._save_to_file()
             return True
         return False
 
@@ -113,6 +162,7 @@ class SettingsStore:
         source = self.scrape_sources[source_id]
         source["is_enabled"] = not source["is_enabled"]
         source["updated_at"] = datetime.now().isoformat()
+        self._save_to_file()
         return ScrapeSourceResponse(**source)
 
 

@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import chat, models, settings, scrape
+from app.api import chat, models, settings, scrape, firecrawl
 
 app = FastAPI(
     title="AI Studio API",
@@ -23,6 +23,7 @@ app.include_router(chat.router)
 app.include_router(models.router)
 app.include_router(settings.router)
 app.include_router(scrape.router)
+app.include_router(firecrawl.router)
 
 
 @app.get("/")

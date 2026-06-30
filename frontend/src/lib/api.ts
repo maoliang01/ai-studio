@@ -10,6 +10,8 @@ import type {
   TestResult,
   ScrapeOptions,
   ScrapeResult,
+  TabAnalyzeParams,
+  TabAnalyzeResult,
 } from "@/types";
 
 const API_BASE = "/api";
@@ -230,6 +232,187 @@ export async function scrapeBatch(urls: string[], options?: Partial<ScrapeOption
 
   if (!response.ok) {
     throw new Error(`批量爬取失败: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * 分析 URL 的页签结构
+ *
+ * @param params 分析参数
+ * @returns 页签树结构
+ */
+export async function analyzeTabs(params: TabAnalyzeParams): Promise<TabAnalyzeResult> {
+  const response = await fetch(`${API_BASE}/scrape/tabs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      url: params.url,
+      include_nav: params.includeNav ?? true,
+      include_tabs: params.includeTabs ?? true,
+      max_depth: params.maxDepth ?? 3,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.error || `页签分析失败: ${response.status}`);
+  }
+
+  // 后端返回 snake_case，这里转换为 camelCase
+  const data = await response.json();
+
+  if (data.tree) {
+    data.tree = normalizeTabTree(data.tree);
+  }
+
+  return data;
+}
+
+/**
+ * 规范化后端返回的 TabTree，将 snake_case 转换为 camelCase
+ */
+interface RawTabTree {
+  domain: string;
+  site_title?: string;
+  siteTitle?: string;
+  root: RawTabNode;
+  all_nodes?: RawTabNode[];
+  allNodes?: RawTabNode[];
+  generated_at?: string;
+  generatedAt?: string;
+  total_count?: number;
+  totalCount?: number;
+}
+
+interface RawTabNode {
+  id: string;
+  label: string;
+  url: string;
+  children?: RawTabNode[];
+  level?: number;
+  type?: string;
+  expandable?: boolean;
+  url_pattern?: string;
+  urlPattern?: string;
+}
+
+function normalizeTabTree(tree: RawTabTree) {
+  return {
+    domain: tree.domain,
+    siteTitle: tree.site_title || tree.siteTitle || tree.domain,
+    root: normalizeTabNode(tree.root),
+    allNodes: (tree.all_nodes || tree.allNodes || []).map(normalizeTabNode),
+    generatedAt: tree.generated_at || tree.generatedAt || new Date().toISOString(),
+    totalCount: tree.total_count ?? tree.totalCount ?? 0,
+  };
+}
+
+/**
+ * 规范化 TabNode，将 snake_case 转换为 camelCase
+ */
+function normalizeTabNode(node: RawTabNode): {
+  id: string;
+  label: string;
+  url: string;
+  children: ReturnType<typeof normalizeTabNode>[];
+  level?: number;
+  type?: string;
+  expandable?: boolean;
+  urlPattern?: string | null;
+} {
+  return {
+    id: node.id,
+    label: node.label,
+    url: node.url,
+    children: (node.children || []).map((c) => normalizeTabNode(c)),
+    level: node.level,
+    type: node.type,
+    expandable: node.expandable,
+    urlPattern: node.url_pattern,
+  };
+}
+
+// ================================================
+// Firecrawl API
+// ================================================
+
+export interface FirecrawlScrapeResult {
+  success: boolean;
+  url: string;
+  title: string;
+  content: string;
+  html: string;
+  word_count: number;
+  links: string[];
+  status: string;
+  error_message?: string;
+}
+
+export interface FirecrawlMapResult {
+  success: boolean;
+  url: string;
+  links: string[];
+  metadata: {
+    title?: string;
+    description?: string;
+  };
+  error_message?: string;
+}
+
+export interface FirecrawlHealthResult {
+  available: boolean;
+  url: string;
+  message: string;
+}
+
+/**
+ * 检查 Firecrawl 服务状态
+ */
+export async function checkFirecrawlHealth(): Promise<FirecrawlHealthResult> {
+  const response = await fetch(`${API_BASE}/firecrawl/health`);
+  if (!response.ok) {
+    throw new Error(`检查 Firecrawl 状态失败: ${response.status}`);
+  }
+  return response.json();
+}
+
+/**
+ * 使用 Firecrawl 爬取网页
+ */
+export async function firecrawlScrape(
+  url: string,
+  formats?: string[]
+): Promise<FirecrawlScrapeResult> {
+  const response = await fetch(`${API_BASE}/firecrawl/scrape`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      url,
+      formats: formats || ["markdown", "html", "links"],
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Firecrawl 爬取失败: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+/**
+ * 使用 Firecrawl 获取网站地图
+ */
+export async function firecrawlMap(url: string): Promise<FirecrawlMapResult> {
+  const response = await fetch(`${API_BASE}/firecrawl/map`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Firecrawl 获取地图失败: ${response.status}`);
   }
 
   return response.json();

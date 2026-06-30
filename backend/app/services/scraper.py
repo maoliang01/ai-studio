@@ -11,9 +11,12 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, date, timedelta
+
+if TYPE_CHECKING:
+    from bs4 import BeautifulSoup
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 
@@ -21,6 +24,66 @@ from app.services.website_classifier import WebsiteClassifier, get_website_profi
 from app.services.extractor_registry import ExtractorRegistry, smart_extract
 
 logger = logging.getLogger(__name__)
+
+# ================================================
+# 内容质量最低阈值
+# ================================================
+MIN_CONTENT_WORDS = 50  # 内容少于50字的文章将被过滤（避免完全为空的内容）
+
+
+# ================================================
+# 进度事件管理器（用于SSE实时推送）
+# ================================================
+class ScrapeProgress:
+    """爬取进度事件管理器"""
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._callbacks = []
+            cls._instance._current_progress = {}
+        return cls._instance
+
+    def subscribe(self, callback):
+        """订阅进度事件"""
+        self._callbacks.append(callback)
+        return lambda: self._callbacks.remove(callback)
+
+    def emit(self, scrape_id: str, event: str, data: dict):
+        """发送进度事件"""
+        event_data = {
+            "scrape_id": scrape_id,
+            "event": event,
+            "data": data,
+            "timestamp": datetime.now().isoformat(),
+        }
+        self._current_progress[scrape_id] = event_data
+        for callback in self._callbacks:
+            try:
+                callback(event_data)
+            except Exception:
+                pass
+
+    def set_progress(self, scrape_id: str, progress: dict):
+        """设置进度状态（供轮询使用）"""
+        self._current_progress[scrape_id] = {
+            **progress,
+            "scrape_id": scrape_id,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+    def get_progress(self, scrape_id: str) -> dict:
+        """获取当前进度"""
+        return self._current_progress.get(scrape_id, {})
+
+    def clear_progress(self, scrape_id: str):
+        """清除进度记录"""
+        self._current_progress.pop(scrape_id, None)
+
+
+progress_manager = ScrapeProgress()
+
 
 # ================================================
 # 爬取专用日志记录器
@@ -138,7 +201,7 @@ class ScrapedResult:
 class WebScraper:
     """网页爬取引擎"""
 
-    def __init__(self):
+    def __init__(self, cancel_event: Optional[asyncio.Event] = None):
         self._browser_config = BrowserConfig(
             headless=True,
             verbose=False,
@@ -146,6 +209,16 @@ class WebScraper:
         self._llm_service = None  # 延迟初始化
         self._classifier = WebsiteClassifier()  # 网站类型识别器
         self._registry = ExtractorRegistry()  # 提取器注册表
+        self._cancel_event = cancel_event  # 取消事件
+
+    def _is_cancelled(self) -> bool:
+        """检查是否已取消"""
+        return self._cancel_event is not None and self._cancel_event.is_set()
+
+    def _check_cancelled(self):
+        """检查并抛出取消异常"""
+        if self._is_cancelled():
+            raise asyncio.CancelledError("爬取已取消")
 
     def _get_llm_service(self):
         """获取 LLM 服务（延迟加载避免循环导入）"""
@@ -526,6 +599,511 @@ class WebScraper:
                 break
 
         return result
+
+    def _extract_published_date_from_html(self, html: str, url: str = "") -> Optional[str]:
+        """
+        从 HTML 多源提取发布日期，优先级：
+        1. JSON-LD (Schema.org NewsArticle)
+        2. Meta 标签 (article:published_time, datePublished, og:article:published_time)
+        3. <time> 元素中的 datetime 属性
+        4. 特定 class/id 的日期容器（中科院等国内网站常见模式）
+        5. 文章内容区域的日期文本（如 "2026年6月27日"）
+
+        Args:
+            html: 网页 HTML
+            url: 网页 URL（用于日志记录）
+
+        Returns:
+            str: 规范化的日期字符串 YYYY-MM-DD，或 None
+        """
+        from bs4 import BeautifulSoup
+
+        try:
+            soup = BeautifulSoup(html, 'lxml')
+
+            # 1. JSON-LD（最权威的来源）
+            date_str = self._extract_date_from_jsonld(soup)
+            if date_str:
+                normalized = self._normalize_date(date_str)
+                if normalized:
+                    scrape_logger.debug(f"从 JSON-LD 提取到日期: {normalized}")
+                    return normalized
+
+            # 2. Meta 标签
+            date_str = self._extract_date_from_meta(soup)
+            if date_str:
+                normalized = self._normalize_date(date_str)
+                if normalized:
+                    scrape_logger.debug(f"从 Meta 标签提取到日期: {normalized}")
+                    return normalized
+
+            # 3. <time> 元素（优先找 article/post/main 等内容区的 time）
+            date_str = self._extract_date_from_time_element(soup)
+            if date_str:
+                normalized = self._normalize_date(date_str)
+                if normalized:
+                    scrape_logger.debug(f"从 <time> 元素提取到日期: {normalized}")
+                    return normalized
+
+            # 4. 特定 class/id 的日期容器（国内政府/科研网站常见模式）
+            date_str = self._extract_date_from_domestic_patterns(soup)
+            if date_str:
+                normalized = self._normalize_date(date_str)
+                if normalized:
+                    scrape_logger.debug(f"从国内网站模式提取到日期: {normalized}")
+                    return normalized
+
+            # 5. 从内容中的日期文本提取（常见格式）
+            date_str = self._extract_date_from_content_text(soup)
+            if date_str:
+                normalized = self._normalize_date(date_str)
+                if normalized:
+                    scrape_logger.debug(f"从内容文本提取到日期: {normalized}")
+                    return normalized
+
+            # 6. 扫描整个页面找最明显的日期
+            date_str = self._extract_date_from_page_scan(soup)
+            if date_str:
+                normalized = self._normalize_date(date_str)
+                if normalized:
+                    scrape_logger.debug(f"从页面扫描提取到日期: {normalized}")
+                    return normalized
+
+            return None
+
+        except Exception as e:
+            scrape_logger.debug(f"日期提取失败: {e}")
+            return None
+
+    def _extract_date_from_jsonld(self, soup: "BeautifulSoup") -> Optional[str]:
+        """从 JSON-LD 提取日期"""
+        for script in soup.find_all('script', type='application/ld+json'):
+            try:
+                data = json.loads(script.string)
+                # 处理单一对象
+                if isinstance(data, dict):
+                    if data.get('datePublished'):
+                        return data['datePublished']
+                    # Schema.org NewsArticle 格式
+                    if data.get('dateCreated'):
+                        return data['dateCreated']
+                # 处理数组
+                elif isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict):
+                            if item.get('datePublished'):
+                                return item['datePublished']
+                            if item.get('dateCreated'):
+                                return item['dateCreated']
+            except Exception:
+                continue
+        return None
+
+    def _extract_date_from_meta(self, soup: "BeautifulSoup") -> Optional[str]:
+        """从 Meta 标签提取日期"""
+        selectors = [
+            {'property': 'article:published_time'},
+            {'property': 'datePublished'},
+            {'name': 'publishdate'},
+            {'name': 'date'},
+            {'property': 'og:article:published_time'},
+        ]
+        for attrs in selectors:
+            tag = soup.find('meta', attrs=attrs)
+            if tag and tag.get('content'):
+                return tag['content']
+        return None
+
+    def _extract_date_from_time_element(self, soup: "BeautifulSoup") -> Optional[str]:
+        """从 <time> 元素提取日期"""
+        # 优先找主内容区的 time 标签（带 class 或 id 的）
+        content_tags = soup.find_all(['article', 'main', 'div'], class_=lambda x: x and any(k in str(x).lower() for k in ['article', 'content', 'post', 'main', 'entry']))
+        for container in content_tags:
+            time_tag = container.find('time', datetime=True)
+            if time_tag:
+                datetime_val = time_tag.get('datetime', '')
+                if datetime_val:
+                    return datetime_val
+
+        # 找所有带 datetime 属性的 time 标签
+        for time_tag in soup.find_all('time', datetime=True):
+            datetime_val = time_tag.get('datetime', '')
+            if datetime_val:
+                return datetime_val
+
+        # 找文本内容是日期的 time 标签
+        for time_tag in soup.find_all('time'):
+            text = time_tag.get_text(strip=True)
+            if re.search(r'\d{4}[-/年]', text):
+                return text
+
+        return None
+
+    def _extract_date_from_content_text(self, soup: "BeautifulSoup") -> Optional[str]:
+        """
+        从文章内容区域提取日期文本
+        通常在标题下方或文章开头会有发布日期
+        """
+        # 查找常见的日期容器
+        date_containers = soup.find_all(['div', 'span', 'p', 'font'],
+            class_=lambda x: x and any(k in str(x).lower() for k in ['date', 'time', 'pub', 'publish', 'create', 'update']))
+
+        for container in date_containers:
+            text = container.get_text(strip=True)
+            # 匹配中文日期格式
+            match = re.search(r'(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日', text)
+            if match:
+                return f"{match.group(1)}-{match.group(2).zfill(2)}-{match.group(3).zfill(2)}"
+
+            # 匹配 YYYY-MM-DD 格式
+            match = re.search(r'(\d{4})-(\d{2})-(\d{2})', text)
+            if match:
+                return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+
+            # 匹配 YYYY/MM/DD 格式
+            match = re.search(r'(\d{4})/(\d{2})/(\d{2})', text)
+            if match:
+                return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+
+        return None
+
+    def _extract_date_from_domestic_patterns(self, soup: "BeautifulSoup") -> Optional[str]:
+        """
+        从国内网站的常见 DOM 模式提取日期
+        例如中科院网站、政府网站等
+
+        Returns:
+            str: 日期字符串或 None
+        """
+        # 国内网站常见的日期容器 class/id 模式
+        date_patterns = [
+            # 常见 class 名
+            {'class': lambda x: x and any(k in str(x).lower() for k in [
+                'date', 'time', 'pub', 'publish', 'create', 'update', 'info', 'tips', 'source'
+            ])},
+            # 常见 id 名
+            {'id': lambda x: x and any(k in str(x).lower() for k in [
+                'date', 'time', 'pub', 'publish', 'create', 'update'
+            ])},
+        ]
+
+        for pattern in date_patterns:
+            elements = soup.find_all(['div', 'span', 'p', 'font', 'td', 'li'], **pattern)
+            for elem in elements:
+                text = elem.get_text(strip=True)
+                # 跳过太长的文本
+                if len(text) > 100:
+                    continue
+                # 匹配各种日期格式
+                for regex, fmt in [
+                    (r'(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日', '%s-%s-%s'),
+                    (r'(\d{4})-(\d{2})-(\d{2})', '%s-%s-%s'),
+                    (r'(\d{4})/(\d{2})/(\d{2})', '%s-%s-%s'),
+                    (r'(\d{4})\.(\d{2})\.(\d{2})', '%s-%s-%s'),
+                ]:
+                    match = re.search(regex, text)
+                    if match:
+                        if fmt == '%s-%s-%s':
+                            groups = match.groups()
+                            # 检查是否是有效的日期
+                            try:
+                                year, month, day = groups
+                                month = month.lstrip('0') or '1'
+                                day = day.lstrip('0') or '1'
+                                y, m, d = int(year), int(month), int(day)
+                                if 2000 <= y <= 2100 and 1 <= m <= 12 and 1 <= d <= 31:
+                                    return f"{y}-{int(month):02d}-{int(day):02d}"
+                            except:
+                                pass
+
+        # 查找标题附近的日期（通常在标题后面紧跟日期）
+        # 常见模式：标题 + 日期 在同一个容器内
+        title_container = soup.find(['h1', 'h2', 'h3', 'div', 'article'],
+            class_=lambda x: x and any(k in str(x).lower() for k in ['title', 'head', 'article-title', 'news-title']))
+        if title_container:
+            # 查看标题容器的父元素或相邻元素
+            parent = title_container.parent
+            if parent:
+                # 查找父容器中的日期
+                date_elements = parent.find_all(['span', 'div', 'font', 'p'],
+                    class_=lambda x: x and any(k in str(x).lower() for k in ['date', 'time', 'pub']))
+                for elem in date_elements:
+                    text = elem.get_text(strip=True)
+                    match = re.search(r'(\d{4})\s*[-年/]\s*(\d{1,2})\s*[-月/]\s*(\d{1,2})', text)
+                    if match:
+                        return f"{match.group(1)}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
+
+        return None
+
+    def _extract_date_from_page_scan(self, soup: "BeautifulSoup") -> Optional[str]:
+        """
+        扫描整个页面寻找最明显的日期
+        通常发布日期会突出显示
+
+        Returns:
+            str: 日期字符串或 None
+        """
+        # 寻找带特定样式的日期元素
+        style_date_patterns = [
+            # 常见的内联样式日期
+            {'style': lambda x: x and 'color' in str(x)},
+        ]
+
+        # 查找文章区域（通常在 main, article, content 等标签内）
+        content_areas = soup.find_all(['article', 'main', 'div'],
+            class_=lambda x: x and any(k in str(x).lower() for k in [
+                'article', 'content', 'main', 'detail', 'text', 'show', 'news'
+            ]))
+
+        for area in content_areas[:3]:  # 只检查前3个匹配的区域
+            # 在内容区域内查找日期
+            text = area.get_text()
+            if len(text) < 5000:  # 确保是有效的内容区域
+                # 优先找文章标题后的日期模式
+                # 格式：2026年6月27日 或 2026-06-27 或 2026.06.27
+                for regex in [
+                    r'(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日',
+                    r'发布时间[：:]\s*(\d{4})[-年](\d{1,2})[-月](\d{1,2})',
+                    r'发布日期[：:]\s*(\d{4})[-年](\d{1,2})[-月](\d{1,2})',
+                    r'(\d{4})[-/.](\d{2})[-/.](\d{2})',
+                ]:
+                    match = re.search(regex, text)
+                    if match:
+                        groups = match.groups()
+                        try:
+                            return f"{int(groups[0])}-{int(groups[1]):02d}-{int(groups[2]):02d}"
+                        except:
+                            pass
+
+        return None
+
+    def _extract_date_from_url(self, url: str) -> Optional[str]:
+        """
+        从 URL 提取日期
+        支持多种 URL 日期格式：
+        - t20260627_id.shtml 文件名格式（如 https://xxx/202606/t20260627_8234968.html）
+        - /2026/06/27/ 目录格式
+        - /20260627/ 紧凑目录格式
+        """
+        # 模式1: t20260627 或 t20260629_xxx 格式（最常见的中科院网站格式）
+        match = re.search(r'/t(\d{8})_\d+\.', url)
+        if match:
+            date_str = match.group(1)
+            return f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+
+        # 模式2: /2026/06/27/ 或 /2026/6/27/ 目录格式
+        match = re.match(r'.*?/(\d{4})/(\d{1,2})/(\d{1,2})/', url)
+        if match:
+            year, month, day = match.groups()
+            return f"{year}-{int(month):02d}-{int(day):02d}"
+
+        # 模式3: /202606/ 目录 + 文件 /xxx.html（没有日期目录）
+        match = re.search(r'/(\d{6})/[^/]+\.s?html?', url)
+        if match:
+            date_str = match.group(1)
+            # 检查是否是有效的日期
+            try:
+                year = int(date_str[:4])
+                month = int(date_str[4:6])
+                if 2000 <= year <= 2100 and 1 <= month <= 12:
+                    return f"{date_str[:4]}-{date_str[4:6]}-01"
+            except:
+                pass
+
+        # 模式4: /20260627/ 紧凑格式
+        match = re.match(r'.*?/(\d{4})(\d{2})(\d{2})/', url)
+        if match:
+            year, month, day = match.groups()
+            return f"{year}-{month}-{day}"
+
+        # 模式5: /202606/ 年月目录
+        match = re.search(r'/(\d{4})(\d{2})/', url)
+        if match:
+            date_str = match.group(0).strip('/')
+            try:
+                year = int(date_str[:4])
+                month = int(date_str[4:6])
+                if 2000 <= year <= 2100 and 1 <= month <= 12:
+                    return f"{date_str[:4]}-{date_str[4:6]}-01"
+            except:
+                pass
+
+        return None
+
+    def _normalize_date(self, date_str: str) -> Optional[str]:
+        """将各种日期格式规范化为 YYYY-MM-DD"""
+        if not date_str:
+            return None
+
+        # ISO 格式预处理：去掉时间和时区
+        date_str = date_str.split('T')[0].split('+')[0].strip()
+        date_str = date_str.split('Z')[0].strip()
+
+        formats = [
+            "%Y-%m-%d",
+            "%Y/%m/%d",
+            "%Y%m%d",
+            "%Y年%m月%d日",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y/%m/%d %H:%M:%S",
+        ]
+        for fmt in formats:
+            try:
+                return datetime.strptime(date_str, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        return None
+
+    def _filter_by_date(
+        self,
+        articles: List["ScrapedResult"],
+        date_range: Optional[str] = None,
+        custom_range: Optional[dict] = None
+    ) -> List["ScrapedResult"]:
+        """
+        根据日期范围过滤文章
+
+        Args:
+            articles: 文章列表
+            date_range: 预设选项 ("today", "week", "month")
+            custom_range: 自定义日期范围 {"start_date": date, "end_date": date}
+
+        Returns:
+            List[ScrapedResult]: 过滤后的文章列表
+        """
+        scrape_logger.info(f"日期过滤开始 | date_range={date_range}, custom_range={custom_range}, 文章数={len(articles)}")
+
+        if not date_range and not custom_range:
+            scrape_logger.info("日期过滤跳过：无过滤条件，返回全部")
+            return articles  # 无过滤条件，返回全部
+
+        # 计算目标日期范围
+        today = date.today()
+
+        if date_range:
+            if date_range == "today":
+                start_date = today
+                end_date = today
+            elif date_range == "week":
+                start_date = today - timedelta(days=7)
+                end_date = today
+            elif date_range == "month":
+                start_date = today - timedelta(days=30)
+                end_date = today
+            else:
+                return articles
+        elif custom_range:
+            start_date = custom_range.get("start_date")
+            end_date = custom_range.get("end_date")
+            if not start_date:
+                start_date = date(2000, 1, 1)  # 无起始日期则从最早开始
+            if not end_date:
+                end_date = today
+        else:
+            return articles
+
+        scrape_logger.info(f"日期范围: {start_date} 至 {end_date}")
+
+        # 过滤
+        filtered = []
+        filtered_count = 0
+        skipped_count = 0
+        no_date_count = 0
+
+        for article in articles:
+            scrape_logger.debug(f"检查文章: {article.url}, published_at={article.published_at}")
+
+            # 没有发布日期的文章：严格模式下排除，放宽模式下保留
+            if not article.published_at:
+                no_date_count += 1
+                # 为了时间控制生效，我们不保留无日期的文章
+                # 用户设置了时间范围，说明只想要确定在该范围内的文章
+                scrape_logger.debug(f"文章无发布日期，跳过: {article.url}")
+                skipped_count += 1
+                continue
+
+            try:
+                pub_date = self._parse_date_to_date(article.published_at)
+                if pub_date:
+                    if start_date <= pub_date <= end_date:
+                        filtered.append(article)
+                        filtered_count += 1
+                        scrape_logger.debug(f"日期 {pub_date} 在范围内 [{start_date} ~ {end_date}]，保留: {article.title[:30]}")
+                    else:
+                        scrape_logger.debug(f"日期 {pub_date} 超出范围 [{start_date} ~ {end_date}]，跳过: {article.title[:30]}")
+                        skipped_count += 1
+                else:
+                    # 无法解析日期，跳过
+                    scrape_logger.warning(f"无法解析日期 '{article.published_at}'，跳过: {article.url}")
+                    skipped_count += 1
+            except Exception as e:
+                scrape_logger.error(f"日期解析异常: {e}")
+                skipped_count += 1
+
+        scrape_logger.info(f"日期过滤完成: 总数={len(articles)}, 保留={len(filtered)}, 跳过={skipped_count}, 无日期={no_date_count}")
+        return filtered
+
+    def _parse_date_to_date(self, date_str: str) -> Optional[date]:
+        """解析日期字符串为 date 对象"""
+        if not date_str:
+            return None
+
+        # 先尝试直接解析 YYYY-MM-DD 格式
+        try:
+            return datetime.strptime(date_str.strip(), "%Y-%m-%d").date()
+        except ValueError:
+            pass
+
+        # 尝试其他格式
+        formats = [
+            "%Y/%m/%d",
+            "%Y年%m月%d日",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S",
+        ]
+        for fmt in formats:
+            try:
+                return datetime.strptime(date_str.strip(), fmt).date()
+            except ValueError:
+                continue
+        return None
+
+    def _sort_by_published_date(
+        self,
+        articles: List["ScrapedResult"]
+    ) -> List["ScrapedResult"]:
+        """
+        按发布日期排序，最新的在前
+
+        Returns:
+            List[ScrapedResult]: 排序后的文章列表，无日期的文章排在最后
+        """
+        def get_sort_key(article: ScrapedResult) -> tuple:
+            """返回排序键：(有日期标志, 日期值)"""
+            if not article.published_at:
+                # 无日期的文章排到最后
+                return (1, datetime.min.date())
+            try:
+                pub_date = self._parse_date_to_date(article.published_at)
+                if pub_date:
+                    return (0, pub_date)  # 有日期的文章排在前
+            except:
+                pass
+            return (1, datetime.min.date())
+
+        # 按日期降序排序（最新的在前）
+        sorted_articles = sorted(articles, key=get_sort_key, reverse=True)
+
+        # 统计信息
+        with_date = len([a for a in sorted_articles if a.published_at])
+        without_date = len(sorted_articles) - with_date
+        scrape_logger.info(f"排序完成: 有日期={with_date}, 无日期={without_date}")
+
+        if sorted_articles and sorted_articles[0].published_at:
+            latest = sorted_articles[0]
+            scrape_logger.info(f"最新文章: {latest.title[:40]}... 日期: {latest.published_at}")
+
+        return sorted_articles
 
     def _is_list_page(self, url: str, html: str, links: List[str], extracted_content: str) -> bool:
         """
@@ -1072,7 +1650,11 @@ class WebScraper:
         self,
         url: str,
         options: Optional[ScrapeOptions] = None,
-        max_articles: int = 10
+        max_articles: int = 10,
+        date_range: Optional[str] = None,
+        custom_date_range: Optional[dict] = None,
+        scrape_level: Optional[str] = "deep",
+        scrape_id: Optional[str] = None
     ) -> tuple[ScrapedResult, List[ScrapedResult]]:
         """
         深度爬取：从列表页识别文章链接，然后爬取每篇文章内容
@@ -1082,21 +1664,59 @@ class WebScraper:
             url: 列表页 URL
             options: 爬取选项
             max_articles: 最多爬取的文章数量
+            date_range: 预设日期范围 ("today", "week", "month")
+            custom_date_range: 自定义日期范围 {"start_date": date, "end_date": date}
+            scrape_level: 爬取级别 ("list"=仅提取链接, "detail"=爬取直接子页面, "deep"=深度爬取)
+            scrape_id: 可选的爬取ID，用于进度跟踪。如果不提供，则自动生成
 
         Returns:
             tuple: (列表页结果, 文章结果列表)
         """
+        # 默认爬取级别
+        if scrape_level is None:
+            scrape_level = "deep"
+
+        scrape_logger.info(f"深度爬取开始 | URL: {url} | 爬取级别: {scrape_level} | 日期范围: {date_range or '无'}")
         if options is None:
             options = ScrapeOptions()
 
         logger.info(f"开始深度爬取: {url}")
         scrape_logger.log_scrape_start(url, "deep")
 
+        # 检查是否已取消
+        self._check_cancelled()
+
+        # 生成爬取ID用于进度跟踪（如果未提供或无效）
+        import uuid
+        if not scrape_id:
+            scrape_id = str(uuid.uuid4())[:8]
+
+        # 发送阶段1：正在解析列表页
+        progress_manager.set_progress(scrape_id, {
+            "status": "scraping",
+            "stage": 1,
+            "stage_name": "正在解析列表页",
+            "stage_detail": f"访问 {url}",
+            "current": 0,
+            "total": 0,
+        })
+
         # 1. 快速爬取列表页（只获取 HTML 和链接，不提取正文）
         list_title, list_html, list_links, list_error = await self._scrape_list_page_fast(url, options)
 
+        # 检查是否已取消
+        self._check_cancelled()
+
         if list_error:
             error_result = ScrapedResult(url=url, status="error", error_message=list_error)
+            progress_manager.set_progress(scrape_id, {
+                "status": "error",
+                "stage": -1,
+                "stage_name": "爬取失败",
+                "stage_detail": list_error,
+                "current": 0,
+                "total": 0,
+            })
             return error_result, []
 
         # 创建列表页结果（不包含 content，只有链接信息）
@@ -1109,6 +1729,16 @@ class WebScraper:
             status="success"
         )
 
+        # 发送阶段2：正在识别文章链接
+        progress_manager.set_progress(scrape_id, {
+            "status": "scraping",
+            "stage": 2,
+            "stage_name": "正在识别文章链接",
+            "stage_detail": f"发现 {len(list_links)} 个链接，正在使用 AI 分析...",
+            "current": 0,
+            "total": 0,
+        })
+
         # 2. 使用 LLM 识别文章链接
         article_links = await self._extract_article_links_with_llm(
             page_url=url,
@@ -1118,24 +1748,74 @@ class WebScraper:
             base_url=url
         )
 
+        # 检查是否已取消
+        self._check_cancelled()
+
         # 记录识别的文章链接
         scrape_logger.log_article_links(url, article_links)
 
         if not article_links:
             logger.warning("未识别到文章链接")
+            progress_manager.set_progress(scrape_id, {
+                "status": "error",
+                "stage": -1,
+                "stage_name": "未识别到文章链接",
+                "stage_detail": "请检查URL是否正确或网站是否可访问",
+                "current": 0,
+                "total": 0,
+            })
             return list_page_result, []
 
-        # 限制文章数量
-        article_links = article_links[:max_articles]
-        logger.info(f"将爬取 {len(article_links)} 篇文章")
+        # ========== 根据爬取级别执行不同的逻辑 ==========
+        if scrape_level == "list":
+            # 仅 list 级别：只提取链接，不爬取内容
+            scrape_logger.info(f"爬取级别=list，仅返回链接列表，共 {len(article_links)} 个")
+            progress_manager.set_progress(scrape_id, {
+                "status": "completed",
+                "stage": 5,
+                "stage_name": "已完成",
+                "stage_detail": f"识别到 {len(article_links)} 个文章链接",
+                "current": len(article_links),
+                "total": len(article_links),
+            })
+            # 返回空的文章列表（只有列表页结果）
+            return list_page_result, []
+
+        # detail 或 deep 级别：需要爬取文章正文
+        # 限制文章数量（多爬取一些，日期过滤后会减少）
+        article_links = article_links[:max(max_articles * 2, 50)]
+        logger.info(f"将爬取 {len(article_links)} 篇文章（日期过滤前）")
+
+        # 发送阶段3：准备爬取文章（此时有总数了）
+        progress_manager.set_progress(scrape_id, {
+            "status": "scraping",
+            "stage": 3,
+            "stage_name": "正在爬取文章",
+            "stage_detail": f"已识别 {len(article_links)} 篇文章，开始批量爬取...",
+            "current": 0,
+            "total": len(article_links),
+        })
 
         # 3. 批量爬取文章
         article_results = []
         semaphore = asyncio.Semaphore(3)  # 最多3个并发
+        cancelled = False
+        completed_count = 0
+        success_count = 0
 
-        async def scrape_article(article_url: str) -> ScrapedResult:
+        async def scrape_article(article_url: str, index: int) -> ScrapedResult:
+            nonlocal cancelled, completed_count, success_count
             async with semaphore:
-                logger.info(f"爬取文章: {article_url}")
+                # 检查是否已取消
+                if self._is_cancelled():
+                    cancelled = True
+                    return ScrapedResult(
+                        url=article_url,
+                        status="cancelled",
+                        error_message="爬取已取消"
+                    )
+
+                logger.info(f"爬取文章 [{index+1}/{len(article_links)}]: {article_url}")
                 # 列表页不提取元信息，加快速度
                 article_options = ScrapeOptions(
                     extract_content=True,
@@ -1146,15 +1826,59 @@ class WebScraper:
                     extract_metadata=True  # 文章页仍然提取元信息
                 )
                 result = await self.scrape(article_url, article_options)
+
+                # 检查是否已取消
+                if self._is_cancelled():
+                    cancelled = True
+                    result.status = "cancelled"
+                    result.error_message = "爬取已取消"
+
+                # 优先从 HTML 多源提取真实日期（JSON-LD、Meta、time 元素）
+                # 如果 LLM 已有日期，先保留；HTML 多源提取的结果更权威
+                if result.html and result.status != "cancelled":
+                    html_date = self._extract_published_date_from_html(result.html, result.url)
+                    if html_date:
+                        old_date = result.published_at
+                        result.published_at = html_date
+                        logger.info(f"HTML 多源日期提取: {result.url} -> {html_date}" + (f" (LLM 生成: {old_date})" if old_date else ""))
+
+                # 如果仍然没有有效日期，从 URL 提取日期作为回退（URL 日期通常最准确）
+                if not result.published_at and result.status != "cancelled":
+                    url_date = self._extract_date_from_url(result.url)
+                    if url_date:
+                        result.published_at = url_date
+                        logger.info(f"URL 备用日期提取: {result.url} -> {url_date}")
+
+                # 更新进度
+                completed_count += 1
+                if result.status == "success":
+                    success_count += 1
+
+                # 发送进度事件（使用 set_progress 确保包含 total）
+                progress_manager.set_progress(scrape_id, {
+                    "status": "scraping",
+                    "stage": 3,
+                    "stage_name": "正在爬取文章",
+                    "stage_detail": f"正在爬取: {result.title[:30]}..." if result.title else f"已爬取 {completed_count}/{len(article_links)} 篇",
+                    "current": completed_count,
+                    "total": len(article_links),
+                    "current_article": result.title,
+                })
+
                 return result
 
         # 并发爬取所有文章
-        tasks = [scrape_article(link) for link in article_links]
+        tasks = [scrape_article(link, i) for i, link in enumerate(article_links)]
         article_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # 检查整体是否已取消
+        if self._is_cancelled():
+            cancelled = True
 
         # 处理异常结果
         final_results = []
         success_count = 0
+        cancelled_count = 0
         for i, result in enumerate(article_results):
             if isinstance(result, Exception):
                 final_results.append(ScrapedResult(
@@ -1166,11 +1890,88 @@ class WebScraper:
                 final_results.append(result)
                 if result.status == "success":
                     success_count += 1
+                elif result.status == "cancelled":
+                    cancelled_count += 1
+
+        # 4. 按日期过滤或排序（取消状态的文章不参与过滤）
+        scrape_logger.info(f"准备处理文章: date_range={date_range}, custom_date_range={custom_date_range}, 文章数={len(final_results)}")
+        has_date_filter = date_range or custom_date_range
+
+        if has_date_filter:
+            # 有日期过滤条件：按日期范围过滤
+            scrape_logger.info("调用 _filter_by_date 方法")
+            original_count = len(final_results)
+            final_results = self._filter_by_date(final_results, date_range, custom_date_range)
+
+            # 如果日期过滤后没有任何结果，说明 HTML 中的日期不可靠
+            # 回退策略：从 URL 中提取日期作为备选
+            if len(final_results) == 0 and original_count > 0:
+                scrape_logger.warning(f"HTML 日期提取不可靠，所有文章都被过滤，回退到 URL 日期策略")
+                for result in final_results:
+                    url_date = self._extract_date_from_url(result.url)
+                    if url_date:
+                        result.published_at = url_date
+                        scrape_logger.debug(f"URL 提取日期: {result.url} -> {url_date}")
+                # 重新应用日期过滤
+                final_results = self._filter_by_date(final_results, date_range, custom_date_range)
+
+            # 如果仍然没有结果（URL 日期也无效），使用 URL 日期对所有文章排序
+            if len(final_results) == 0 and original_count > 0:
+                scrape_logger.warning(f"使用 URL 日期作为回退方案，按 URL 日期排序")
+                for result in final_results:
+                    url_date = self._extract_date_from_url(result.url)
+                    if url_date:
+                        result.published_at = url_date
+                # 按 URL 日期排序后返回
+                final_results = self._sort_by_published_date(final_results)
+                final_results = final_results[:max_articles]
+                scrape_logger.info(f"URL 日期回退后选取 {len(final_results)} 篇文章")
+        else:
+            # 无日期过滤条件：按发布日期排序，取最新的文章
+            scrape_logger.info("无日期过滤，按发布日期排序取最新文章")
+            final_results = self._sort_by_published_date(final_results)
+
+            # 如果所有文章都没有有效日期，尝试从 URL 提取日期
+            valid_date_count = sum(1 for r in final_results if r.published_at)
+            if valid_date_count == 0:
+                scrape_logger.warning("所有文章 HTML 日期无效，回退到 URL 日期")
+                for result in final_results:
+                    url_date = self._extract_date_from_url(result.url)
+                    if url_date:
+                        result.published_at = url_date
+                        scrape_logger.debug(f"URL 提取日期: {result.url} -> {url_date}")
+                final_results = self._sort_by_published_date(final_results)
+
+            final_results = final_results[:max_articles]  # 限制数量
+            scrape_logger.info(f"选取最新 {len(final_results)} 篇文章")
+
+        # 5. 过滤内容过少的文章
+        original_count = len(final_results)
+        final_results = [
+            r for r in final_results
+            if r.word_count >= MIN_CONTENT_WORDS or r.status != "success"
+        ]
+        filtered_count = original_count - len(final_results)
+        if filtered_count > 0:
+            logger.info(f"过滤了 {filtered_count} 篇内容过少的文章（少于 {MIN_CONTENT_WORDS} 字）")
+
+        # 发送完成事件
+        total_articles = len(final_results)
+        progress_manager.set_progress(scrape_id, {
+            "status": "completed" if not cancelled else "cancelled",
+            "stage": 5,
+            "stage_name": "已完成" if not cancelled else "已取消",
+            "stage_detail": f"成功爬取 {total_articles} 篇文章" if not cancelled else f"爬取已取消，已获取 {total_articles} 篇",
+            "current": total_articles,
+            "total": total_articles,
+        })
 
         # 记录深度爬取总结
+        if cancelled:
+            scrape_logger.info(f"爬取已取消 | 总数={len(final_results)}, 成功={success_count}, 已取消={cancelled_count}")
         scrape_logger.log_deep_scrape_result(url, len(final_results), success_count, len(final_results) - success_count)
 
-        logger.info(f"深度爬取完成: {len(final_results)} 篇文章")
+        logger.info(f"深度爬取完成: {len(final_results)} 篇文章（原始 {original_count} 篇，过滤 {filtered_count} 篇）")
         return list_page_result, final_results
 
 

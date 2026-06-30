@@ -24,14 +24,22 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Checkbox } from "@/components/ui/checkbox";
+import { cn } from "@/lib/utils";
 import {
   Globe,
   Plus,
   Pencil,
   Trash2,
   ExternalLink,
+  Loader2,
+  Target,
+  ChevronRight,
+  ChevronDown,
+  AlertCircle,
 } from "lucide-react";
-import type { WebsiteCategory, ScrapeSource } from "@/types";
+import type { WebsiteCategory, ScrapeSource, TabNode, TabTree } from "@/types";
 
 export default function ScrapeSettingsPage() {
   const {
@@ -41,7 +49,6 @@ export default function ScrapeSettingsPage() {
     deleteScrapeSource,
     toggleScrapeSource,
     syncFromBackend,
-    isLoading,
   } = useSettingsStore();
 
   // 组件挂载时从后端同步数据
@@ -58,6 +65,89 @@ export default function ScrapeSettingsPage() {
     description: "",
     isEnabled: true,
   });
+
+  // 页签分析相关状态
+  const [isAnalyzingTabs, setIsAnalyzingTabs] = useState(false);
+  const [tabTree, setTabTree] = useState<TabTree | null>(null);
+  const [tabError, setTabError] = useState<string | null>(null);
+  const [expandedTabIds, setExpandedTabIds] = useState<Set<string>>(new Set());
+  const [selectedTabId, setSelectedTabId] = useState<string | null>(null);
+
+  // 调用页签分析 API
+  const analyzeUrlTabs = async (url: string) => {
+    setIsAnalyzingTabs(true);
+    setTabError(null);
+    setTabTree(null);
+    setSelectedTabId(null);
+    setExpandedTabIds(new Set());
+
+    try {
+      const res = await fetch("/api/scrape/tabs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, include_nav: true, include_tabs: true }),
+      });
+
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.error || `分析失败: ${res.status}`);
+      }
+
+      const data = await res.json();
+      if (data.success && data.tree) {
+        setTabTree(data.tree);
+      } else {
+        throw new Error(data.error || "分析失败");
+      }
+    } catch (error) {
+      setTabError(error instanceof Error ? error.message : "分析失败");
+    } finally {
+      setIsAnalyzingTabs(false);
+    }
+  };
+
+  // 处理 URL 输入变化时自动分析（可选）
+  const handleUrlChange = (url: string) => {
+    setScrapeForm({ ...scrapeForm, url });
+  };
+
+  // 手动触发页签分析
+  const handleAnalyzeTabs = () => {
+    if (scrapeForm.url.trim()) {
+      analyzeUrlTabs(scrapeForm.url.trim());
+    }
+  };
+
+  // 选择某个分类
+  const handleSelectTab = (tab: TabNode) => {
+    setSelectedTabId(tab.id);
+    // 自动填充名称（如果名称为空）
+    // 同时更新 URL 为选中分类的 URL
+    const updates: Partial<typeof scrapeForm> = {};
+    if (!scrapeForm.name.trim() && tab.label) {
+      updates.name = tab.label;
+    }
+    // 使用分类的 URL（如果分类有 URL 且有效）
+    if (tab.url && tab.url.startsWith("http")) {
+      updates.url = tab.url;
+    }
+    if (Object.keys(updates).length > 0) {
+      setScrapeForm({ ...scrapeForm, ...updates });
+    }
+  };
+
+  // 切换展开状态
+  const toggleExpand = (nodeId: string) => {
+    setExpandedTabIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(nodeId)) {
+        next.delete(nodeId);
+      } else {
+        next.add(nodeId);
+      }
+      return next;
+    });
+  };
 
   const handleOpenScrapeDialog = (source?: ScrapeSource) => {
     if (source) {
@@ -79,6 +169,11 @@ export default function ScrapeSettingsPage() {
         isEnabled: true,
       });
     }
+    // 重置页签分析状态
+    setTabTree(null);
+    setTabError(null);
+    setSelectedTabId(null);
+    setExpandedTabIds(new Set());
     setScrapeDialogOpen(true);
   };
 
@@ -117,6 +212,68 @@ export default function ScrapeSettingsPage() {
     government: scrapeSources.filter((s) => s.category === "government").length,
     business: scrapeSources.filter((s) => s.category === "business").length,
     academic: scrapeSources.filter((s) => s.category === "academic").length,
+  };
+
+  // 渲染页签树节点
+  const renderTabNode = (node: TabNode, depth: number = 0) => {
+    const isExpanded = expandedTabIds.has(node.id);
+    const hasChildren = node.children && node.children.length > 0;
+    const isSelected = selectedTabId === node.id;
+    const indent = depth * 16;
+
+    return (
+      <div key={node.id}>
+        <div
+          className={cn(
+            "flex items-center gap-2 py-1.5 px-2 rounded cursor-pointer transition-colors",
+            isSelected ? "bg-primary/10" : "hover:bg-accent",
+            node.url ? "" : "opacity-50"
+          )}
+          style={{ paddingLeft: `${indent + 8}px` }}
+          onClick={() => node.url && handleSelectTab(node)}
+        >
+          {hasChildren ? (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleExpand(node.id);
+              }}
+              className="w-4 h-4 flex items-center justify-center"
+            >
+              {isExpanded ? (
+                <ChevronDown className="h-3 w-3" />
+              ) : (
+                <ChevronRight className="h-3 w-3" />
+              )}
+            </button>
+          ) : (
+            <div className="w-4" />
+          )}
+
+          <Checkbox
+            checked={isSelected}
+            onCheckedChange={() => {
+              if (node.url) handleSelectTab(node);
+            }}
+            disabled={!node.url}
+            className="shrink-0"
+            onClick={(e) => e.stopPropagation()}
+          />
+
+          <span className={cn("text-sm truncate", node.level === 0 && "font-medium")}>
+            {node.label}
+          </span>
+
+          {node.url && (
+            <span className="text-xs text-muted-foreground truncate ml-auto">
+              {node.url.length > 25 ? "..." + node.url.slice(-25) : node.url}
+            </span>
+          )}
+        </div>
+
+        {hasChildren && isExpanded && node.children!.map((child) => renderTabNode(child, depth + 1))}
+      </div>
+    );
   };
 
   return (
@@ -235,17 +392,92 @@ export default function ScrapeSettingsPage() {
 
         {/* 爬取源配置 Dialog */}
         <Dialog open={scrapeDialogOpen} onOpenChange={setScrapeDialogOpen}>
-          <DialogContent className="sm:max-w-[500px]">
+          <DialogContent className="sm:max-w-[600px] max-h-[90vh] overflow-hidden flex flex-col">
             <DialogHeader>
               <DialogTitle>
                 {editingScrapeSource ? "编辑网页来源" : "添加网页来源"}
               </DialogTitle>
               <DialogDescription>
-                配置要爬取的网页信息，包括名称、地址和分类
+                配置要爬取的网页信息，添加时可点击&quot;识别页签&quot;自动分析网站结构
               </DialogDescription>
             </DialogHeader>
 
-            <div className="space-y-4 py-4">
+            <div className="flex-1 overflow-y-auto space-y-4 py-4">
+              {/* 网页 URL */}
+              <div className="space-y-2">
+                <Label htmlFor="scrape-url">
+                  网页地址 <span className="text-destructive">*</span>
+                </Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="scrape-url"
+                    value={scrapeForm.url}
+                    onChange={(e) => handleUrlChange(e.target.value)}
+                    placeholder="https://example.com"
+                    type="url"
+                    className="flex-1"
+                  />
+                  {!editingScrapeSource && (
+                    <Button
+                      variant="outline"
+                      onClick={handleAnalyzeTabs}
+                      disabled={isAnalyzingTabs || !scrapeForm.url.trim()}
+                      className="gap-1 shrink-0"
+                    >
+                      {isAnalyzingTabs ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          分析中
+                        </>
+                      ) : (
+                        <>
+                          <Target className="h-4 w-4" />
+                          识别页签
+                        </>
+                      )}
+                    </Button>
+                  )}
+                </div>
+              </div>
+
+              {/* 页签分析结果 */}
+              {(isAnalyzingTabs || tabTree || tabError) && (
+                <div className="border rounded-lg overflow-hidden">
+                  <div className="bg-muted/50 px-3 py-2 border-b flex items-center gap-2">
+                    <Target className="h-4 w-4 text-primary" />
+                    <span className="text-sm font-medium">
+                      {isAnalyzingTabs ? "正在分析页面结构..." : tabError ? "分析失败" : `识别到 ${tabTree?.totalCount || 0} 个分类`}
+                    </span>
+                  </div>
+
+                  {isAnalyzingTabs ? (
+                    <div className="flex items-center justify-center py-8 text-muted-foreground">
+                      <Loader2 className="h-5 w-5 animate-spin mr-2" />
+                      <span>正在分析页面结构...</span>
+                    </div>
+                  ) : tabError ? (
+                    <div className="flex items-start gap-2 p-4 text-destructive">
+                      <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                      <span className="text-sm">{tabError}</span>
+                    </div>
+                  ) : tabTree ? (
+                    <ScrollArea className="h-[250px]">
+                      <div className="p-2">
+                        <p className="text-xs text-muted-foreground px-2 mb-2">
+                          选择一个分类后，将自动填充该 URL
+                        </p>
+                        {(tabTree.root.children || []).map((child) => renderTabNode(child))}
+                        {(tabTree.root.children || []).length === 0 && (
+                          <p className="text-sm text-muted-foreground text-center py-4">
+                            未识别到可爬取的分类
+                          </p>
+                        )}
+                      </div>
+                    </ScrollArea>
+                  ) : null}
+                </div>
+              )}
+
               {/* 网页名称 */}
               <div className="space-y-2">
                 <Label htmlFor="scrape-name">
@@ -258,22 +490,6 @@ export default function ScrapeSettingsPage() {
                     setScrapeForm({ ...scrapeForm, name: e.target.value })
                   }
                   placeholder="例如：某政府官网"
-                />
-              </div>
-
-              {/* 网页 URL */}
-              <div className="space-y-2">
-                <Label htmlFor="scrape-url">
-                  网页地址 <span className="text-destructive">*</span>
-                </Label>
-                <Input
-                  id="scrape-url"
-                  value={scrapeForm.url}
-                  onChange={(e) =>
-                    setScrapeForm({ ...scrapeForm, url: e.target.value })
-                  }
-                  placeholder="https://example.com"
-                  type="url"
                 />
               </div>
 

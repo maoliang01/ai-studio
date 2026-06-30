@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useScrapeStore } from "@/stores/scrape-store";
+import { useSettingsStore } from "@/stores/settings-store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,9 +11,9 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
+import { DateRangeSelector } from "@/components/scrape/DateRangeSelector";
 import {
   Globe,
-  Search,
   Link2,
   Copy,
   Download,
@@ -22,7 +23,6 @@ import {
   CheckCircle2,
   AlertCircle,
   Loader2,
-  FileText,
   History,
   Trash2,
   User,
@@ -34,15 +34,48 @@ import {
   Layers,
   FileDown,
   Sparkles,
+  StopCircle,
+  Bookmark,
+  ExternalLink,
+  Settings,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { ScrapeResult } from "@/types";
+import type { ScrapeResult, DateRangeValue, ScrapeLevel, ScrapeSource, WebsiteCategory } from "@/types";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { useRouter } from "next/navigation";
+
+const getCategoryLabel = (category: WebsiteCategory) => {
+  const labels: Record<WebsiteCategory, string> = {
+    government: "党政",
+    business: "商务",
+    academic: "学术",
+  };
+  return labels[category];
+};
+
+const getCategoryColors = (category: WebsiteCategory) => {
+  const colors: Record<WebsiteCategory, string> = {
+    government: "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300",
+    business: "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300",
+    academic: "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300",
+  };
+  return colors[category];
+};
 
 export default function ScrapePage() {
+  const router = useRouter();
   const [url, setUrl] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [expandedCard, setExpandedCard] = useState<string | null>(null);
   const [maxArticles, setMaxArticles] = useState(10);
+  const [dateRange, setDateRange] = useState<DateRangeValue | undefined>();
+  const [scrapeLevel, setScrapeLevel] = useState<ScrapeLevel>("deep");
   const [advancedOptions, setAdvancedOptions] = useState({
     extractContent: true,
     fetchHtml: false,
@@ -50,18 +83,133 @@ export default function ScrapePage() {
     maxDepth: 0,
     timeout: 30,
   });
+  const [selectedSource, setSelectedSource] = useState<ScrapeSource | null>(null);
+  const [showSourceSelector, setShowSourceSelector] = useState(false);
+  // 用于批量导出的选中状态
+  const [selectedForExport, setSelectedForExport] = useState<Set<string>>(new Set());
 
   const {
     results,
     isScraping,
+    isCancelling,
     currentResult,
     error,
     progress,
     scrapeUrl,
     deepScrape,
+    cancelScrape,
     clearResults,
     setCurrentResult,
   } = useScrapeStore();
+
+  const { scrapeSources, syncFromBackend } = useSettingsStore();
+
+  // 页面加载时同步配置数据
+  useEffect(() => {
+    syncFromBackend();
+  }, [syncFromBackend]);
+
+  // 选择已有来源时自动填充 URL
+  const handleSelectSource = (source: ScrapeSource) => {
+    setSelectedSource(source);
+    setUrl(source.url);
+    setShowSourceSelector(false);
+  };
+
+  // 跳转到设置页添加新来源
+  const handleAddSource = () => {
+    router.push("/settings/scrape");
+  };
+
+  // 渲染来源选择器
+  const renderSourceSelector = () => (
+    <Card className="p-4 border-dashed">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <Bookmark className="h-4 w-4 text-primary" />
+          <span className="font-medium">快速选择已配置的网站</span>
+        </div>
+        <Button variant="ghost" size="sm" onClick={() => setShowSourceSelector(false)}>
+          收起
+        </Button>
+      </div>
+
+      {scrapeSources.length === 0 ? (
+        <div className="text-center py-6">
+          <p className="text-muted-foreground mb-4">暂无已配置的网站来源</p>
+          <Button onClick={handleAddSource} className="gap-2">
+            <Settings className="h-4 w-4" />
+            去配置网站
+          </Button>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <ScrollArea className="max-h-[300px]">
+            <div className="space-y-2 pr-4">
+              {scrapeSources
+                .filter(s => s.isEnabled)
+                .map((source) => (
+                  <div
+                    key={source.id}
+                    className={cn(
+                      "p-3 rounded-lg border cursor-pointer transition-all",
+                      selectedSource?.id === source.id
+                        ? "border-primary bg-primary/5"
+                        : "hover:border-primary/50 hover:bg-muted/50"
+                    )}
+                    onClick={() => handleSelectSource(source)}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="font-medium truncate">{source.name}</span>
+                          <Badge className={cn("text-xs shrink-0", getCategoryColors(source.category))}>
+                            {getCategoryLabel(source.category)}
+                          </Badge>
+                        </div>
+                        <div className="flex items-center gap-1 text-sm text-muted-foreground">
+                          <ExternalLink className="h-3 w-3 shrink-0" />
+                          <span className="truncate">{source.url}</span>
+                        </div>
+                        {source.description && (
+                          <p className="text-xs text-muted-foreground mt-1 line-clamp-1">
+                            {source.description}
+                          </p>
+                        )}
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="gap-1 shrink-0"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setUrl(source.url);
+                          setSelectedSource(source);
+                          setShowSourceSelector(false);
+                        }}
+                      >
+                        <Globe className="h-3 w-3" />
+                        使用
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          </ScrollArea>
+
+          <div className="flex items-center justify-between pt-2 border-t">
+            <span className="text-sm text-muted-foreground">
+              共 {scrapeSources.filter(s => s.isEnabled).length} 个已启用的网站
+            </span>
+            <Button variant="ghost" size="sm" onClick={handleAddSource} className="gap-1">
+              <Settings className="h-3 w-3" />
+              管理配置
+            </Button>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
 
   // 页面加载时选择最新结果
   useEffect(() => {
@@ -100,8 +248,15 @@ export default function ScrapePage() {
       await scrapeUrl(url, advancedOptions);
     } else {
       // 如果是列表页，使用深度爬取
-      console.log('检测到列表页，使用深度爬取');
-      await deepScrape(url, maxArticles, advancedOptions);
+      console.log('检测到列表页，使用深度爬取', { dateRange, scrapeLevel });
+      await deepScrape(
+        url,
+        maxArticles,
+        dateRange?.preset,
+        dateRange?.custom,
+        advancedOptions,
+        scrapeLevel
+      );
     }
   };
 
@@ -117,6 +272,8 @@ export default function ScrapePage() {
         return <CheckCircle2 className="h-4 w-4 text-green-500" />;
       case "error":
         return <AlertCircle className="h-4 w-4 text-red-500" />;
+      case "cancelled":
+        return <StopCircle className="h-4 w-4 text-orange-500" />;
       default:
         return <Loader2 className="h-4 w-4 text-yellow-500 animate-spin" />;
     }
@@ -167,18 +324,62 @@ export default function ScrapePage() {
     });
   };
 
+  // 切换选择状态（用于批量导出）
+  const toggleSelectForExport = (itemUrl: string) => {
+    setSelectedForExport(prev => {
+      const next = new Set(prev);
+      if (next.has(itemUrl)) {
+        next.delete(itemUrl);
+      } else {
+        next.add(itemUrl);
+      }
+      return next;
+    });
+  };
+
+  // 全选/取消全选
+  const toggleSelectAll = () => {
+    if (selectedForExport.size === results.length) {
+      setSelectedForExport(new Set());
+    } else {
+      setSelectedForExport(new Set(results.map(r => `${r.url}-${r.scrapedAt}`)));
+    }
+  };
+
+  // 导出选中的结果
+  const exportSelected = () => {
+    const selectedItems = results.filter(item =>
+      selectedForExport.has(`${item.url}-${item.scrapedAt}`)
+    );
+    selectedItems.forEach((item, index) => {
+      setTimeout(() => exportAsFile(item), index * 500);
+    });
+  };
+
   // 渲染单个文章卡片
-  const renderArticleCard = (item: ScrapeResult, isSelected: boolean) => (
+  const renderArticleCard = (item: ScrapeResult, isSelected: boolean) => {
+    const itemKey = `${item.url}-${item.scrapedAt}`;
+    const isChecked = selectedForExport.has(itemKey);
+
+    return (
     <Card
-      key={`${item.url}-${item.scrapedAt}`}
+      key={itemKey}
       className={cn(
         "transition-all cursor-pointer hover:shadow-md",
-        isSelected && "ring-2 ring-primary"
+        isSelected && "ring-2 ring-primary",
+        isChecked && "border-primary bg-primary/5"
       )}
       onClick={() => setCurrentResult(item)}
     >
       <CardHeader className="pb-2">
-        <div className="flex items-start justify-between gap-2">
+        <div className="flex items-start gap-2">
+          {/* 复选框（不阻止冒泡） */}
+          <Checkbox
+            checked={isChecked}
+            onCheckedChange={() => toggleSelectForExport(itemKey)}
+            onClick={(e) => e.stopPropagation()}
+            className="mt-1 shrink-0"
+          />
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1">
               {getStatusIcon(item.status)}
@@ -269,7 +470,7 @@ export default function ScrapePage() {
             ) : (
               <>
                 <AlignLeft className="h-3 w-3" />
-                摘要 MD
+                摘要及原文
               </>
             )}
           </Button>
@@ -310,58 +511,34 @@ export default function ScrapePage() {
           </Button>
         </div>
 
-        {/* 展开的 MD 文档内容 */}
+        {/* 展开的原文内容 */}
         {expandedCard === item.url && (
           <div className="mt-2 p-3 bg-muted/50 rounded-lg">
-            <div className="text-xs max-h-96 overflow-y-auto prose prose-sm dark:prose-invert max-w-none">
-              {/* MD 文档头部：标题 */}
-              <h1 className="text-lg font-bold mb-2">{item.title || "无标题"}</h1>
-
-              {/* 元信息 */}
-              <div className="flex flex-wrap gap-3 text-xs text-muted-foreground mb-3 pb-2 border-b">
-                <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline flex items-center gap-1">
-                  <Link2 className="h-3 w-3" />
-                  {item.url}
-                </a>
-                {item.author && (
-                  <span className="flex items-center gap-1">
-                    <User className="h-3 w-3" />
-                    {item.author}
-                  </span>
-                )}
-                {item.publishedAt && (
-                  <span className="flex items-center gap-1">
-                    <Calendar className="h-3 w-3" />
-                    {item.publishedAt}
-                  </span>
-                )}
+            <div className="text-xs max-h-96 overflow-y-auto">
+              {/* 元信息和标题 */}
+              <div className="mb-3 pb-2 border-b">
+                <h3 className="text-base font-semibold mb-2">{item.title || "无标题"}</h3>
+                <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+                  <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline flex items-center gap-1">
+                    <Link2 className="h-3 w-3" />
+                    {item.url}
+                  </a>
+                  {item.author && (
+                    <span className="flex items-center gap-1">
+                      <User className="h-3 w-3" />
+                      {item.author}
+                    </span>
+                  )}
+                  {item.publishedAt && (
+                    <span className="flex items-center gap-1">
+                      <Calendar className="h-3 w-3" />
+                      {item.publishedAt}
+                    </span>
+                  )}
+                </div>
               </div>
 
-              {/* 摘要 */}
-              {item.summary && (
-                <>
-                  <h2 className="text-sm font-semibold mb-1">摘要</h2>
-                  <p className="text-sm text-muted-foreground mb-3">{item.summary}</p>
-                </>
-              )}
-
-              {/* 关键字 */}
-              {item.keywords && item.keywords.length > 0 && (
-                <>
-                  <h2 className="text-sm font-semibold mb-1">关键字</h2>
-                  <div className="flex flex-wrap gap-1 mb-3">
-                    {item.keywords.map((keyword, index) => (
-                      <Badge key={index} variant="outline" className="text-xs">
-                        <Tag className="h-2 w-2 mr-1" />
-                        {keyword}
-                      </Badge>
-                    ))}
-                  </div>
-                </>
-              )}
-
-              {/* 正文 */}
-              <h2 className="text-sm font-semibold mb-1">正文</h2>
+              {/* 原文正文 */}
               <div className="whitespace-pre-wrap text-sm leading-relaxed">
                 {item.content || "未获取到内容"}
               </div>
@@ -377,7 +554,8 @@ export default function ScrapePage() {
         )}
       </CardContent>
     </Card>
-  );
+    );
+  };
 
   return (
     <div className="flex h-full">
@@ -398,36 +576,105 @@ export default function ScrapePage() {
                     <Globe className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                     <Input
                       value={url}
-                      onChange={(e) => setUrl(e.target.value)}
+                      onChange={(e) => {
+                        setUrl(e.target.value);
+                        setSelectedSource(null);
+                      }}
                       placeholder="输入列表页 URL，例如：https://news.ycombinator.com"
                       className="pl-9"
                       onKeyDown={(e) => e.key === "Enter" && !isScraping && handleDeepScrape()}
+                      disabled={isScraping}
                     />
                   </div>
                   <Button
-                    onClick={handleDeepScrape}
-                    disabled={!url.trim() || isScraping}
-                    className="gap-2"
+                    variant="outline"
+                    onClick={() => setShowSourceSelector(!showSourceSelector)}
+                    className="gap-1"
+                    disabled={isScraping}
                   >
-                    {isScraping ? (
-                      <>
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                        爬取中...
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="h-4 w-4" />
-                        智能爬取
-                      </>
+                    <Bookmark className="h-4 w-4" />
+                    {showSourceSelector ? "收起" : "已配置"}
+                    {scrapeSources.filter(s => s.isEnabled).length > 0 && (
+                      <Badge variant="secondary" className="ml-1">
+                        {scrapeSources.filter(s => s.isEnabled).length}
+                      </Badge>
                     )}
                   </Button>
+                  {isScraping ? (
+                    <Button
+                      onClick={cancelScrape}
+                      disabled={isCancelling}
+                      variant="destructive"
+                      className="gap-2"
+                    >
+                      {isCancelling ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          正在停止...
+                        </>
+                      ) : (
+                        <>
+                          <StopCircle className="h-4 w-4" />
+                          停止爬取
+                        </>
+                      )}
+                    </Button>
+                  ) : (
+                    <Button
+                      onClick={handleDeepScrape}
+                      disabled={!url.trim()}
+                      className="gap-2"
+                    >
+                      <Sparkles className="h-4 w-4" />
+                      智能爬取
+                    </Button>
+                  )}
                 </div>
+
+                {/* 已选来源提示 */}
+                {selectedSource && (
+                  <div className="flex items-center gap-2 p-2 bg-primary/5 border border-primary/20 rounded-lg">
+                    <Bookmark className="h-4 w-4 text-primary shrink-0" />
+                    <span className="text-sm">
+                      已选择: <span className="font-medium">{selectedSource.name}</span>
+                    </span>
+                    <Badge className={cn("text-xs shrink-0", getCategoryColors(selectedSource.category))}>
+                      {getCategoryLabel(selectedSource.category)}
+                    </Badge>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="ml-auto h-6 px-2"
+                      onClick={() => {
+                        setSelectedSource(null);
+                        setUrl("");
+                      }}
+                    >
+                      清除
+                    </Button>
+                  </div>
+                )}
+
+                {/* 来源选择器 */}
+                {showSourceSelector && renderSourceSelector()}
 
                 {/* 深度爬取选项 */}
                 <div className="flex items-center gap-4 p-3 bg-primary/10 rounded-lg">
                   <div className="flex items-center gap-2">
                     <Layers className="h-4 w-4 text-primary" />
                     <span className="text-sm">自动识别文章链接并爬取</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Label className="text-sm">爬取级别</Label>
+                    <select
+                      value={scrapeLevel}
+                      onChange={(e) => setScrapeLevel(e.target.value as ScrapeLevel)}
+                      className="h-8 px-2 rounded-md border border-input bg-background text-sm"
+                    >
+                      <option value="list">仅提取链接</option>
+                      <option value="detail">详情页（一级）</option>
+                      <option value="deep">深度爬取（多级）</option>
+                    </select>
                   </div>
                   <div className="flex items-center gap-2">
                     <Label className="text-sm">最多</Label>
@@ -443,6 +690,15 @@ export default function ScrapePage() {
                     </select>
                   </div>
                 </div>
+
+                {/* 时间范围选择 */}
+                <Card className="p-4">
+                  <DateRangeSelector
+                    value={dateRange}
+                    onChange={setDateRange}
+                    disabled={isScraping}
+                  />
+                </Card>
 
                 {/* 高级选项 */}
                 <div>
@@ -540,10 +796,63 @@ export default function ScrapePage() {
               <Card className="p-8">
                 <div className="flex flex-col items-center text-center">
                   <Loader2 className="h-8 w-8 animate-spin text-primary mb-4" />
-                  <p className="text-muted-foreground">正在智能识别并爬取文章...</p>
-                  <p className="text-xs text-muted-foreground mt-2">
-                    1. 解析列表页 → 2. 识别文章链接 → 3. 爬取正文内容 → 4. 提取元信息
+                  <p className="text-lg font-medium mb-2">
+                    {progress?.stageName || "正在智能识别并爬取文章..."}
                   </p>
+
+                  {/* 阶段详情 */}
+                  {progress?.stageDetail && (
+                    <p className="text-sm text-muted-foreground mb-4">{progress.stageDetail}</p>
+                  )}
+
+                  {/* 进度显示 */}
+                  {progress && progress.total > 1 && (
+                    <div className="w-full max-w-md mt-4">
+                      <div className="flex items-center justify-between text-sm text-muted-foreground mb-2">
+                        <span>爬取进度</span>
+                        <span>{progress.current} / {progress.total}</span>
+                      </div>
+                      {/* 进度条 */}
+                      <div className="w-full bg-muted rounded-full h-2 mb-2">
+                        <div
+                          className="bg-primary h-2 rounded-full transition-all duration-300"
+                          style={{ width: `${(progress.current / progress.total) * 100}%` }}
+                        />
+                      </div>
+                      {/* 当前正在爬取的文章 */}
+                      {progress.currentTitle && (
+                        <p className="text-xs text-muted-foreground truncate mt-2">
+                          正在爬取: <span className="text-foreground">{progress.currentTitle}</span>
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 阶段流程指示 */}
+                  <div className="flex items-center gap-2 mt-6 flex-wrap justify-center">
+                    <span className={cn(
+                      "px-2 py-1 rounded text-xs",
+                      progress?.stage === 1 ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"
+                    )}>
+                      1. 解析列表页
+                    </span>
+                    <span className="text-muted-foreground">→</span>
+                    <span className={cn(
+                      "px-2 py-1 rounded text-xs",
+                      progress?.stage === 2 ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"
+                    )}>
+                      2. 识别链接
+                    </span>
+                    <span className="text-muted-foreground">→</span>
+                    <span className={cn(
+                      "px-2 py-1 rounded text-xs",
+                      progress?.stage === 3 ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"
+                    )}>
+                      3. 爬取内容
+                    </span>
+                    <span className="text-muted-foreground">→</span>
+                    <span className="text-xs text-muted-foreground px-2 py-1">完成</span>
+                  </div>
                 </div>
               </Card>
             )}
@@ -552,18 +861,34 @@ export default function ScrapePage() {
             {!isScraping && results.length > 0 && (
               <div className="space-y-4">
                 {/* 批量操作栏 */}
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-muted-foreground">
-                    共 {results.length} 篇文章
-                  </span>
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-3">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={toggleSelectAll}
+                      className="gap-2"
+                    >
+                      <Checkbox
+                        checked={selectedForExport.size === results.length && results.length > 0}
+                        className="h-4 w-4"
+                      />
+                      {selectedForExport.size === results.length ? "取消全选" : "全选"}
+                    </Button>
+                    <span className="text-sm text-muted-foreground">
+                      已选择 {selectedForExport.size} / {results.length} 篇
+                    </span>
+                  </div>
                   <div className="flex items-center gap-2">
+                    {selectedForExport.size > 0 && (
+                      <Button variant="default" size="sm" className="gap-2" onClick={exportSelected}>
+                        <Download className="h-4 w-4" />
+                        导出选中 ({selectedForExport.size})
+                      </Button>
+                    )}
                     <Button variant="outline" size="sm" className="gap-2" onClick={exportAllResults}>
                       <Download className="h-4 w-4" />
-                      全部导出
-                    </Button>
-                    <Button variant="outline" size="sm" className="gap-2">
-                      <Download className="h-4 w-4" />
-                      批量导入知识库
+                      全部导出 ({results.length})
                     </Button>
                   </div>
                 </div>

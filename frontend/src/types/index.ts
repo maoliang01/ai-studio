@@ -145,6 +145,41 @@ export interface DeepScrapeResult {
   totalArticles: number;      // 总共爬取的文章数
 }
 
+/** 日期范围预设选项 */
+export type DateRangePreset = "today" | "week" | "month";
+
+/** 自定义日期范围 */
+export interface CustomDateRange {
+  startDate?: string;  // YYYY-MM-DD
+  endDate?: string;    // YYYY-MM-DD
+}
+
+/** 日期范围值 */
+export interface DateRangeValue {
+  preset?: DateRangePreset;
+  custom?: CustomDateRange;
+}
+
+/** 爬取级别（页面结构分析） */
+export type ScrapeLevel = "list" | "detail" | "deep";
+
+/**
+ * 爬取级别说明：
+ * - list: 仅爬取列表页（提取所有子链接）
+ * - detail: 爬取列表页 + 直接子页面（一级文章）
+ * - deep: 深度爬取（递归发现多级文章）
+ */
+
+/** 深度爬取请求参数 */
+export interface DeepScrapeParams {
+  url: string;
+  maxArticles?: number;
+  dateRange?: DateRangePreset;
+  customDateRange?: CustomDateRange;
+  scrapeLevel?: ScrapeLevel;
+  options?: ScrapeOptions;
+}
+
 /** 网页种类 */
 export type WebsiteCategory = "government" | "business" | "academic";
 
@@ -158,6 +193,70 @@ export interface ScrapeSource {
   isEnabled: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+// ================================================
+// 页签识别相关类型
+// ================================================
+
+/** 页签节点类型 */
+export interface TabNode {
+  /** 节点唯一ID */
+  id: string;
+  /** 节点显示名称 */
+  label: string;
+  /** 点击后跳转的URL（完整URL或相对路径） */
+  url: string;
+  /** 子节点列表 */
+  children?: TabNode[];
+  /** 节点层级（0=顶级导航，1=一级栏目，2=二级栏目...） */
+  level: number;
+  /** 节点类型：nav=导航菜单, tab=内容区Tab, breadcrumb=面包屑 */
+  type: "nav" | "tab" | "breadcrumb";
+  /** 是否可展开（Has children） */
+  expandable?: boolean;
+  /** URL模式说明（如 /category/{id}/） */
+  urlPattern?: string;
+}
+
+/** 页签树结构 */
+export interface TabTree {
+  /** 所属网站域名 */
+  domain: string;
+  /** 网站标题 */
+  siteTitle: string;
+  /** 根节点 */
+  root: TabNode;
+  /** 所有节点列表（扁平化，方便遍历） */
+  allNodes: TabNode[];
+  /** 生成时间 */
+  generatedAt: string;
+  /** 节点总数 */
+  totalCount: number;
+}
+
+/** 页签识别请求参数 */
+export interface TabAnalyzeParams {
+  /** 要分析的URL */
+  url: string;
+  /** 是否识别导航栏 */
+  includeNav?: boolean;
+  /** 是否识别内容区Tab */
+  includeTabs?: boolean;
+  /** 最大递归深度 */
+  maxDepth?: number;
+}
+
+/** 页签识别结果 */
+export interface TabAnalyzeResult {
+  /** 是否成功 */
+  success: boolean;
+  /** 页签树结构 */
+  tree?: TabTree;
+  /** 错误信息 */
+  error?: string;
+  /** 耗时（毫秒） */
+  duration?: number;
 }
 
 // ================================================

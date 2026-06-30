@@ -33,7 +33,10 @@ Thumbs.db
 
 # Sensitive files
 backend/models_config.json
+backend/data/settings.json
 .env
+*.pyc
+__pycache__/
 .env.local
 *.env
 

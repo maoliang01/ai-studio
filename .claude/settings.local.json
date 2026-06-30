@@ -31,7 +31,17 @@
       "Bash(curl -X POST http://localhost:8000/chat -H 'Content-Type: application/json' -d '{\"model_id\":\"deepseek-v4-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}],\"stream\":false}' --max-time 90)",
       "Bash(curl -s -X OPTIONS http://localhost:8000/chat -H 'Origin: http://localhost:3001' -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: Content-Type' -i)",
       "Bash(curl -X POST http://localhost:8000/chat -H 'Content-Type: application/json' -d '{\"model_id\":\"test\",\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}],\"stream\":false,\"model_config\":{\"name\":\"test\",\"type\":\"llm\",\"base_url\":\"https://uni-api.cstcloud.cn/v1\",\"api_key\":\"c37fd396c3f2da91e6fe7ac162e8af45fcaee11cc8aab80c0e40a63479f5f36e\",\"model_name\":\"deepseek-v4-flash\"}}' --max-time 60)",
-      "Bash(curl -X POST http://localhost:8000/chat -H 'Content-Type: application/json' -d '{\"model_id\":\"test\",\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}],\"stream\":false,\"model_config\":{\"name\":\"test\",\"type\":\"llm\",\"base_url\":\"https://uni-api.cstcloud.cn/v1\",\"api_key\":\"\",\"model_name\":\"deepseek-v4-flash\"}}' --max-time 30)"
+      "Bash(curl -X POST http://localhost:8000/chat -H 'Content-Type: application/json' -d '{\"model_id\":\"test\",\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}],\"stream\":false,\"model_config\":{\"name\":\"test\",\"type\":\"llm\",\"base_url\":\"https://uni-api.cstcloud.cn/v1\",\"api_key\":\"\",\"model_name\":\"deepseek-v4-flash\"}}' --max-time 30)",
+      "Bash(python -c \"from firecrawl import Firecrawl; print\\('Firecrawl SDK 版本:', Firecrawl.__module__\\)\")",
+      "Bash(python3 -c \"from firecrawl import Firecrawl; print\\('✅ Firecrawl SDK 安装成功!'\\)\")",
+      "WebFetch(domain:docs.firecrawl.dev)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(docker compose *)",
+      "Bash(sudo -S ls /root)",
+      "Bash(sudo -S systemctl enable docker)",
+      "Bash(sg docker *)"
     ]
   }
 }
