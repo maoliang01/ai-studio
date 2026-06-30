@@ -9,8 +9,6 @@ import { Separator } from "@/components/ui/separator";
 import { Label } from "@/components/ui/label";
 import {
   Palette,
-  Keyboard,
-  Database,
   Sun,
   Moon,
   Monitor,
@@ -189,95 +187,6 @@ export default function SettingsPage() {
                 <p className="text-xs text-muted-foreground">{item.label}</p>
               </div>
             ))}
-          </div>
-        </Card>
-
-        {/* 快捷键设置 */}
-        <Card className="p-6">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
-              <Keyboard className="h-5 w-5 text-primary" />
-            </div>
-            <div>
-              <h2 className="text-lg font-semibold">键盘快捷键</h2>
-              <p className="text-sm text-muted-foreground">常用操作的快捷键</p>
-            </div>
-          </div>
-
-          <div className="space-y-3">
-            {[
-              { action: "新建对话", keys: ["Ctrl", "N"] },
-              { action: "搜索", keys: ["Ctrl", "K"] },
-              { action: "发送消息", keys: ["Enter"] },
-              { action: "换行", keys: ["Shift", "Enter"] },
-              { action: "停止生成", keys: ["Esc"] },
-            ].map((shortcut) => (
-              <div
-                key={shortcut.action}
-                className="flex items-center justify-between py-2"
-              >
-                <span className="text-sm">{shortcut.action}</span>
-                <div className="flex gap-1">
-                  {shortcut.keys.map((key, i) => (
-                    <kbd
-                      key={i}
-                      className="px-2 py-1 text-xs font-medium bg-muted rounded border"
-                    >
-                      {key}
-                    </kbd>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        </Card>
-
-        {/* 数据管理 */}
-        <Card className="p-6">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
-              <Database className="h-5 w-5 text-primary" />
-            </div>
-            <div>
-              <h2 className="text-lg font-semibold">数据管理</h2>
-              <p className="text-sm text-muted-foreground">管理本地存储的数据</p>
-            </div>
-          </div>
-
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="font-medium">对话历史</p>
-                <p className="text-sm text-muted-foreground">共 12 条对话记录</p>
-              </div>
-              <Button variant="outline" size="sm">
-                清除
-              </Button>
-            </div>
-
-            <Separator />
-
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="font-medium">知识库</p>
-                <p className="text-sm text-muted-foreground">共 3 个文档，125 个块</p>
-              </div>
-              <Button variant="outline" size="sm">
-                清除
-              </Button>
-            </div>
-
-            <Separator />
-
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="font-medium">提示词模板</p>
-                <p className="text-sm text-muted-foreground">共 24 个模板</p>
-              </div>
-              <Button variant="outline" size="sm">
-                清除
-              </Button>
-            </div>
           </div>
         </Card>
       </div>
