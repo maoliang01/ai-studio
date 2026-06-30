@@ -4,25 +4,16 @@ import Link from "next/link";
 import { useState } from "react";
 import { useSettingsStore } from "@/stores/settings-store";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import {
-  Key,
   Palette,
   Keyboard,
   Database,
   Sun,
   Moon,
   Monitor,
-  CheckCircle2,
-  AlertCircle,
-  Loader2,
-  Eye,
-  EyeOff,
   Bot,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -43,40 +34,7 @@ export default function SettingsPage() {
     settings,
     setTheme,
     setPrimaryColor,
-    apiKeys,
-    saveApiKey,
-    deleteApiKey,
   } = useSettingsStore();
-
-  const [showApiKeys, setShowApiKeys] = useState<Record<string, boolean>>({});
-  const [apiKeyInputs, setApiKeyInputs] = useState<Record<string, { key: string; baseUrl: string }>>({});
-  const [testingApiKey, setTestingApiKey] = useState<string | null>(null);
-  const [apiKeyStatus, setApiKeyStatus] = useState<Record<string, "valid" | "invalid" | null>>({});
-
-  const toggleShowApiKey = (provider: string) => {
-    setShowApiKeys((prev) => ({ ...prev, [provider]: !prev[provider] }));
-  };
-
-  const handleSaveApiKey = (provider: string) => {
-    const input = apiKeyInputs[provider];
-    if (!input?.key?.trim()) return;
-
-    saveApiKey({
-      provider,
-      apiKey: input.key.trim(),
-      baseUrl: input.baseUrl?.trim() || undefined,
-    });
-    setApiKeyInputs((prev) => ({ ...prev, [provider]: { key: "", baseUrl: "" } }));
-  };
-
-  const handleTestApiKey = async (provider: string) => {
-    setTestingApiKey(provider);
-    // 模拟测试
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    const isValid = Math.random() > 0.3;
-    setApiKeyStatus((prev) => ({ ...prev, [provider]: isValid ? "valid" : "invalid" }));
-    setTestingApiKey(null);
-  };
 
   return (
     <div className="h-full overflow-y-auto">
@@ -85,194 +43,6 @@ export default function SettingsPage() {
           <h1 className="text-2xl font-semibold mb-2">设置</h1>
           <p className="text-muted-foreground">配置 AI Studio 的各项功能</p>
         </div>
-
-        {/* API 配置 */}
-        <Card className="p-6">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
-              <Key className="h-5 w-5 text-primary" />
-            </div>
-            <div>
-              <h2 className="text-lg font-semibold">API 密钥配置</h2>
-              <p className="text-sm text-muted-foreground">
-                配置你从各服务商获取的 API 密钥
-              </p>
-            </div>
-          </div>
-
-          <div className="space-y-6">
-            {/* OpenAI */}
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <Label className="text-base font-medium">OpenAI API Key</Label>
-                  <p className="text-sm text-muted-foreground">
-                    用于调用 GPT 系列模型
-                  </p>
-                </div>
-                {apiKeys.find((k) => k.provider === "openai") && (
-                  <Badge variant="secondary" className="gap-1">
-                    <CheckCircle2 className="h-3 w-3 text-green-500" />
-                    已配置
-                  </Badge>
-                )}
-              </div>
-              <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <Input
-                    type={showApiKeys["openai"] ? "text" : "password"}
-                    value={apiKeyInputs["openai"]?.key || ""}
-                    onChange={(e) =>
-                      setApiKeyInputs((prev) => ({
-                        ...prev,
-                        openai: { ...prev["openai"], key: e.target.value },
-                      }))
-                    }
-                    placeholder="sk-xxxxxxxxxxxxxxxx"
-                    className="pr-10"
-                  />
-                  <button
-                    onClick={() => toggleShowApiKey("openai")}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                  >
-                    {showApiKeys["openai"] ? (
-                      <EyeOff className="h-4 w-4" />
-                    ) : (
-                      <Eye className="h-4 w-4" />
-                    )}
-                  </button>
-                </div>
-                <Button onClick={() => handleSaveApiKey("openai")}>保存</Button>
-                {apiKeys.find((k) => k.provider === "openai") && (
-                  <Button
-                    variant="outline"
-                    onClick={() => handleTestApiKey("openai")}
-                    disabled={testingApiKey === "openai"}
-                  >
-                    {testingApiKey === "openai" ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : apiKeyStatus["openai"] === "valid" ? (
-                      <CheckCircle2 className="h-4 w-4 text-green-500" />
-                    ) : apiKeyStatus["openai"] === "invalid" ? (
-                      <AlertCircle className="h-4 w-4 text-red-500" />
-                    ) : (
-                      "测试连接"
-                    )}
-                  </Button>
-                )}
-              </div>
-            </div>
-
-            <Separator />
-
-            {/* Anthropic */}
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <div>
-                  <Label className="text-base font-medium">Anthropic API Key</Label>
-                  <p className="text-sm text-muted-foreground">
-                    用于调用 Claude 系列模型
-                  </p>
-                </div>
-                {apiKeys.find((k) => k.provider === "anthropic") && (
-                  <Badge variant="secondary" className="gap-1">
-                    <CheckCircle2 className="h-3 w-3 text-green-500" />
-                    已配置
-                  </Badge>
-                )}
-              </div>
-              <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <Input
-                    type={showApiKeys["anthropic"] ? "text" : "password"}
-                    value={apiKeyInputs["anthropic"]?.key || ""}
-                    onChange={(e) =>
-                      setApiKeyInputs((prev) => ({
-                        ...prev,
-                        anthropic: { ...prev["anthropic"], key: e.target.value },
-                      }))
-                    }
-                    placeholder="sk-ant-xxxxxxxxxxxxxxxx"
-                    className="pr-10"
-                  />
-                  <button
-                    onClick={() => toggleShowApiKey("anthropic")}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                  >
-                    {showApiKeys["anthropic"] ? (
-                      <EyeOff className="h-4 w-4" />
-                    ) : (
-                      <Eye className="h-4 w-4" />
-                    )}
-                  </button>
-                </div>
-                <Button onClick={() => handleSaveApiKey("anthropic")}>保存</Button>
-                {apiKeys.find((k) => k.provider === "anthropic") && (
-                  <Button
-                    variant="outline"
-                    onClick={() => handleTestApiKey("anthropic")}
-                    disabled={testingApiKey === "anthropic"}
-                  >
-                    {testingApiKey === "anthropic" ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      "测试连接"
-                    )}
-                  </Button>
-                )}
-              </div>
-            </div>
-
-            <Separator />
-
-            {/* 自定义端点 */}
-            <div className="space-y-3">
-              <div>
-                <Label className="text-base font-medium">自定义端点</Label>
-                <p className="text-sm text-muted-foreground">
-                  用于兼容 OpenAI 格式的第三方 API（如 OpenRouter、SiliconFlow 等）
-                </p>
-              </div>
-              <div className="grid gap-3">
-                <Input
-                  value={apiKeyInputs["custom"]?.baseUrl || ""}
-                  onChange={(e) =>
-                    setApiKeyInputs((prev) => ({
-                      ...prev,
-                      custom: { ...prev["custom"], baseUrl: e.target.value },
-                    }))
-                  }
-                  placeholder="https://api.openrouter.ai/v1"
-                />
-                <div className="flex gap-2">
-                  <Input
-                    type={showApiKeys["custom"] ? "text" : "password"}
-                    value={apiKeyInputs["custom"]?.key || ""}
-                    onChange={(e) =>
-                      setApiKeyInputs((prev) => ({
-                        ...prev,
-                        custom: { ...prev["custom"], key: e.target.value },
-                      }))
-                    }
-                    placeholder="API Key"
-                    className="pr-10"
-                  />
-                  <button
-                    onClick={() => toggleShowApiKey("custom")}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                  >
-                    {showApiKeys["custom"] ? (
-                      <EyeOff className="h-4 w-4" />
-                    ) : (
-                      <Eye className="h-4 w-4" />
-                    )}
-                  </button>
-                  <Button onClick={() => handleSaveApiKey("custom")}>保存</Button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </Card>
 
         {/* 主题设置 */}
         <Card className="p-6">
