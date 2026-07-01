@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const res = await fetch(`${process.env.BACKEND_URL || "http://localhost:8000"}/scrape/sources`, {
+    const res = await fetch(`${process.env.BACKEND_URL || "http://localhost:8080"}/scrape/sources`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -22,7 +22,7 @@ export async function POST(request: Request) {
 // 获取爬取源列表
 export async function GET() {
   try {
-    const res = await fetch(`${process.env.BACKEND_URL || "http://localhost:8000"}/scrape/sources`);
+    const res = await fetch(`${process.env.BACKEND_URL || "http://localhost:8080"}/scrape/sources`);
     const data = await res.json();
     return NextResponse.json(data);
   } catch (error) {

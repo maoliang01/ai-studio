@@ -268,6 +268,7 @@ export const useScrapeStore = create<ScrapeStore>((set, get) => ({
       }
 
       // 调用 API（后端会在后台线程执行爬取，立即返回 scrape_id）
+      console.log('发送爬取请求:', requestData);
       const response = await fetch("/api/scrape/deep", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -298,15 +299,16 @@ export const useScrapeStore = create<ScrapeStore>((set, get) => ({
             }
 
             if (progress.status === "completed" && progress.results) {
-              // 爬取完成，处理结果
-              const listPage = normalizeScrapeResult(progress.results.list_page || {});
+              // 爬取完成，处理结果（不要包含列表页本身）
               const articles: ScrapeResult[] = (progress.results.articles || []).map((r: Record<string, unknown>) =>
                 normalizeScrapeResult(r)
               );
 
-              set((state) => ({
-                results: [listPage, ...articles, ...state.results],
-                currentResult: listPage,
+              set({
+                // 替换为新结果（不再追加旧结果）
+                results: articles,
+                // 选中第一篇文章
+                currentResult: articles[0] || null,
                 isScraping: false,
                 progress: {
                   current: articles.length,
@@ -315,7 +317,7 @@ export const useScrapeStore = create<ScrapeStore>((set, get) => ({
                   stageName: "已完成",
                   stageDetail: `成功爬取 ${articles.length} 篇文章`,
                 }
-              }));
+              });
               return;
             }
 

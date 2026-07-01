@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 // 使用服务端变量，不会暴露到浏览器
-const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000";
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8080";
 
 // 对话 API
 export async function POST(request: Request) {

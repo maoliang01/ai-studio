@@ -12,6 +12,7 @@ import {
   Monitor,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { FirecrawlConfig } from "@/components/firecrawl-config";
 
 const colorOptions = [
   { id: "indigo", name: "靛蓝", color: "bg-indigo-500" },
@@ -149,6 +150,9 @@ export default function SettingsPage() {
             </div>
           </div>
         </Card>
+
+        {/* Firecrawl 配置 */}
+        <FirecrawlConfig />
       </div>
     </div>
   );

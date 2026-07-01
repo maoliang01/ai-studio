@@ -25,6 +25,21 @@ interface ModelConfig {
   createdAt: Date;
 }
 
+// Firecrawl 配置
+interface FirecrawlConfig {
+  useLocal: boolean;
+  localUrl: string;
+  apiKey: string;
+  autoStart: boolean;
+}
+
+// Firecrawl 状态
+interface FirecrawlStatus {
+  isRunning: boolean;
+  localUrl: string;
+  version?: string;
+}
+
 // 用户设置类型
 interface UserSettings {
   theme: "light" | "dark" | "system";
@@ -37,6 +52,8 @@ interface SettingsStore {
   apiKeys: APIKeyConfig[];
   models: ModelConfig[];
   scrapeSources: ScrapeSource[];
+  firecrawlConfig: FirecrawlConfig;
+  firecrawlStatus: FirecrawlStatus;
   isLoading: boolean;
   isBackendSynced: boolean;
 
@@ -61,6 +78,11 @@ interface SettingsStore {
   deleteScrapeSource: (id: string) => void;
   toggleScrapeSource: (id: string) => void;
 
+  // Firecrawl 配置 Actions
+  syncFirecrawlConfig: () => Promise<void>;
+  updateFirecrawlConfig: (config: Partial<FirecrawlConfig>) => Promise<void>;
+  checkFirecrawlStatus: () => Promise<void>;
+
   // 模型同步（从后端）
   syncModelsFromBackend: () => Promise<void>;
 }
@@ -77,6 +99,16 @@ export const useSettingsStore = create<SettingsStore>()(
       apiKeys: [],
       models: [],  // 不从 localStorage 加载，每次从后端获取
       scrapeSources: [],  // 不从 localStorage 加载，每次从后端获取
+      firecrawlConfig: {
+        useLocal: false,
+        localUrl: "http://localhost:3002",
+        apiKey: "local",
+        autoStart: true,
+      },
+      firecrawlStatus: {
+        isRunning: false,
+        localUrl: "http://localhost:3002",
+      },
       isLoading: false,
       isBackendSynced: false,
 
@@ -114,6 +146,67 @@ export const useSettingsStore = create<SettingsStore>()(
           console.error("同步失败:", error);
         } finally {
           set({ isLoading: false });
+        }
+      },
+
+      // Firecrawl 配置 Actions
+      syncFirecrawlConfig: async () => {
+        try {
+          const res = await fetch("/api/settings/firecrawl");
+          if (res.ok) {
+            const data = await res.json();
+            set({
+              firecrawlConfig: {
+                useLocal: data.use_local,
+                localUrl: data.local_url,
+                apiKey: data.api_key,
+                autoStart: data.auto_start,
+              },
+            });
+          }
+        } catch (error) {
+          console.error("同步 Firecrawl 配置失败:", error);
+        }
+      },
+
+      updateFirecrawlConfig: async (updates) => {
+        const current = get().firecrawlConfig;
+        const newConfig = { ...current, ...updates };
+
+        try {
+          const res = await fetch("/api/settings/firecrawl", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              use_local: newConfig.useLocal,
+              local_url: newConfig.localUrl,
+              api_key: newConfig.apiKey,
+              auto_start: newConfig.autoStart,
+            }),
+          });
+          if (res.ok) {
+            set({ firecrawlConfig: newConfig });
+          }
+        } catch (error) {
+          console.error("更新 Firecrawl 配置失败:", error);
+        }
+      },
+
+      checkFirecrawlStatus: async () => {
+        try {
+          const res = await fetch("/api/settings/firecrawl/status");
+          if (res.ok) {
+            const data = await res.json();
+            set({
+              firecrawlStatus: {
+                isRunning: data.is_running,
+                localUrl: data.local_url,
+                version: data.version,
+              },
+            });
+          }
+        } catch (error) {
+          console.error("检查 Firecrawl 状态失败:", error);
         }
       },
 

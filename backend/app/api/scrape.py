@@ -226,11 +226,22 @@ async def scrape_deep(request: ScrapeDeepRequest):
     # 解析自定义日期范围
     custom_range = None
     if request.custom_date_range:
+        start_dt = None
+        end_dt = None
+
+        if request.custom_date_range.start_date:
+            start_dt = datetime.strptime(request.custom_date_range.start_date, "%Y-%m-%d").date()
+        if request.custom_date_range.end_date:
+            end_dt = datetime.strptime(request.custom_date_range.end_date, "%Y-%m-%d").date()
+
+        # 确保起始日期 <= 结束日期（如果用户输反了，自动交换）
+        if start_dt and end_dt and start_dt > end_dt:
+            api_logger.warning(f"日期范围输入反了，自动交换: start={start_dt}, end={end_dt}")
+            start_dt, end_dt = end_dt, start_dt
+
         custom_range = {
-            "start_date": datetime.strptime(request.custom_date_range.start_date, "%Y-%m-%d").date()
-                if request.custom_date_range.start_date else None,
-            "end_date": datetime.strptime(request.custom_date_range.end_date, "%Y-%m-%d").date()
-                if request.custom_date_range.end_date else None,
+            "start_date": start_dt,
+            "end_date": end_dt,
         }
 
     def do_scrape():
@@ -242,15 +253,19 @@ async def scrape_deep(request: ScrapeDeepRequest):
             try:
                 scraper = WebScraper(cancel_event=cancel_manager.get_cancel_event())
 
+                # 进度回调函数
+                def update_progress(stage: int, stage_name: str, stage_detail: str = "", current: int = 0, total: int = 0):
+                    progress_manager.set_progress(scrape_id, {
+                        "status": "scraping",
+                        "stage": stage,
+                        "stage_name": stage_name,
+                        "stage_detail": stage_detail,
+                        "current": current,
+                        "total": total,
+                    })
+
                 # 更新进度：开始解析列表页
-                progress_manager.set_progress(scrape_id, {
-                    "status": "scraping",
-                    "stage": 1,
-                    "stage_name": "正在解析列表页",
-                    "stage_detail": f"访问 {request.url}",
-                    "current": 0,
-                    "total": 0,
-                })
+                update_progress(1, "正在解析列表页", f"访问 {request.url}")
 
                 # 执行爬取
                 list_page_result, article_results = loop.run_until_complete(
@@ -261,7 +276,8 @@ async def scrape_deep(request: ScrapeDeepRequest):
                         date_range=request.date_range,
                         custom_date_range=custom_range,
                         scrape_level=request.scrape_level,
-                        scrape_id=scrape_id
+                        scrape_id=scrape_id,
+                        progress_callback=update_progress
                     )
                 )
 

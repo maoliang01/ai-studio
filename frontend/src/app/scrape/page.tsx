@@ -13,6 +13,13 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { DateRangeSelector } from "@/components/scrape/DateRangeSelector";
 import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import {
   Globe,
   Link2,
   Copy,
@@ -121,19 +128,9 @@ export default function ScrapePage() {
     router.push("/settings/scrape");
   };
 
-  // 渲染来源选择器
-  const renderSourceSelector = () => (
-    <Card className="p-4 border-dashed">
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <Bookmark className="h-4 w-4 text-primary" />
-          <span className="font-medium">快速选择已配置的网站</span>
-        </div>
-        <Button variant="ghost" size="sm" onClick={() => setShowSourceSelector(false)}>
-          收起
-        </Button>
-      </div>
-
+  // 来源选择器内容（用于 Dialog）
+  const SourceSelectorContent = () => (
+    <div className="space-y-2">
       {scrapeSources.length === 0 ? (
         <div className="text-center py-6">
           <p className="text-muted-foreground mb-4">暂无已配置的网站来源</p>
@@ -143,8 +140,8 @@ export default function ScrapePage() {
           </Button>
         </div>
       ) : (
-        <div className="space-y-2">
-          <ScrollArea className="max-h-[300px]">
+        <>
+          <ScrollArea className="max-h-[50vh]">
             <div className="space-y-2 pr-4">
               {scrapeSources
                 .filter(s => s.isEnabled)
@@ -206,9 +203,9 @@ export default function ScrapePage() {
               管理配置
             </Button>
           </div>
-        </div>
+        </>
       )}
-    </Card>
+    </div>
   );
 
   // 页面加载时选择最新结果
@@ -240,6 +237,9 @@ export default function ScrapePage() {
   const handleDeepScrape = async () => {
     if (!url.trim()) return;
     setExpandedCard(null); // 重置展开状态
+
+    // 开始新爬取前清除旧结果，避免累积
+    clearResults();
 
     // 智能选择爬取方式
     if (isArticleUrl(url)) {
@@ -587,19 +587,34 @@ export default function ScrapePage() {
                     />
                   </div>
                   <Button
-                    variant="outline"
-                    onClick={() => setShowSourceSelector(!showSourceSelector)}
-                    className="gap-1"
-                    disabled={isScraping}
-                  >
-                    <Bookmark className="h-4 w-4" />
-                    {showSourceSelector ? "收起" : "已配置"}
-                    {scrapeSources.filter(s => s.isEnabled).length > 0 && (
-                      <Badge variant="secondary" className="ml-1">
-                        {scrapeSources.filter(s => s.isEnabled).length}
-                      </Badge>
-                    )}
-                  </Button>
+                      variant="outline"
+                      onClick={() => setShowSourceSelector(true)}
+                      className="gap-1"
+                      disabled={isScraping}
+                    >
+                      <Bookmark className="h-4 w-4" />
+                      {scrapeSources.filter(s => s.isEnabled).length > 0 && (
+                        <Badge variant="secondary" className="ml-1">
+                          {scrapeSources.filter(s => s.isEnabled).length}
+                        </Badge>
+                      )}
+                      已配置
+                    </Button>
+
+                    {/* 来源选择器 Dialog */}
+                    <Dialog open={showSourceSelector} onOpenChange={setShowSourceSelector}>
+                      <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+                        <DialogHeader>
+                          <DialogTitle>选择已配置的网站</DialogTitle>
+                        </DialogHeader>
+                        <SourceSelectorContent />
+                        <div className="flex justify-end pt-2">
+                          <Button variant="outline" onClick={() => setShowSourceSelector(false)}>
+                            关闭
+                          </Button>
+                        </div>
+                      </DialogContent>
+                    </Dialog>
                   {isScraping ? (
                     <Button
                       onClick={cancelScrape}
@@ -655,8 +670,7 @@ export default function ScrapePage() {
                   </div>
                 )}
 
-                {/* 来源选择器 */}
-                {showSourceSelector && renderSourceSelector()}
+                {/* 来源选择器已改为 Dialog 模式 */}
 
                 {/* 深度爬取选项 */}
                 <div className="flex items-center gap-4 p-3 bg-primary/10 rounded-lg">
