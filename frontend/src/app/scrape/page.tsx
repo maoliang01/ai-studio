@@ -57,22 +57,36 @@ import {
 } from "@/components/ui/select";
 import { useRouter } from "next/navigation";
 
-const getCategoryLabel = (category: WebsiteCategory) => {
+// 动态获取分类标签的辅助函数
+const getCategoryLabel = (category: WebsiteCategory, categories?: { id: string; name: string }[]) => {
+  // 如果有动态 categories，优先从 categories 中获取
+  if (categories) {
+    const matched = categories.find(c => c.id === category);
+    if (matched) return matched.name;
+  }
+  // 兼容固定的 government/business/academic
   const labels: Record<WebsiteCategory, string> = {
     government: "党政",
     business: "商务",
     academic: "学术",
   };
-  return labels[category];
+  return labels[category] || category;
 };
 
-const getCategoryColors = (category: WebsiteCategory) => {
+// 动态获取分类颜色的辅助函数
+const getCategoryColors = (category: WebsiteCategory, categories?: { id: string; color: string }[]) => {
+  // 如果有动态 categories，使用其颜色
+  if (categories) {
+    const matched = categories.find(c => c.id === category);
+    if (matched?.color) return matched.color;
+  }
+  // 兼容固定的 government/business/academic
   const colors: Record<WebsiteCategory, string> = {
     government: "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300",
     business: "bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300",
     academic: "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300",
   };
-  return colors[category];
+  return colors[category] || "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300";
 };
 
 export default function ScrapePage() {
@@ -95,6 +109,24 @@ export default function ScrapePage() {
   // 用于批量导出的选中状态
   const [selectedForExport, setSelectedForExport] = useState<Set<string>>(new Set());
 
+  const [selectedCategory, setSelectedCategory] = useState<string>("");  // 保存到数据库的分类
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportSuccess, setExportSuccess] = useState<string | null>(null);
+
+  // Cookie 输入相关状态
+  const [showCookieDialog, setShowCookieDialog] = useState(false);
+  const [cookieInput, setCookieInput] = useState("");
+  const [pendingScrapeParams, setPendingScrapeParams] = useState<{
+    url: string;
+    isDeepScrape: boolean;
+    options?: any;
+    maxArticles?: number;
+    dateRange?: any;
+    customDateRange?: any;
+    scrapeLevel?: "list" | "detail" | "deep";
+  } | null>(null);
+  const [blockedDomain, setBlockedDomain] = useState<string>("");
+
   const {
     results,
     isScraping,
@@ -109,12 +141,19 @@ export default function ScrapePage() {
     setCurrentResult,
   } = useScrapeStore();
 
-  const { scrapeSources, syncFromBackend } = useSettingsStore();
+  const { scrapeSources, categories, syncFromBackend } = useSettingsStore();
 
   // 页面加载时同步配置数据
   useEffect(() => {
     syncFromBackend();
   }, [syncFromBackend]);
+
+  // 默认选择第一个分类
+  useEffect(() => {
+    if (categories.length > 0 && !selectedCategory) {
+      setSelectedCategory(categories[0].id);
+    }
+  }, [categories, selectedCategory]);
 
   // 选择已有来源时自动填充 URL
   const handleSelectSource = (source: ScrapeSource) => {
@@ -160,8 +199,8 @@ export default function ScrapePage() {
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
                           <span className="font-medium truncate">{source.name}</span>
-                          <Badge className={cn("text-xs shrink-0", getCategoryColors(source.category))}>
-                            {getCategoryLabel(source.category)}
+                          <Badge className={cn("text-xs shrink-0", getCategoryColors(source.category, categories))}>
+                            {getCategoryLabel(source.category, categories)}
                           </Badge>
                         </div>
                         <div className="flex items-center gap-1 text-sm text-muted-foreground">
@@ -296,32 +335,153 @@ export default function ScrapePage() {
     setExpandedCard(expandedCard === cardUrl ? null : cardUrl);
   };
 
-  // 导出单个结果为文件
-  const exportAsFile = (item: ScrapeResult) => {
-    const blob = new Blob(
-      [
-        `# ${item.title}\n\n`,
-        `URL: ${item.url}\n`,
-        item.author ? `作者: ${item.author}\n` : "",
-        item.publishedAt ? `发布时间: ${item.publishedAt}\n` : "",
-        item.keywords?.length ? `关键字: ${item.keywords.join(", ")}\n` : "",
-        `\n## 摘要\n\n${item.summary || ""}\n\n`,
-        `## 正文\n\n${item.content}`,
-      ],
-      { type: "text/markdown" }
-    );
-    const filename = `${item.title.replace(/[^a-zA-Z0-9一-龥]/g, "_").substring(0, 30)}.md`;
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = filename;
-    a.click();
+  // 导出单个结果为 Markdown 文件
+  const exportAsFile = async (item: ScrapeResult) => {
+    try {
+      const res = await fetch("/api/scrape/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          articles: [item],
+          format: "markdown",
+        }),
+      });
+
+      if (!res.ok) throw new Error("导出失败");
+
+      const data = await res.json();
+      await saveFileWithPicker(data.filename, data.content);
+    } catch (err) {
+      console.error("导出失败:", err);
+    }
   };
 
-  // 批量导出所有结果
-  const exportAllResults = () => {
-    results.forEach((item, index) => {
-      setTimeout(() => exportAsFile(item), index * 500);
-    });
+  // 使用 File System Access API 让用户选择保存位置
+  const saveFileWithPicker = async (filename: string, content: string) => {
+    // 检查是否支持 File System Access API
+    if ('showSaveFilePicker' in window) {
+      try {
+        const handle = await (window as any).showSaveFilePicker({
+          suggestedName: filename,
+          types: [
+            {
+              description: 'Markdown 文件',
+              accept: { 'text/markdown': ['.md'] },
+            },
+            {
+              description: '所有文件',
+              accept: { '*/*': ['.*'] },
+            },
+          ],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(content);
+        await writable.close();
+        return true;
+      } catch (err) {
+        // 用户取消了选择
+        if ((err as Error).name === 'AbortError') {
+          return false;
+        }
+        // 如果 API 出错，尝试使用传统方式
+        console.warn('File System Access API 失败，使用传统方式:', err);
+      }
+    }
+
+    // 回退：使用传统方式下载
+    const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    return true;
+  };
+
+  // 批量导出所有结果到本地
+  const exportAllResults = async () => {
+    setIsExporting(true);
+    setExportSuccess(null);
+
+    try {
+      const res = await fetch("/api/scrape/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          articles: results.map(r => ({
+            title: r.title,
+            url: r.url,
+            author: r.author,
+            published_at: r.publishedAt,
+            style: r.style,
+            keywords: r.keywords,
+            summary: r.summary,
+            content: r.content,
+            word_count: r.wordCount,
+          })),
+          format: "markdown",
+        }),
+      });
+
+      if (!res.ok) throw new Error("导出失败");
+
+      const data = await res.json();
+      await saveFileWithPicker(data.filename, data.content);
+      setExportSuccess(`已导出 ${results.length} 篇文章`);
+    } catch (err) {
+      setExportSuccess("导出失败: " + (err instanceof Error ? err.message : "未知错误"));
+    }
+
+    setIsExporting(false);
+    setTimeout(() => setExportSuccess(null), 3000);
+  };
+
+  // 保存所有结果到数据库（使用批量 API）
+  const saveAllToDatabase = async () => {
+    console.log("保存到数据库开始...", { resultsCount: results.length });
+    setIsExporting(true);
+    setExportSuccess(null);
+
+    try {
+      const res = await fetch("/api/scrape/save-batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          articles: results.map(r => ({
+            title: r.title,
+            url: r.url,
+            author: r.author,
+            published_at: r.publishedAt,
+            style: r.style,
+            keywords: r.keywords,
+            summary: r.summary,
+            content: r.content,
+            word_count: r.wordCount,
+            html: r.html,
+            source_id: selectedSource?.id,
+          })),
+          category_id: selectedCategory,
+        }),
+      });
+
+      const data = await res.json();
+      console.log("保存结果:", data);
+
+      if (data.success) {
+        setExportSuccess(data.message);
+      } else {
+        setExportSuccess(`保存失败: ${data.error || data.message}`);
+      }
+    } catch (err) {
+      console.error("保存出错:", err);
+      setExportSuccess("保存失败: " + (err instanceof Error ? err.message : "未知错误"));
+    }
+
+    setIsExporting(false);
+    setTimeout(() => setExportSuccess(null), 5000);
   };
 
   // 切换选择状态（用于批量导出）
@@ -346,15 +506,175 @@ export default function ScrapePage() {
     }
   };
 
-  // 导出选中的结果
-  const exportSelected = () => {
+  // 导出选中的结果到本地
+  const exportSelected = async () => {
     const selectedItems = results.filter(item =>
       selectedForExport.has(`${item.url}-${item.scrapedAt}`)
     );
-    selectedItems.forEach((item, index) => {
-      setTimeout(() => exportAsFile(item), index * 500);
-    });
+
+    setIsExporting(true);
+    setExportSuccess(null);
+
+    try {
+      const res = await fetch("/api/scrape/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          articles: selectedItems.map(r => ({
+            title: r.title,
+            url: r.url,
+            author: r.author,
+            published_at: r.publishedAt,
+            style: r.style,
+            keywords: r.keywords,
+            summary: r.summary,
+            content: r.content,
+            word_count: r.wordCount,
+          })),
+          format: "markdown",
+        }),
+      });
+
+      if (!res.ok) throw new Error("导出失败");
+
+      const data = await res.json();
+      await saveFileWithPicker(data.filename, data.content);
+      setExportSuccess(`已导出 ${selectedItems.length} 篇文章`);
+    } catch (err) {
+      setExportSuccess("导出失败: " + (err instanceof Error ? err.message : "未知错误"));
+    }
+
+    setIsExporting(false);
+    setTimeout(() => setExportSuccess(null), 3000);
   };
+
+  // 保存选中的结果到数据库（使用批量 API）
+  const saveSelectedToDatabase = async () => {
+    const selectedItems = results.filter(item =>
+      selectedForExport.has(`${item.url}-${item.scrapedAt}`)
+    );
+
+    setIsExporting(true);
+    setExportSuccess(null);
+
+    try {
+      const res = await fetch("/api/scrape/save-batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          articles: selectedItems.map(r => ({
+            title: r.title,
+            url: r.url,
+            author: r.author,
+            published_at: r.publishedAt,
+            style: r.style,
+            keywords: r.keywords,
+            summary: r.summary,
+            content: r.content,
+            word_count: r.wordCount,
+            html: r.html,
+            source_id: selectedSource?.id,
+          })),
+          category_id: selectedCategory,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        setExportSuccess(data.message);
+      } else {
+        setExportSuccess(`保存失败: ${data.error || data.message}`);
+      }
+    } catch (err) {
+      setExportSuccess("保存失败: " + (err instanceof Error ? err.message : "未知错误"));
+    }
+
+    setIsExporting(false);
+    setTimeout(() => setExportSuccess(null), 5000);
+  };
+
+  // 打开 Cookie 输入对话框
+  const openCookieDialog = (domain: string, params: {
+    url: string;
+    isDeepScrape: boolean;
+    options?: any;
+    maxArticles?: number;
+    dateRange?: any;
+    customDateRange?: any;
+    scrapeLevel?: "list" | "detail" | "deep";
+  }) => {
+    setBlockedDomain(domain);
+    setPendingScrapeParams(params);
+    setCookieInput("");
+    setShowCookieDialog(true);
+  };
+
+  // 使用 Cookie 重新爬取
+  const retryWithCookie = async () => {
+    if (!pendingScrapeParams || !cookieInput.trim()) return;
+
+    setShowCookieDialog(false);
+
+    if (pendingScrapeParams.isDeepScrape) {
+      await deepScrape(
+        pendingScrapeParams.url,
+        pendingScrapeParams.maxArticles,
+        pendingScrapeParams.dateRange,
+        pendingScrapeParams.customDateRange,
+        pendingScrapeParams.options,
+        pendingScrapeParams.scrapeLevel,
+        cookieInput.trim()
+      );
+    } else {
+      // 单页爬取
+      const { scrapeUrl } = useScrapeStore.getState();
+      await scrapeUrl(pendingScrapeParams.url, pendingScrapeParams.options);
+    }
+  };
+
+  // 渲染 Cookie 输入对话框
+  const renderCookieDialog = () => (
+    <Dialog open={showCookieDialog} onOpenChange={setShowCookieDialog}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <AlertCircle className="h-5 w-5 text-orange-500" />
+            网站需要 Cookie 才能访问
+          </DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4 py-2">
+          <p className="text-sm text-muted-foreground">
+            网站 <span className="font-medium text-foreground">{blockedDomain}</span> 检测到异常访问，
+            需要输入 Cookie 才能继续爬取。
+          </p>
+
+          <div className="space-y-2">
+            <Label htmlFor="cookie-input">Cookie</Label>
+            <textarea
+              id="cookie-input"
+              value={cookieInput}
+              onChange={(e) => setCookieInput(e.target.value)}
+              placeholder="粘贴从浏览器开发者工具获取的 Cookie..."
+              className="w-full h-32 px-3 py-2 text-sm rounded-md border border-input bg-background resize-none focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+            <p className="text-xs text-muted-foreground">
+              获取方法：打开 {blockedDomain} → 登录 → 按 F12 打开开发者工具 → Network → 刷新页面 → 点击任意请求 → 复制 Request Headers 中的 Cookie
+            </p>
+          </div>
+
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setShowCookieDialog(false)}>
+              取消
+            </Button>
+            <Button onClick={retryWithCookie} disabled={!cookieInput.trim()}>
+              用 Cookie 重新爬取
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
 
   // 渲染单个文章卡片
   const renderArticleCard = (item: ScrapeResult, isSelected: boolean) => {
@@ -405,8 +725,14 @@ export default function ScrapePage() {
       </CardHeader>
 
       <CardContent className="space-y-3">
-        {/* 文章元信息 */}
-        <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+        {/* 文章元信息 + 文体标签 */}
+        <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+          {/* 文体标签（突出显示） */}
+          {item.style && (
+            <Badge variant="secondary" className="text-xs bg-violet-100 text-violet-700 dark:bg-violet-900 dark:text-violet-300">
+              {item.style}
+            </Badge>
+          )}
           {item.author && (
             <div className="flex items-center gap-1">
               <User className="h-3 w-3" />
@@ -546,10 +872,35 @@ export default function ScrapePage() {
           </div>
         )}
 
-        {/* 错误信息 */}
-        {item.status === "error" && item.errorMessage && (
-          <div className="p-2 bg-destructive/10 text-destructive rounded text-sm">
-            {item.errorMessage}
+        {/* 错误信息或反爬提示 */}
+        {(item.status === "error" || item.status === "anti_bot_blocked") && item.errorMessage && (
+          <div className="p-3 rounded text-sm space-y-2">
+            {item.status === "anti_bot_blocked" ? (
+              <div className="bg-orange-500/10 text-orange-600 border border-orange-500/20 rounded p-3">
+                <div className="flex items-center gap-2 mb-2">
+                  <AlertCircle className="h-4 w-4" />
+                  <span className="font-medium">网站有反爬保护</span>
+                </div>
+                <p className="text-sm mb-2">{item.errorMessage}</p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openCookieDialog(item.blockedDomain || "", {
+                      url: item.url,
+                      isDeepScrape: false,
+                    });
+                  }}
+                >
+                  输入 Cookie 继续
+                </Button>
+              </div>
+            ) : (
+              <div className="bg-destructive/10 text-destructive rounded p-2">
+                {item.errorMessage}
+              </div>
+            )}
           </div>
         )}
       </CardContent>
@@ -653,8 +1004,8 @@ export default function ScrapePage() {
                     <span className="text-sm">
                       已选择: <span className="font-medium">{selectedSource.name}</span>
                     </span>
-                    <Badge className={cn("text-xs shrink-0", getCategoryColors(selectedSource.category))}>
-                      {getCategoryLabel(selectedSource.category)}
+                    <Badge className={cn("text-xs shrink-0", getCategoryColors(selectedSource.category, categories))}>
+                      {getCategoryLabel(selectedSource.category, categories)}
                     </Badge>
                     <Button
                       variant="ghost"
@@ -874,8 +1225,8 @@ export default function ScrapePage() {
             {/* 文章卡片列表 */}
             {!isScraping && results.length > 0 && (
               <div className="space-y-4">
-                {/* 批量操作栏 */}
-                <div className="flex items-center justify-between flex-wrap gap-2">
+                {/* 批量操作栏 - 简化版：只有导出到本地和保存到数据库两种方式 */}
+                <div className="flex items-center justify-between flex-wrap gap-3 p-4 bg-muted/50 rounded-lg">
                   <div className="flex items-center gap-3">
                     <Button
                       variant="outline"
@@ -893,22 +1244,71 @@ export default function ScrapePage() {
                       已选择 {selectedForExport.size} / {results.length} 篇
                     </span>
                   </div>
+
+                  {/* 分类选择（用于保存到数据库） */}
                   <div className="flex items-center gap-2">
-                    {selectedForExport.size > 0 && (
-                      <Button variant="default" size="sm" className="gap-2" onClick={exportSelected}>
-                        <Download className="h-4 w-4" />
-                        导出选中 ({selectedForExport.size})
-                      </Button>
-                    )}
-                    <Button variant="outline" size="sm" className="gap-2" onClick={exportAllResults}>
+                    <span className="text-sm text-muted-foreground">保存分类:</span>
+                    <select
+                      value={selectedCategory}
+                      onChange={(e) => setSelectedCategory(e.target.value)}
+                      className="h-8 px-2 rounded-md border border-input bg-background text-sm min-w-[100px]"
+                    >
+                      {categories.map((cat: any) => (
+                        <option key={cat.id} value={cat.id}>{cat.name}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* 导出操作按钮 */}
+                  <div className="flex items-center gap-2">
+                    {/* 导出到本地 */}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-2"
+                      onClick={selectedForExport.size > 0 ? exportSelected : exportAllResults}
+                      disabled={isExporting}
+                    >
+                      <FileDown className="h-4 w-4" />
+                      导出到本地
+                    </Button>
+
+                    {/* 保存到数据库 */}
+                    <Button
+                      variant="default"
+                      size="sm"
+                      className="gap-2"
+                      onClick={selectedForExport.size > 0 ? saveSelectedToDatabase : saveAllToDatabase}
+                      disabled={isExporting}
+                    >
                       <Download className="h-4 w-4" />
-                      全部导出 ({results.length})
+                      保存到数据库
                     </Button>
                   </div>
                 </div>
 
                 {/* 文章卡片 */}
                 {results.map((item) => renderArticleCard(item, currentResult === item))}
+
+                {/* 导出成功提示 */}
+                {exportSuccess && (
+                  <Card className="p-4 border-green-500 bg-green-50 dark:bg-green-900/20">
+                    <div className="flex items-center gap-2 text-green-600">
+                      <CheckCircle2 className="h-5 w-5" />
+                      <span>{exportSuccess}</span>
+                    </div>
+                  </Card>
+                )}
+
+                {/* 导出中提示 */}
+                {isExporting && (
+                  <Card className="p-4">
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="h-5 w-5 animate-spin text-primary" />
+                      <span>正在处理...</span>
+                    </div>
+                  </Card>
+                )}
               </div>
             )}
 
@@ -988,6 +1388,9 @@ export default function ScrapePage() {
           )}
         </ScrollArea>
       </div>
+
+      {/* Cookie 输入对话框 */}
+      {renderCookieDialog()}
     </div>
   );
 }

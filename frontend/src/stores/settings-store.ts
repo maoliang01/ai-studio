@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { subscribeWithSelector } from "zustand/middleware";
-import type { ScrapeSource, ModelInfo } from "@/types";
+import type { ScrapeSource, ModelInfo, Category } from "@/types";
 
 // API Key 配置（前端专用）
 interface APIKeyConfig {
@@ -52,6 +52,7 @@ interface SettingsStore {
   apiKeys: APIKeyConfig[];
   models: ModelConfig[];
   scrapeSources: ScrapeSource[];
+  categories: Category[];             // 网页分类列表
   firecrawlConfig: FirecrawlConfig;
   firecrawlStatus: FirecrawlStatus;
   isLoading: boolean;
@@ -78,6 +79,12 @@ interface SettingsStore {
   deleteScrapeSource: (id: string) => void;
   toggleScrapeSource: (id: string) => void;
 
+  // Category Actions
+  syncCategories: () => Promise<Category[] | null>;
+  addCategory: (name: string, color?: string) => Promise<Category | null>;
+  updateCategory: (id: string, name: string, color?: string) => Promise<boolean>;
+  deleteCategory: (id: string) => Promise<boolean>;
+
   // Firecrawl 配置 Actions
   syncFirecrawlConfig: () => Promise<void>;
   updateFirecrawlConfig: (config: Partial<FirecrawlConfig>) => Promise<void>;
@@ -99,6 +106,7 @@ export const useSettingsStore = create<SettingsStore>()(
       apiKeys: [],
       models: [],  // 不从 localStorage 加载，每次从后端获取
       scrapeSources: [],  // 不从 localStorage 加载，每次从后端获取
+      categories: [],     // 分类列表
       firecrawlConfig: {
         useLocal: false,
         localUrl: "http://localhost:3002",
@@ -126,9 +134,14 @@ export const useSettingsStore = create<SettingsStore>()(
       syncFromBackend: async () => {
         set({ isLoading: true });
         try {
-          const res = await fetch("/api/settings/scrape");
-          if (res.ok) {
-            const data = await res.json();
+          // 同时获取爬取源列表和分类列表
+          const [sourcesRes, categoriesRes] = await Promise.all([
+            fetch("/api/settings/scrape"),
+            fetch("/api/settings/categories"),
+          ]);
+
+          if (sourcesRes.ok) {
+            const data = await sourcesRes.json();
             // 将后端数据转换为前端格式
             const scrapeSources: ScrapeSource[] = data.map((source: any) => ({
               id: source.id,
@@ -140,13 +153,144 @@ export const useSettingsStore = create<SettingsStore>()(
               createdAt: new Date(source.created_at),
               updatedAt: new Date(source.updated_at),
             }));
-            set({ scrapeSources, isBackendSynced: true });
+            set({ scrapeSources });
           }
+
+          if (categoriesRes.ok) {
+            const data = await categoriesRes.json();
+            const categories: Category[] = data.map((cat: any) => ({
+              id: cat.id,
+              name: cat.name,
+              color: cat.color,
+              description: cat.description || "",
+              folderName: cat.folder_name,
+              sourceCount: cat.source_count,
+              createdAt: new Date(cat.created_at).toISOString(),
+              updatedAt: new Date(cat.updated_at).toISOString(),
+            }));
+            set({ categories });
+          }
+
+          set({ isBackendSynced: true });
         } catch (error) {
           console.error("同步失败:", error);
         } finally {
           set({ isLoading: false });
         }
+      },
+
+      // ============ Category Actions ============
+
+      syncCategories: async () => {
+        try {
+          const res = await fetch("/api/settings/categories");
+          if (res.ok) {
+            const data = await res.json();
+            const categories: Category[] = data.map((cat: any) => ({
+              id: cat.id,
+              name: cat.name,
+              color: cat.color,
+              description: cat.description || "",
+              folderName: cat.folder_name,
+              sourceCount: cat.source_count,
+              createdAt: new Date(cat.created_at).toISOString(),
+              updatedAt: new Date(cat.updated_at).toISOString(),
+            }));
+            set({ categories });
+            return categories;
+          }
+        } catch (error) {
+          console.error("同步分类失败:", error);
+        }
+        return null;
+      },
+
+      addCategory: async (name: string, color?: string) => {
+        try {
+          const res = await fetch("/api/settings/categories", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, color }),
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            const newCategory: Category = {
+              id: data.id,
+              name: data.name,
+              color: data.color,
+              description: data.description || "",
+              folderName: data.folder_name,
+              sourceCount: 0,
+              createdAt: new Date(data.created_at).toISOString(),
+              updatedAt: new Date(data.updated_at).toISOString(),
+            };
+            set((state) => ({
+              categories: [...state.categories, newCategory],
+            }));
+            return newCategory;
+          } else {
+            const error = await res.json().catch(() => ({ detail: "添加失败" }));
+            console.error("添加分类失败:", error.detail);
+          }
+        } catch (error) {
+          console.error("添加分类失败:", error);
+        }
+        return null;
+      },
+
+      updateCategory: async (id: string, name: string, color?: string) => {
+        try {
+          const res = await fetch(`/api/settings/categories/${id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, color }),
+          });
+
+          if (res.ok) {
+            const data = await res.json();
+            set((state) => ({
+              categories: state.categories.map((cat) =>
+                cat.id === id
+                  ? {
+                      ...cat,
+                      name: data.name,
+                      color: data.color,
+                      description: data.description || "",
+                      folderName: data.folder_name,
+                      sourceCount: data.source_count,
+                      updatedAt: new Date(data.updated_at).toISOString(),
+                    }
+                  : cat
+              ),
+            }));
+            return true;
+          }
+        } catch (error) {
+          console.error("更新分类失败:", error);
+        }
+        return false;
+      },
+
+      deleteCategory: async (id: string) => {
+        try {
+          const res = await fetch(`/api/settings/categories/${id}`, {
+            method: "DELETE",
+          });
+
+          if (res.ok) {
+            set((state) => ({
+              categories: state.categories.filter((cat) => cat.id !== id),
+            }));
+            return true;
+          } else {
+            const error = await res.json().catch(() => ({ detail: "删除失败" }));
+            console.error("删除分类失败:", error.detail);
+          }
+        } catch (error) {
+          console.error("删除分类失败:", error);
+        }
+        return false;
       },
 
       // Firecrawl 配置 Actions
@@ -431,7 +575,7 @@ export const useSettingsStore = create<SettingsStore>()(
       partialize: (state) => ({
         settings: state.settings,
         apiKeys: state.apiKeys,
-        // 排除 models 和 scrapeSources - 这些从后端同步
+        // 排除 models、scrapeSources、categories - 这些从后端同步
       }),
     })
   )

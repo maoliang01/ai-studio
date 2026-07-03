@@ -29,6 +29,7 @@ import {
   Search,
   Sliders,
   Bot as BotIcon,
+  Database,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "@/stores/chat-store";
@@ -38,6 +39,7 @@ const navItems = [
   { href: "/knowledge", icon: BookOpen, label: "知识库" },
   { href: "/prompts", icon: FileText, label: "提示词" },
   { href: "/scrape", icon: Globe, label: "网页爬取" },
+  { href: "/articles", icon: Database, label: "文档管理" },
 ];
 
 const settingsSubItems = [

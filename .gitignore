@@ -54,3 +54,7 @@ htmlcov/
 .claude/plans/used/
 # PID files
 .pids/
+
+# Docker
+docker-compose.override.yml
+postgres_data/

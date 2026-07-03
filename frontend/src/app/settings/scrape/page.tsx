@@ -26,6 +26,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import {
   Globe,
@@ -38,18 +39,71 @@ import {
   ChevronRight,
   ChevronDown,
   AlertCircle,
+  FolderOpen,
+  Tags,
+  Settings,
+  Clock,
+  Play,
+  Calendar,
+  CheckCircle,
+  XCircle,
+  Eye,
+  ChevronUp,
 } from "lucide-react";
-import type { WebsiteCategory, ScrapeSource, TabNode, TabTree } from "@/types";
+import type {
+  WebsiteCategory,
+  ScrapeSource,
+  TabNode,
+  TabTree,
+  Category,
+  ScheduledTask,
+  ScrapeHistory,
+  DailySummary,
+  TaskStats,
+  ScrapeRangeOption,
+} from "@/types";
+
+// 默认分类颜色列表
+const DEFAULT_COLORS = [
+  "#EF4444", "#F97316", "#EAB308", "#22C55E", "#10B981",
+  "#14B8A6", "#06B6D4", "#3B82F6", "#6366F1", "#8B5CF6",
+  "#A855F7", "#EC4899", "#F43F5E", "#6B7280",
+];
+
+// 获取分类颜色样式
+const getColorStyle = (color: string) => ({
+  backgroundColor: `${color}20`,
+  color: color,
+  borderColor: `${color}40`,
+});
+
+// 判断是否为默认分类
+const isDefaultCategory = (id: string) =>
+  ["government", "business", "academic"].includes(id);
 
 export default function ScrapeSettingsPage() {
   const {
     scrapeSources,
+    categories,
     addScrapeSource,
     updateScrapeSource,
     deleteScrapeSource,
     toggleScrapeSource,
     syncFromBackend,
+    addCategory,
+    updateCategory,
+    deleteCategory,
   } = useSettingsStore();
+
+  // 分类管理相关状态
+  const [categoryDialogOpen, setCategoryDialogOpen] = useState(false);
+  const [editingCategory, setEditingCategory] = useState<Category | null>(null);
+  const [categoryForm, setCategoryForm] = useState({
+    name: "",
+    color: DEFAULT_COLORS[0],
+  });
+  const [categoryError, setCategoryError] = useState<string | null>(null);
+  const [isSavingCategory, setIsSavingCategory] = useState(false);
 
   // 组件挂载时从后端同步数据
   useEffect(() => {
@@ -72,6 +126,38 @@ export default function ScrapeSettingsPage() {
   const [tabError, setTabError] = useState<string | null>(null);
   const [expandedTabIds, setExpandedTabIds] = useState<Set<string>>(new Set());
   const [selectedTabId, setSelectedTabId] = useState<string | null>(null);
+
+  // 定时任务相关状态
+  const [tasks, setTasks] = useState<ScheduledTask[]>([]);
+  const [taskStats, setTaskStats] = useState<TaskStats | null>(null);
+  const [history, setHistory] = useState<ScrapeHistory[]>([]);
+  const [dailySummary, setDailySummary] = useState<DailySummary[]>([]);
+  const [taskDialogOpen, setTaskDialogOpen] = useState(false);
+  const [editingTask, setEditingTask] = useState<ScheduledTask | null>(null);
+  const [taskForm, setTaskForm] = useState<{
+    name: string;
+    sourceIds: string[];
+    customUrl: string;
+    scheduleTime: string;
+    scrapeRange: ScrapeRangeOption;
+  }>({
+    name: "",
+    sourceIds: [],
+    customUrl: "",
+    scheduleTime: "08:00",
+    scrapeRange: "1d",
+  });
+  const [isLoadingTasks, setIsLoadingTasks] = useState(false);
+  const [isSavingTask, setIsSavingTask] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [activeTab, setActiveTab] = useState("sources");
+
+  // 当切换到定时爬取选项卡时加载数据
+  useEffect(() => {
+    if (activeTab === "scheduled" && tasks.length === 0) {
+      loadTasks();
+    }
+  }, [activeTab]);
 
   // 调用页签分析 API
   const analyzeUrlTabs = async (url: string) => {
@@ -188,30 +274,321 @@ export default function ScrapeSettingsPage() {
     setScrapeDialogOpen(false);
   };
 
-  const getCategoryLabel = (category: WebsiteCategory) => {
-    const labels: Record<WebsiteCategory, string> = {
+  const getCategoryLabel = (category: string) => {
+    // 首先从 categories 列表中查找
+    const found = categories.find((c) => c.id === category);
+    if (found) return found.name;
+    // 兼容旧数据中的默认分类
+    const labels: Record<string, string> = {
       government: "党政类",
       business: "商务类",
       academic: "学术类",
     };
-    return labels[category];
+    return labels[category] || category;
   };
 
   const getCategoryColors = (category: WebsiteCategory) => {
-    const colors: Record<WebsiteCategory, string> = {
-      government: "text-red-600 border-red-200 bg-red-50",
-      business: "text-blue-600 border-blue-200 bg-blue-50",
-      academic: "text-green-600 border-green-200 bg-green-50",
+    // 首先从 categories 列表中查找颜色
+    const found = categories.find((c) => c.id === category);
+    if (found) {
+      return {
+        text: found.color,
+        border: `${found.color}30`,
+        bg: `${found.color}10`,
+      };
+    }
+    // 兼容旧数据中的默认分类
+    const colors: Record<string, { text: string; border: string; bg: string }> = {
+      government: { text: "text-red-600", border: "border-red-200", bg: "bg-red-50" },
+      business: { text: "text-blue-600", border: "border-blue-200", bg: "bg-blue-50" },
+      academic: { text: "text-green-600", border: "border-green-200", bg: "bg-green-50" },
     };
-    return colors[category];
+    return colors[category] || { text: "text-gray-600", border: "border-gray-200", bg: "bg-gray-50" };
   };
 
   // 统计各类型数量
-  const stats = {
+  const stats: Record<string, number> = {
     total: scrapeSources.length,
-    government: scrapeSources.filter((s) => s.category === "government").length,
-    business: scrapeSources.filter((s) => s.category === "business").length,
-    academic: scrapeSources.filter((s) => s.category === "academic").length,
+    ...categories.reduce((acc, cat) => {
+      acc[cat.id] = scrapeSources.filter((s) => s.category === cat.id).length;
+      return acc;
+    }, {} as Record<string, number>),
+  };
+
+  // 分类管理函数
+  const handleOpenCategoryDialog = (category?: Category) => {
+    setCategoryError(null);
+    if (category) {
+      setEditingCategory(category);
+      setCategoryForm({
+        name: category.name,
+        color: category.color,
+      });
+    } else {
+      setEditingCategory(null);
+      setCategoryForm({
+        name: "",
+        color: DEFAULT_COLORS[Math.floor(Math.random() * DEFAULT_COLORS.length)],
+      });
+    }
+    setCategoryDialogOpen(true);
+  };
+
+  const handleSaveCategory = async () => {
+    if (!categoryForm.name.trim()) {
+      setCategoryError("分类名称不能为空");
+      return;
+    }
+
+    setIsSavingCategory(true);
+    setCategoryError(null);
+
+    try {
+      if (editingCategory) {
+        // 更新分类
+        const success = await updateCategory(editingCategory.id, categoryForm.name.trim(), categoryForm.color);
+        if (!success) {
+          setCategoryError("更新分类失败");
+        }
+      } else {
+        // 添加分类
+        const result = await addCategory(categoryForm.name.trim(), categoryForm.color);
+        if (!result) {
+          setCategoryError("添加分类失败，名称可能已存在");
+        }
+      }
+    } finally {
+      setIsSavingCategory(false);
+    }
+
+    if (!categoryError) {
+      setCategoryDialogOpen(false);
+    }
+  };
+
+  const handleDeleteCategory = async (category: Category) => {
+    if (category.sourceCount > 0) {
+      alert(`该分类下有 ${category.sourceCount} 个来源，无法删除`);
+      return;
+    }
+    if (confirm(`确定要删除分类"${category.name}"吗？`)) {
+      await deleteCategory(category.id);
+    }
+  };
+
+  // 加载定时任务数据
+  const loadTasks = async () => {
+    setIsLoadingTasks(true);
+    try {
+      const [tasksRes, statsRes, summaryRes] = await Promise.all([
+        fetch("/api/scheduled"),
+        fetch("/api/scheduled/history/stats"),
+        fetch("/api/scheduled/history/summary"),
+      ]);
+      // 处理 tasks 响应
+      if (tasksRes.ok) {
+        const data = await tasksRes.json();
+        setTasks(Array.isArray(data) ? data : []);
+      } else {
+        setTasks([]);
+      }
+      // 处理 stats 响应
+      if (statsRes.ok) {
+        const data = await statsRes.json();
+        setTaskStats(data.error ? null : data);
+      } else {
+        setTaskStats(null);
+      }
+      // 处理 summary 响应
+      if (summaryRes.ok) {
+        const data = await summaryRes.json();
+        setDailySummary(Array.isArray(data) ? data : []);
+      } else {
+        setDailySummary([]);
+      }
+    } catch (error) {
+      console.error("加载定时任务失败:", error);
+      setTasks([]);
+      setTaskStats(null);
+      setDailySummary([]);
+    } finally {
+      setIsLoadingTasks(false);
+    }
+  };
+
+  // 加载历史记录
+  const loadHistory = async () => {
+    try {
+      const res = await fetch("/api/scheduled/history?limit=50");
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          setHistory(data);
+        } else if (data && data.items && Array.isArray(data.items)) {
+          setHistory(data.items);
+        } else {
+          setHistory([]);
+        }
+      } else {
+        setHistory([]);
+      }
+    } catch (error) {
+      console.error("加载历史记录失败:", error);
+      setHistory([]);
+    }
+  };
+
+  // 切换任务启用状态
+  const handleToggleTask = async (taskId: string) => {
+    try {
+      const res = await fetch(`/api/scheduled/${taskId}/toggle`, { method: "POST" });
+      if (res.ok) {
+        setTasks((prev) =>
+          prev.map((t) => (t.id === taskId ? { ...t, isEnabled: !t.isEnabled } : t))
+        );
+      }
+    } catch (error) {
+      console.error("切换任务状态失败:", error);
+    }
+  };
+
+  // 手动触发任务
+  const handleRunTask = async (taskId: string) => {
+    try {
+      const res = await fetch(`/api/scheduled/${taskId}/run`, { method: "POST" });
+      if (res.ok) {
+        await loadHistory();
+        alert("任务已开始执行");
+      } else {
+        const data = await res.json();
+        alert(data.error || "执行失败");
+      }
+    } catch (error) {
+      console.error("执行任务失败:", error);
+      alert("执行失败，请检查后端服务");
+    }
+  };
+
+  // 打开定时任务对话框
+  const handleOpenTaskDialog = (task?: ScheduledTask) => {
+    const defaultForm = {
+      name: "",
+      sourceIds: [] as string[],
+      customUrl: "",
+      scheduleTime: "08:00",
+      scrapeRange: "1d" as ScrapeRangeOption,
+    };
+
+    if (task) {
+      setEditingTask(task);
+      setTaskForm({
+        name: task.name,
+        sourceIds: task.sourceIds || [],
+        customUrl: task.customUrl || "",
+        scheduleTime: task.scheduleTime,
+        scrapeRange: (task.scrapeRange as ScrapeRangeOption) || "1d",
+      });
+    } else {
+      setEditingTask(null);
+      setTaskForm(defaultForm);
+    }
+    setTaskDialogOpen(true);
+  };
+
+  // 保存定时任务
+  const handleSaveTask = async () => {
+    if (!taskForm.name.trim()) {
+      alert("请输入任务名称");
+      return;
+    }
+
+    // 验证：至少需要一个URL来源
+    const hasSource = taskForm.sourceIds.length > 0 || taskForm.customUrl.trim();
+    if (!hasSource) {
+      alert("请选择爬取源或输入自定义URL");
+      return;
+    }
+
+    setIsSavingTask(true);
+    try {
+      const url = editingTask
+        ? `/api/scheduled/${editingTask.id}`
+        : "/api/scheduled";
+      const method = editingTask ? "PUT" : "POST";
+
+      // 发送 camelCase 到前端 API route（它会转换为 snake_case）
+      const body: Record<string, string | string[]> = {
+        name: taskForm.name.trim(),
+        scheduleTime: taskForm.scheduleTime,
+        scrapeRange: taskForm.scrapeRange,
+      };
+
+      if (taskForm.sourceIds.length > 0) {
+        body.sourceIds = taskForm.sourceIds;
+      }
+      if (taskForm.customUrl.trim()) {
+        body.customUrl = taskForm.customUrl.trim();
+      }
+
+      const res = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      if (res.ok) {
+        await loadTasks();
+        setTaskDialogOpen(false);
+      } else {
+        const data = await res.json();
+        alert(data.error || "保存失败");
+      }
+    } catch (error) {
+      console.error("保存任务失败:", error);
+      alert("保存失败");
+    } finally {
+      setIsSavingTask(false);
+    }
+  };
+
+  // 删除定时任务
+  const handleDeleteTask = async (taskId: string) => {
+    if (confirm("确定要删除这个定时任务吗？")) {
+      try {
+        const res = await fetch(`/api/scheduled/${taskId}`, { method: "DELETE" });
+        if (res.ok) {
+          setTasks((prev) => prev.filter((t) => t.id !== taskId));
+        }
+      } catch (error) {
+        console.error("删除任务失败:", error);
+      }
+    }
+  };
+
+  // 格式化时间显示
+  const formatTime = (timeStr?: string) => {
+    if (!timeStr) return "-";
+    const date = new Date(timeStr);
+    return date.toLocaleString("zh-CN", {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  };
+
+  // 获取状态图标
+  const getStatusIcon = (status: string) => {
+    switch (status) {
+      case "success":
+        return <CheckCircle className="h-4 w-4 text-green-500" />;
+      case "failed":
+        return <XCircle className="h-4 w-4 text-red-500" />;
+      case "running":
+        return <Loader2 className="h-4 w-4 animate-spin text-blue-500" />;
+      default:
+        return <Clock className="h-4 w-4 text-gray-400" />;
+    }
   };
 
   // 渲染页签树节点
@@ -286,108 +663,393 @@ export default function ScrapeSettingsPage() {
         </div>
 
         {/* 统计卡片 */}
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-5 gap-4">
           <Card className="p-4 text-center">
             <p className="text-2xl font-bold">{stats.total}</p>
             <p className="text-xs text-muted-foreground">全部</p>
           </Card>
-          <Card className="p-4 text-center">
-            <p className="text-2xl font-bold text-red-600">{stats.government}</p>
-            <p className="text-xs text-muted-foreground">党政类</p>
-          </Card>
-          <Card className="p-4 text-center">
-            <p className="text-2xl font-bold text-blue-600">{stats.business}</p>
-            <p className="text-xs text-muted-foreground">商务类</p>
-          </Card>
-          <Card className="p-4 text-center">
-            <p className="text-2xl font-bold text-green-600">{stats.academic}</p>
-            <p className="text-xs text-muted-foreground">学术类</p>
-          </Card>
+          {categories.map((cat) => (
+            <Card key={cat.id} className="p-4 text-center">
+              <p className="text-2xl font-bold" style={{ color: cat.color }}>
+                {stats[cat.id] || 0}
+              </p>
+              <p className="text-xs text-muted-foreground">{cat.name}</p>
+            </Card>
+          ))}
         </div>
 
-        {/* 爬取源列表 */}
+        {/* 主内容区 - 使用选项卡 */}
         <Card className="p-6">
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
-                <Globe className="h-5 w-5 text-primary" />
-              </div>
-              <div>
-                <h2 className="text-lg font-semibold">网页来源</h2>
-                <p className="text-sm text-muted-foreground">
-                  配置要爬取的网页列表
-                </p>
-              </div>
-            </div>
-            <Button onClick={() => handleOpenScrapeDialog()} className="gap-2">
-              <Plus className="h-4 w-4" />
-              添加网页
-            </Button>
-          </div>
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+            <TabsList className="mb-4">
+              <TabsTrigger value="sources" className="gap-2">
+                <Globe className="h-4 w-4" />
+                网页来源
+              </TabsTrigger>
+              <TabsTrigger value="categories" className="gap-2">
+                <Tags className="h-4 w-4" />
+                分类管理
+              </TabsTrigger>
+              <TabsTrigger value="scheduled" className="gap-2">
+                <Clock className="h-4 w-4" />
+                定时爬取
+              </TabsTrigger>
+            </TabsList>
 
-          {scrapeSources.length === 0 ? (
-            <div className="text-center py-12 text-muted-foreground">
-              <Globe className="h-16 w-16 mx-auto mb-4 opacity-50" />
-              <p className="mb-1 text-lg">暂无配置的网页来源</p>
-              <p className="text-sm">点击上方按钮添加要爬取的网页</p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {scrapeSources.map((source) => (
-                <div
-                  key={source.id}
-                  className="flex items-center gap-4 p-4 rounded-lg bg-muted/50 hover:bg-muted transition-colors"
-                >
-                  <Switch
-                    checked={source.isEnabled}
-                    onCheckedChange={() => toggleScrapeSource(source.id)}
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="font-medium">{source.name}</span>
-                      <Badge
-                        variant="outline"
-                        className={getCategoryColors(source.category)}
+            {/* 网页来源选项卡 */}
+            <TabsContent value="sources">
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-lg font-semibold">网页来源</h3>
+                    <p className="text-sm text-muted-foreground">配置要爬取的网页列表</p>
+                  </div>
+                  <Button onClick={() => handleOpenScrapeDialog()} className="gap-2">
+                    <Plus className="h-4 w-4" />
+                    添加网页
+                  </Button>
+                </div>
+
+                {scrapeSources.length === 0 ? (
+                  <div className="text-center py-12 text-muted-foreground">
+                    <Globe className="h-16 w-16 mx-auto mb-4 opacity-50" />
+                    <p className="mb-1 text-lg">暂无配置的网页来源</p>
+                    <p className="text-sm">点击上方按钮添加要爬取的网页</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {scrapeSources.map((source) => {
+                      const colors = getCategoryColors(source.category);
+                      return (
+                        <div
+                          key={source.id}
+                          className="flex items-center gap-4 p-4 rounded-lg bg-muted/50 hover:bg-muted transition-colors"
+                        >
+                          <Switch
+                            checked={source.isEnabled}
+                            onCheckedChange={() => toggleScrapeSource(source.id)}
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="font-medium">{source.name}</span>
+                              <Badge
+                                variant="outline"
+                                className={cn(colors.text, colors.border, colors.bg)}
+                              >
+                                {getCategoryLabel(source.category)}
+                              </Badge>
+                            </div>
+                            <a
+                              href={source.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-sm text-muted-foreground hover:text-primary flex items-center gap-1 truncate"
+                            >
+                              <ExternalLink className="h-3.5 w-3.5" />
+                              {source.url}
+                            </a>
+                            {source.description && (
+                              <p className="text-xs text-muted-foreground mt-2 line-clamp-1">
+                                {source.description}
+                              </p>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleOpenScrapeDialog(source)}
+                            >
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => deleteScrapeSource(source.id)}
+                              className="text-destructive hover:text-destructive"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </TabsContent>
+
+            {/* 分类管理选项卡 */}
+            <TabsContent value="categories">
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-lg font-semibold">分类管理</h3>
+                    <p className="text-sm text-muted-foreground">
+                      添加、编辑或删除网页分类，系统会自动创建对应的存储文件夹
+                    </p>
+                  </div>
+                  <Button onClick={() => handleOpenCategoryDialog()} className="gap-2">
+                    <Plus className="h-4 w-4" />
+                    添加分类
+                  </Button>
+                </div>
+
+                {categories.length === 0 ? (
+                  <div className="text-center py-12 text-muted-foreground">
+                    <Tags className="h-16 w-16 mx-auto mb-4 opacity-50" />
+                    <p className="mb-1 text-lg">暂无分类</p>
+                    <p className="text-sm">点击上方按钮添加分类</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {categories.map((category) => (
+                      <div
+                        key={category.id}
+                        className="flex items-center gap-4 p-4 rounded-lg bg-muted/50 hover:bg-muted transition-colors"
                       >
-                        {getCategoryLabel(source.category)}
-                      </Badge>
-                    </div>
-                    <a
-                      href={source.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-sm text-muted-foreground hover:text-primary flex items-center gap-1 truncate"
+                        <div
+                          className="flex h-10 w-10 items-center justify-center rounded-lg"
+                          style={{ backgroundColor: `${category.color}20` }}
+                        >
+                          <FolderOpen className="h-5 w-5" style={{ color: category.color }} />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="font-medium">{category.name}</span>
+                            <Badge
+                              variant="outline"
+                              style={getColorStyle(category.color)}
+                            >
+                              {category.sourceCount} 个来源
+                            </Badge>
+                            {isDefaultCategory(category.id) && (
+                              <Badge variant="secondary" className="text-xs">
+                                默认分类
+                              </Badge>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                            <FolderOpen className="h-3 w-3" />
+                            <span>存储文件夹: {category.folderName}</span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleOpenCategoryDialog(category)}
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                          {!isDefaultCategory(category.id) && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => handleDeleteCategory(category)}
+                              className="text-destructive hover:text-destructive"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </TabsContent>
+
+            {/* 定时爬取选项卡 */}
+            <TabsContent value="scheduled" className="space-y-4">
+              {/* 加载数据 */}
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-lg font-semibold">定时任务</h3>
+                  <p className="text-sm text-muted-foreground">设置每日自动爬取网页</p>
+                </div>
+                <Button onClick={() => { loadTasks(); handleOpenTaskDialog(); }} className="gap-2">
+                  <Plus className="h-4 w-4" />
+                  添加任务
+                </Button>
+              </div>
+
+              {/* 统计信息 */}
+              {taskStats && (
+                <div className="grid grid-cols-5 gap-4">
+                  <Card className="p-3 text-center">
+                    <p className="text-xl font-bold">{taskStats.totalTasks}</p>
+                    <p className="text-xs text-muted-foreground">总任务</p>
+                  </Card>
+                  <Card className="p-3 text-center">
+                    <p className="text-xl font-bold text-green-600">{taskStats.enabledTasks}</p>
+                    <p className="text-xs text-muted-foreground">已启用</p>
+                  </Card>
+                  <Card className="p-3 text-center">
+                    <p className="text-xl font-bold text-blue-600">{taskStats.todayRuns}</p>
+                    <p className="text-xs text-muted-foreground">今日执行</p>
+                  </Card>
+                  <Card className="p-3 text-center">
+                    <p className="text-xl font-bold text-green-600">{taskStats.todaySuccess}</p>
+                    <p className="text-xs text-muted-foreground">今日成功</p>
+                  </Card>
+                  <Card className="p-3 text-center">
+                    <p className="text-xl font-bold text-red-600">{taskStats.todayFailed}</p>
+                    <p className="text-xs text-muted-foreground">今日失败</p>
+                  </Card>
+                </div>
+              )}
+
+              {/* 任务列表 */}
+              {isLoadingTasks ? (
+                <div className="flex items-center justify-center py-8">
+                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                </div>
+              ) : tasks.length === 0 ? (
+                <div className="text-center py-12 text-muted-foreground border-2 border-dashed rounded-lg">
+                  <Clock className="h-16 w-16 mx-auto mb-4 opacity-50" />
+                  <p className="mb-1 text-lg">暂无定时任务</p>
+                  <p className="text-sm">点击上方按钮创建一个每日自动执行的爬取任务</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {tasks.map((task) => (
+                    <div
+                      key={task.id}
+                      className="flex items-center gap-4 p-4 rounded-lg bg-muted/50 hover:bg-muted transition-colors"
                     >
-                      <ExternalLink className="h-3.5 w-3.5" />
-                      {source.url}
-                    </a>
-                    {source.description && (
-                      <p className="text-xs text-muted-foreground mt-2 line-clamp-1">
-                        {source.description}
+                      <Switch
+                        checked={task.isEnabled}
+                        onCheckedChange={() => handleToggleTask(task.id)}
+                      />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 mb-1 flex-wrap">
+                          <span className="font-medium">{task.name}</span>
+                          <Badge variant="outline">{task.scheduleTime}</Badge>
+                          <Badge variant="secondary">{task.scrapeRange || "1d"}</Badge>
+                        </div>
+                        <p className="text-sm text-muted-foreground truncate">
+                          {task.customUrl || (task.sourceNames?.length ? `来源: ${task.sourceNames.join(", ")}` : `来源: ${task.sourceId || "未设置"}`)}
+                        </p>
+                        <div className="flex items-center gap-4 text-xs text-muted-foreground mt-1">
+                          <span>上次执行: {formatTime(task.lastRunAt)}</span>
+                          <span>下次执行: {formatTime(task.nextRunAt)}</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleRunTask(task.id)}
+                          className="gap-1"
+                        >
+                          <Play className="h-3 w-3" />
+                          执行
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleOpenTaskDialog(task)}
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleDeleteTask(task.id)}
+                          className="text-destructive hover:text-destructive"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* 爬取历史区域 */}
+              <div className="border-t pt-4 mt-4">
+                <button
+                  onClick={() => {
+                    if (!showHistory) loadHistory();
+                    setShowHistory(!showHistory);
+                  }}
+                  className="flex items-center gap-2 text-sm font-medium mb-3 hover:text-primary transition-colors"
+                >
+                  {showHistory ? (
+                    <ChevronUp className="h-4 w-4" />
+                  ) : (
+                    <ChevronDown className="h-4 w-4" />
+                  )}
+                  <Calendar className="h-4 w-4" />
+                  爬取历史
+                  {dailySummary.length > 0 && (
+                    <Badge variant="secondary" className="ml-2">
+                      近{dailySummary.length}天
+                    </Badge>
+                  )}
+                </button>
+
+                {showHistory && (
+                  <div className="space-y-4">
+                    {/* 每日汇总 */}
+                    {dailySummary.length > 0 && (
+                      <div className="grid grid-cols-7 gap-2">
+                        {dailySummary.map((day) => (
+                          <div
+                            key={day.date}
+                            className={cn(
+                              "p-2 rounded-lg text-center text-xs",
+                              day.total > 0 ? "bg-muted/50" : "opacity-50"
+                            )}
+                          >
+                            <p className="font-medium">{day.date}</p>
+                            <p className="text-muted-foreground">
+                              {day.success}/{day.total} 成功
+                            </p>
+                            <p className="text-muted-foreground">
+                              {day.articles} 篇文章
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* 历史记录列表 */}
+                    {history.length > 0 ? (
+                      <div className="space-y-2 max-h-[300px] overflow-y-auto">
+                        {history.map((item) => (
+                          <div
+                            key={item.id}
+                            className="flex items-center gap-3 p-3 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors"
+                          >
+                            {getStatusIcon(item.status)}
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium truncate">
+                                {item.articleTitle || item.url}
+                              </p>
+                              <p className="text-xs text-muted-foreground">
+                                {item.taskName && <span>{item.taskName} · </span>}
+                                {formatTime(item.startedAt)}
+                                {item.articlesCount > 0 && ` · ${item.articlesCount} 篇文章`}
+                              </p>
+                              {item.errorMessage && (
+                                <p className="text-xs text-red-500 mt-1">{item.errorMessage}</p>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-center text-sm text-muted-foreground py-4">
+                        暂无爬取历史记录
                       </p>
                     )}
                   </div>
-                  <div className="flex items-center gap-1">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => handleOpenScrapeDialog(source)}
-                    >
-                      <Pencil className="h-4 w-4" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => deleteScrapeSource(source.id)}
-                      className="text-destructive hover:text-destructive"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+                )}
+              </div>
+            </TabsContent>
+          </Tabs>
         </Card>
 
         {/* 爬取源配置 Dialog */}
@@ -501,7 +1163,7 @@ export default function ScrapeSettingsPage() {
                   onValueChange={(value) =>
                     setScrapeForm({
                       ...scrapeForm,
-                      category: value as WebsiteCategory,
+                      category: value as string,
                     })
                   }
                 >
@@ -509,9 +1171,17 @@ export default function ScrapeSettingsPage() {
                     <SelectValue placeholder="选择网页种类" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="government">党政类</SelectItem>
-                    <SelectItem value="business">商务类</SelectItem>
-                    <SelectItem value="academic">学术类</SelectItem>
+                    {categories.map((cat) => (
+                      <SelectItem key={cat.id} value={cat.id}>
+                        <div className="flex items-center gap-2">
+                          <div
+                            className="h-2 w-2 rounded-full"
+                            style={{ backgroundColor: cat.color }}
+                          />
+                          {cat.name}
+                        </div>
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -554,6 +1224,235 @@ export default function ScrapeSettingsPage() {
                 disabled={!scrapeForm.name.trim() || !scrapeForm.url.trim()}
               >
                 {editingScrapeSource ? "保存" : "添加"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* 分类管理 Dialog */}
+        <Dialog open={categoryDialogOpen} onOpenChange={setCategoryDialogOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>
+                {editingCategory ? "编辑分类" : "添加分类"}
+              </DialogTitle>
+              <DialogDescription>
+                {editingCategory
+                  ? "修改分类名称和颜色，对应的存储文件夹将自动更新"
+                  : "添加新的网页分类，系统会自动创建对应的存储文件夹"}
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-4 py-4">
+              {/* 分类名称 */}
+              <div className="space-y-2">
+                <Label htmlFor="category-name">
+                  分类名称 <span className="text-destructive">*</span>
+                </Label>
+                <Input
+                  id="category-name"
+                  value={categoryForm.name}
+                  onChange={(e) => setCategoryForm({ ...categoryForm, name: e.target.value })}
+                  placeholder="例如：新闻媒体"
+                />
+              </div>
+
+              {/* 分类颜色 */}
+              <div className="space-y-2">
+                <Label>分类颜色</Label>
+                <div className="flex flex-wrap gap-2">
+                  {DEFAULT_COLORS.map((color) => (
+                    <button
+                      key={color}
+                      type="button"
+                      onClick={() => setCategoryForm({ ...categoryForm, color })}
+                      className={cn(
+                        "h-8 w-8 rounded-full transition-transform",
+                        categoryForm.color === color
+                          ? "ring-2 ring-offset-2 ring-primary scale-110"
+                          : "hover:scale-105"
+                      )}
+                      style={{ backgroundColor: color }}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              {/* 错误提示 */}
+              {categoryError && (
+                <div className="flex items-center gap-2 text-destructive text-sm">
+                  <AlertCircle className="h-4 w-4" />
+                  {categoryError}
+                </div>
+              )}
+
+              {/* 预览 */}
+              <div className="p-3 rounded-lg bg-muted/50">
+                <p className="text-sm text-muted-foreground mb-2">预览</p>
+                <Badge
+                  variant="outline"
+                  style={getColorStyle(categoryForm.color)}
+                >
+                  {categoryForm.name || "分类名称"}
+                </Badge>
+                <p className="text-xs text-muted-foreground mt-2">
+                  存储文件夹: {categoryForm.name
+                    ? categoryForm.name.replace(/[^\w\s一-龥]/g, "").replace(/\s/g, "_") || "untitled"
+                    : "未命名"}
+                </p>
+              </div>
+            </div>
+
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setCategoryDialogOpen(false)}
+              >
+                取消
+              </Button>
+              <Button
+                onClick={handleSaveCategory}
+                disabled={isSavingCategory || !categoryForm.name.trim()}
+              >
+                {isSavingCategory && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                {editingCategory ? "保存" : "添加"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* 定时任务 Dialog */}
+        <Dialog open={taskDialogOpen} onOpenChange={setTaskDialogOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>
+                {editingTask ? "编辑定时任务" : "添加定时任务"}
+              </DialogTitle>
+              <DialogDescription>
+                设置每日自动爬取网页的时间和目标网站
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-4 py-4">
+              {/* 任务名称 */}
+              <div className="space-y-2">
+                <Label htmlFor="task-name">
+                  任务名称 <span className="text-destructive">*</span>
+                </Label>
+                <Input
+                  id="task-name"
+                  value={taskForm.name}
+                  onChange={(e) => setTaskForm({ ...taskForm, name: e.target.value })}
+                  placeholder="例如：每日新闻爬取"
+                />
+              </div>
+
+              {/* 爬取来源（多选） */}
+              <div className="space-y-2">
+                <Label>爬取来源（可多选）</Label>
+                {scrapeSources.length === 0 ? (
+                  <p className="text-sm text-muted-foreground py-2">暂无已配置的爬取源，请先在「网页来源」中添加</p>
+                ) : (
+                  <div className="border rounded-lg p-3 space-y-2 max-h-[150px] overflow-y-auto">
+                    {scrapeSources.map((source) => (
+                      <div key={source.id} className="flex items-center gap-2">
+                        <Checkbox
+                          id={`source-${source.id}`}
+                          checked={taskForm.sourceIds.includes(source.id)}
+                          onCheckedChange={(checked) => {
+                            if (checked) {
+                              setTaskForm({
+                                ...taskForm,
+                                sourceIds: [...taskForm.sourceIds, source.id],
+                              });
+                            } else {
+                              setTaskForm({
+                                ...taskForm,
+                                sourceIds: taskForm.sourceIds.filter((id) => id !== source.id),
+                              });
+                            }
+                          }}
+                        />
+                        <Label
+                          htmlFor={`source-${source.id}`}
+                          className="text-sm cursor-pointer flex items-center gap-2"
+                        >
+                          <Globe className="h-3 w-3 text-muted-foreground" />
+                          {source.name}
+                        </Label>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <p className="text-xs text-muted-foreground">选择已配置的网页来源，或使用下面的自定义URL</p>
+              </div>
+
+              {/* 自定义URL */}
+              <div className="space-y-2">
+                <Label htmlFor="task-url">自定义URL</Label>
+                <Input
+                  id="task-url"
+                  value={taskForm.customUrl}
+                  onChange={(e) => setTaskForm({ ...taskForm, customUrl: e.target.value })}
+                  placeholder="https://example.com 或留空使用上方选择的来源"
+                  type="url"
+                />
+                <p className="text-xs text-muted-foreground">如果填写了自定义URL，将优先使用此URL</p>
+              </div>
+
+              {/* 爬取范围 */}
+              <div className="space-y-2">
+                <Label>爬取范围</Label>
+                <div className="flex gap-2 flex-wrap">
+                  {(["1d", "7d", "30d"] as const).map((range) => (
+                    <Button
+                      key={range}
+                      variant={taskForm.scrapeRange === range ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => setTaskForm({ ...taskForm, scrapeRange: range })}
+                      className="gap-1"
+                    >
+                      {range === "1d" && "前一天"}
+                      {range === "7d" && "前一周"}
+                      {range === "30d" && "前一月"}
+                    </Button>
+                  ))}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  设置爬取内容的时间范围，例如「前一天」表示爬取最近24小时内更新的文章
+                </p>
+              </div>
+
+              {/* 定时时间 */}
+              <div className="space-y-2">
+                <Label htmlFor="task-time">
+                  每日执行时间 <span className="text-destructive">*</span>
+                </Label>
+                <Input
+                  id="task-time"
+                  type="time"
+                  value={taskForm.scheduleTime}
+                  onChange={(e) => setTaskForm({ ...taskForm, scheduleTime: e.target.value })}
+                />
+                <p className="text-xs text-muted-foreground">
+                  设置每天自动执行爬取的时间，例如 08:00 表示每天早上8点执行
+                </p>
+              </div>
+            </div>
+
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setTaskDialogOpen(false)}
+              >
+                取消
+              </Button>
+              <Button
+                onClick={handleSaveTask}
+                disabled={isSavingTask || !taskForm.name.trim()}
+              >
+                {isSavingTask && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                {editingTask ? "保存" : "添加"}
               </Button>
             </DialogFooter>
           </DialogContent>

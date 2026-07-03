@@ -1,12 +1,49 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+import logging
 
-from app.api import chat, models, settings, scrape, firecrawl
+from app.api import chat, models, settings, scrape, firecrawl, articles, scheduled
+
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("ai-studio")
+
+# 调度器实例
+_scheduler = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    global _scheduler
+
+    # 启动时
+    logger.info("应用启动中...")
+    try:
+        from app.core.scheduler import init_scheduler
+        _scheduler = init_scheduler()
+        logger.info("定时任务调度器已启动")
+    except Exception as e:
+        logger.error(f"启动调度器失败: {e}")
+
+    yield
+
+    # 关闭时
+    logger.info("应用关闭中...")
+    if _scheduler:
+        try:
+            from app.core.scheduler import shutdown_scheduler
+            shutdown_scheduler()
+        except Exception as e:
+            logger.error(f"关闭调度器失败: {e}")
+
 
 app = FastAPI(
     title="AI Studio API",
     description="AI Studio 工作台后端 API",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # CORS 配置 - 允许所有前端访问
@@ -24,6 +61,8 @@ app.include_router(models.router)
 app.include_router(settings.router)
 app.include_router(scrape.router)
 app.include_router(firecrawl.router)
+app.include_router(articles.router)
+app.include_router(scheduled.router)
 
 
 @app.get("/")
@@ -36,6 +75,51 @@ async def root():
 async def health():
     """健康检查"""
     return {"status": "healthy"}
+
+
+@app.get("/health/db")
+async def health_db():
+    """数据库健康检查"""
+    from app.core.database import check_db_connection, get_database_config
+
+    config = get_database_config()
+    is_connected = check_db_connection()
+
+    return {
+        "status": "healthy" if is_connected else "unhealthy",
+        "database": {
+            "connected": is_connected,
+            "host": config.host,
+            "port": config.port,
+            "database": config.database,
+        }
+    }
+
+
+@app.post("/init-db")
+async def init_database():
+    """初始化数据库（创建表和全文搜索索引）"""
+    from app.core.database import init_db
+
+    try:
+        init_db()
+        return {"status": "success", "message": "数据库初始化完成"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/scheduler/sync")
+async def sync_scheduler():
+    """手动同步调度器任务"""
+    global _scheduler
+    if _scheduler:
+        try:
+            from app.core.scheduler import sync_scheduler_tasks
+            sync_scheduler_tasks(_scheduler)
+            return {"status": "success", "message": "调度器已同步"}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    return {"status": "error", "message": "调度器未运行"}
 
 
 if __name__ == "__main__":

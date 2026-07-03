@@ -50,18 +50,27 @@ class ScrapeRequest(BaseModel):
     """爬取请求"""
     url: str
     options: Optional[ScrapeOptions] = None
+    save_to_db: bool = False  # 是否保存到数据库
+    category_id: Optional[str] = None  # 分类 ID
+    source_id: Optional[str] = None  # 来源 ID
+    cookies: Optional[str] = None  # Cookie 字符串，用于绕过反爬
 
 
 class ScrapeBatchRequest(BaseModel):
     """批量爬取请求"""
     urls: List[str]
     options: Optional[ScrapeOptions] = None
+    save_to_db: bool = False  # 是否保存到数据库
+    category_id: Optional[str] = None  # 分类 ID
+    source_ids: Optional[List[str]] = None  # 来源 ID 列表（与 urls 一一对应）
+    cookies: Optional[str] = None  # Cookie 字符串，用于绕过反爬
 
 
 class ScrapeSourcesRequest(BaseModel):
     """从配置源爬取请求"""
     source_ids: Optional[List[str]] = None
     options: Optional[ScrapeOptions] = None
+    cookies: Optional[str] = None  # Cookie 字符串，用于绕过反爬
 
 
 class ScrapedResultResponse(BaseModel):
@@ -79,10 +88,24 @@ class ScrapedResultResponse(BaseModel):
     author: Optional[str] = None
     summary: Optional[str] = None
     keywords: List[str] = []
+    style: Optional[str] = None  # 文体
+    db_id: Optional[str] = None  # 数据库文章 ID（保存后返回）
+    needs_cookie: bool = False  # 是否需要 Cookie 才能继续
+    blocked_domain: Optional[str] = None  # 被反爬的域名
 
 
 def _result_to_response(result: ScrapedResult) -> ScrapedResultResponse:
     """转换爬取结果为响应模型"""
+    # 检查是否被反爬
+    needs_cookie = result.status == "anti_bot_blocked"
+    blocked_domain = None
+    if needs_cookie and result.error_message:
+        # 从错误信息中提取域名
+        import re
+        domain_match = re.search(r'\(([^)]+)\)', result.error_message)
+        if domain_match:
+            blocked_domain = domain_match.group(1)
+
     return ScrapedResultResponse(
         url=result.url,
         title=result.title,
@@ -97,6 +120,10 @@ def _result_to_response(result: ScrapedResult) -> ScrapedResultResponse:
         author=result.author,
         summary=result.summary,
         keywords=result.keywords,
+        style=result.style,  # 文体
+        db_id=getattr(result, "db_id", None),  # 获取数据库 ID
+        needs_cookie=needs_cookie,
+        blocked_domain=blocked_domain,
     )
 
 
@@ -105,7 +132,23 @@ async def scrape_url(request: ScrapeRequest):
     """爬取单个网页"""
     scraper = get_scraper()
     options = request.options or ScrapeOptions()
+
+    # 添加cookies到选项
+    if request.cookies:
+        options.cookies = request.cookies
+
     result = await scraper.scrape(request.url, options)
+
+    # 如果设置了保存到数据库
+    if request.save_to_db and result.status == "success":
+        saved, info = scraper.save_to_database(
+            result,
+            category_id=request.category_id,
+            source_id=request.source_id
+        )
+        if saved:
+            result.db_id = info  # 将保存的文章 ID 附加到结果中
+
     return _result_to_response(result)
 
 
@@ -121,6 +164,25 @@ async def scrape_batch(request: ScrapeBatchRequest):
     scraper = get_scraper()
     options = request.options or ScrapeOptions()
     results = await scraper.scrape_batch(request.urls, options)
+
+    # 如果设置了保存到数据库
+    if request.save_to_db:
+        saved_count = 0
+        for i, result in enumerate(results):
+            if result.status == "success":
+                source_id = None
+                if request.source_ids and i < len(request.source_ids):
+                    source_id = request.source_ids[i]
+
+                saved, info = scraper.save_to_database(
+                    result,
+                    category_id=request.category_id,
+                    source_id=source_id
+                )
+                if saved:
+                    saved_count += 1
+                    result.db_id = info
+
     return [_result_to_response(r) for r in results]
 
 
@@ -177,6 +239,7 @@ class ScrapeDeepRequest(BaseModel):
     custom_date_range: Optional[DateRangeModel] = None
     scrape_level: Optional[Literal["list", "detail", "deep"]] = "deep"
     scrape_id: Optional[str] = None
+    cookies: Optional[str] = None  # Cookie 字符串，用于绕过反爬
 
 
 class DeepScrapeResponse(BaseModel):
@@ -221,6 +284,11 @@ async def scrape_deep(request: ScrapeDeepRequest):
     cancel_manager.start_scrape(scrape_id)
 
     options = request.options or ScrapeOptions()
+
+    # 添加 cookies 到选项
+    if request.cookies:
+        options.cookies = request.cookies
+
     max_articles = min(request.max_articles, 50)
 
     # 解析自定义日期范围
@@ -412,3 +480,202 @@ async def analyze_tabs(request: TabAnalyzeRequest):
             error=result["error"],
             duration=result["duration"],
         )
+
+
+# ==================== 导出相关 API ====================
+
+class ExportRequest(BaseModel):
+    """导出请求"""
+    articles: List[dict]  # 文章列表
+    format: str = "json"  # 导出格式: json, markdown, txt
+
+
+class ExportResponse(BaseModel):
+    """导出响应"""
+    filename: str
+    content: str
+    size: int
+
+
+@router.post("/export", response_model=ExportResponse)
+async def export_articles(request: ExportRequest):
+    """
+    将爬取结果导出为文件内容
+    前端可以选择保存到本地
+    """
+    if not request.articles:
+        raise HTTPException(status_code=400, detail="没有可导出的文章")
+
+    format_type = request.format.lower()
+    articles = request.articles
+
+    if format_type == "markdown":
+        # Markdown 格式
+        content_lines = [
+            "# 爬取文章汇总",
+            f"\n导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"\n共 {len(articles)} 篇文章\n",
+        ]
+
+        for i, article in enumerate(articles, 1):
+            content_lines.append(f"\n---\n\n## {i}. {article.get('title', '无标题')}")
+
+            # 元信息
+            meta_parts = []
+            if article.get("url"):
+                meta_parts.append(f"URL: {article['url']}")
+            if article.get("author"):
+                meta_parts.append(f"作者: {article['author']}")
+            if article.get("published_at"):
+                meta_parts.append(f"发布时间: {article['published_at']}")
+            if article.get("style"):
+                meta_parts.append(f"文体: {article['style']}")
+            if article.get("keywords"):
+                meta_parts.append(f"关键词: {', '.join(article['keywords'])}")
+
+            if meta_parts:
+                content_lines.append("\n" + "\n".join(meta_parts))
+
+            # 摘要
+            if article.get("summary"):
+                content_lines.append(f"\n**摘要:**\n\n{itemize['summary']}")
+
+            # 正文
+            if article.get("content"):
+                content_lines.append(f"\n**正文:**\n\n{itemize['content']}")
+
+        content = "\n".join(content_lines)
+        filename = f"articles_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+
+    elif format_type == "txt":
+        # 纯文本格式
+        content_lines = [
+            "=" * 50,
+            f"爬取文章汇总 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"共 {len(articles)} 篇文章",
+            "=" * 50,
+        ]
+
+        for i, article in enumerate(articles, 1):
+            content_lines.append(f"\n\n{'=' * 40}")
+            content_lines.append(f"文章 {i}: {article.get('title', '无标题')}")
+            content_lines.append(f"{'=' * 40}")
+
+            if article.get("url"):
+                content_lines.append(f"链接: {article['url']}")
+            if article.get("author"):
+                content_lines.append(f"作者: {article['author']}")
+            if article.get("published_at"):
+                content_lines.append(f"时间: {article['published_at']}")
+            if article.get("style"):
+                content_lines.append(f"文体: {article['style']}")
+            if article.get("summary"):
+                content_lines.append(f"\n摘要:\n{itemize['summary']}")
+            if article.get("content"):
+                content_lines.append(f"\n正文:\n{itemize['content']}")
+
+        content = "\n".join(content_lines)
+        filename = f"articles_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+
+    else:
+        # JSON 格式（默认）
+        # 处理日期序列化
+        def serialize_article(a):
+            return {
+                "title": a.get("title", ""),
+                "url": a.get("url", ""),
+                "author": a.get("author"),
+                "published_at": a.get("published_at"),
+                "style": a.get("style"),
+                "summary": a.get("summary"),
+                "keywords": a.get("keywords", []),
+                "content": a.get("content", ""),
+                "word_count": a.get("word_count", 0),
+            }
+
+        export_data = {
+            "export_time": datetime.now().isoformat(),
+            "total": len(articles),
+            "articles": [serialize_article(a) for a in articles],
+        }
+        content = json.dumps(export_data, ensure_ascii=False, indent=2)
+        filename = f"articles_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+
+    return ExportResponse(
+        filename=filename,
+        content=content,
+        size=len(content.encode("utf-8")),
+    )
+
+
+# ==================== 批量保存到数据库 API ====================
+
+class SaveBatchRequest(BaseModel):
+    """批量保存请求"""
+    articles: List[dict]
+    category_id: Optional[str] = None
+
+
+class SaveBatchResponse(BaseModel):
+    """批量保存响应"""
+    success: bool
+    saved: int
+    failed: int
+    db_ids: List[str] = []
+    message: str
+
+
+@router.post("/save-batch", response_model=SaveBatchResponse)
+async def save_batch_to_database(request: SaveBatchRequest):
+    """
+    批量保存爬取结果到数据库
+
+    需要先配置 PostgreSQL 数据库才能使用
+    """
+    scraper = get_scraper()
+    saved_count = 0
+    failed_count = 0
+    db_ids = []
+    messages = []
+
+    for article_data in request.articles:
+        try:
+            result = ScrapedResult(
+                url=article_data.get("url", ""),
+                title=article_data.get("title", ""),
+                content=article_data.get("content", ""),
+                html=article_data.get("html", ""),
+                word_count=article_data.get("word_count", 0),
+                author=article_data.get("author"),
+                summary=article_data.get("summary", ""),
+                style=article_data.get("style"),
+                published_at=article_data.get("published_at"),
+                keywords=article_data.get("keywords", []),
+                links=article_data.get("links", []),
+                status="success",
+            )
+
+            saved, info = scraper.save_to_database(
+                result,
+                category_id=request.category_id,
+                source_id=article_data.get("source_id"),
+            )
+
+            if saved:
+                saved_count += 1
+                db_ids.append(str(info))
+            else:
+                failed_count += 1
+                messages.append(f"保存失败: {info}")
+
+        except Exception as e:
+            failed_count += 1
+            messages.append(f"异常: {str(e)}")
+
+    return SaveBatchResponse(
+        success=failed_count == 0,
+        saved=saved_count,
+        failed=failed_count,
+        db_ids=db_ids,
+        message=f"成功保存 {saved_count} 篇，失败 {failed_count} 篇" if failed_count > 0 else f"成功保存 {saved_count} 篇文章",
+    )

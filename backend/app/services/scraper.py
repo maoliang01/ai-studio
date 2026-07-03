@@ -121,6 +121,34 @@ def clean_content(content: str) -> str:
     if not content:
         return content
 
+    # 0. 预处理：去除 SVG/XML 代码残留（优先处理，避免干扰后续规则）
+    # 这些是用户反馈的无意义字符
+    svg_patterns = [
+        # SVG 路径数据残留（全模式匹配）
+        r"id='Path'\s*fill='[^']*'\s*stroke='none'\s*/>",
+        r"id='[^']*'\s*fill='[^']*'\s*stroke='[^']*'\s*/\s*>",
+        r'%3e\s*%3cpath\s*d=',
+        r"fill='%23[0-9A-Fa-f]+'",
+        r'fill="%23[0-9A-Fa-f]+"',
+        r"stroke='none'",
+        r'stroke="none"',
+        r"transform='translate\([^)]*\)'",
+        r'transform="translate\([^)]*\)"',
+        r'd="M[\d.,\s\-Zz]+"',
+        r"<svg[^>]*>",
+        r"</svg>",
+        r"<g[^>]*>",
+        r"</g>",
+    ]
+    for pattern in svg_patterns:
+        content = re.sub(pattern, '', content, flags=re.IGNORECASE)
+
+    # 去除所有 HTML/XML 标签（提前全部清理，避免残留）
+    content = re.sub(r'<script[^>]*>[\s\S]*?</script>', '', content, flags=re.IGNORECASE)
+    content = re.sub(r'<style[^>]*>[\s\S]*?</style>', '', content, flags=re.IGNORECASE)
+    content = re.sub(r'<[^>]+>', '', content)
+    content = re.sub(r'</[^>]+>', '', content)
+
     # 1. 去除 Markdown 图片链接: ![alt](url) -> 空
     content = re.sub(r'!\[([^\]]*)\]\([^)]+\)', '', content)
 
@@ -150,43 +178,47 @@ def clean_content(content: str) -> str:
 
     # 9. 去除零宽字符
     zero_width_chars = [
-        '​', '‌', '‍', '﻿', '­', '᠎', '​', '‌', '‍', '﻿'
+        '​', '‌', '‍', '﻿', '­', '᠎', '​', '‌', '‍', '﻿',
+        '​', '‌', '‍', '﻿', '­',
     ]
     for char in zero_width_chars:
         content = content.replace(char, '')
 
-    # 10. 去除控制字符（保留换行和回车）
+    # 10. 去除 URL 编码残留（如 %20、%23 等）
+    content = re.sub(r'%[0-9A-Fa-f]{2}', ' ', content)
+
+    # 11. 去除控制字符（保留换行和回车）
     content = ''.join(char for char in content if ord(char) >= 32 or char in '\n\r\t')
 
-    # 11. 规范化空白字符
+    # 12. 规范化空白字符
     content = re.sub(r'[ \t]+', ' ', content)
     content = re.sub(r'\n{3,}', '\n\n', content)
 
-    # 12. 去除行首行尾空白，移除空行
+    # 13. 去除行首行尾空白，移除空行
     lines = [line.strip() for line in content.split('\n')]
     content = '\n'.join(line for line in lines if line)
 
-    # 13. 最终清理：移除孤立的空括号
+    # 14. 最终清理：移除孤立的空括号
     content = re.sub(r'^\s*\(\)\s*$', '', content, flags=re.MULTILINE)
     content = re.sub(r'^\s*\(\s*\)\s*$', '', content, flags=re.MULTILINE)
 
-    # 14. 去除开头的导航菜单元素（1. ENGLISH 2. 网站地图 等）
+    # 15. 去除开头的导航菜单元素（1. ENGLISH 2. 网站地图 等）
     # 匹配类似 "1. ENGLISH\n2. 网站地图\n..." 的模式
     nav_pattern = r'^(?:\d+\.\s*(?:ENGLISH|网站地图|中国科学院|邮箱登录|联系我们)[\s\n]*)+'
     content = re.sub(nav_pattern, '', content, flags=re.IGNORECASE)
 
-    # 15. 去除"当前位置"导航行和栏目导航
+    # 16. 去除"当前位置"导航行和栏目导航
     content = re.sub(r'^当前位置[：:]?\s*>>?\s*首页\s*$', '', content, flags=re.MULTILINE)
     content = re.sub(r'^>>\s*首页\s*$', '', content, flags=re.MULTILINE)
     content = re.sub(r'^>>\s*[一-龥A-Za-z]+(?:\s*>>\s*[一-龥A-Za-z]+)*\s*$', '', content, flags=re.MULTILINE)  # >> 栏目名
 
-    # 16. 去除顶部的栏目名（单独一行的"工作动态"、"党群园地"等）
+    # 17. 去除顶部的栏目名（单独一行的"工作动态"、"党群园地"等）
     content = re.sub(r'^(?:工作动态|党群园地|首页|科普园地|组织机构|新闻中心)[^\n]*\n?', '', content, flags=re.MULTILINE)
 
-    # 17. 去除分隔线（----、====、****）
+    # 18. 去除分隔线（----、====、****）
     content = re.sub(r'^[-=*]{3,}\s*$', '', content, flags=re.MULTILINE)
 
-    # 18. 去除底部的版权和备案信息
+    # 19. 去除底部的版权和备案信息
     footer_patterns = [
         r'版权所有\s*[©©]\s*[^\n]+',
         r'备案序号[：:]\s*[^\n]+',
@@ -198,16 +230,18 @@ def clean_content(content: str) -> str:
     for pattern in footer_patterns:
         content = re.sub(pattern, '', content)
 
-    # 19. 去除底部"版权所有"等整行
+    # 20. 去除底部"版权所有"等整行
     content = re.sub(r'^[^\n]*版权所有[^\n]*$', '', content, flags=re.MULTILINE)
     content = re.sub(r'^[^\n]*备案序号[^\n]*$', '', content, flags=re.MULTILINE)
     content = re.sub(r'^[^\n]*京ICP备[^\n]*$', '', content, flags=re.MULTILINE)
 
-    # 20. 再清理"加载更多"等按钮文字
+    # 21. 再清理"加载更多"等按钮文字
     content = re.sub(r'^加载更多[^\n]*$', '', content, flags=re.MULTILINE)
 
-    # 21. 去除网站导航元素（手机版、PC版本、网站无障碍等）
+    # 22. 去除网站导航元素（手机版、PC版本、网站无障碍等）- 包括带下划线格式
     nav_element_patterns = [
+        r'^_手机版_\s*$',
+        r'^_PC版本_\s*$',
         r'^手机版\s*$',
         r'^PC版本\s*$',
         r'^网站无障碍\)\s*$',
@@ -215,11 +249,13 @@ def clean_content(content: str) -> str:
         r'^多语种频道\s*$',
         r'^地方频道\s*$',
         r'^网站地图\s*$',
+        r'^学习进行时[^\n]*$',
+        r'^[_\-]*(?:news|home|index|about|contact|login)[_\-]*\s*$',  # 英文导航残留
     ]
     for pattern in nav_element_patterns:
         content = re.sub(pattern, '', content, flags=re.MULTILINE)
 
-    # 22. 去除栏目列表导航（如：* 高层、* 时政、* 人事 等 Markdown 列表格式）
+    # 23. 去除栏目列表导航（如：* 高层、* 时政、* 人事 等 Markdown 列表格式）
     # 先处理列表项格式，再处理纯文字格式
     category_list_patterns = [
         # Markdown 列表格式: * 高层
@@ -235,12 +271,55 @@ def clean_content(content: str) -> str:
     for pattern in category_list_patterns:
         content = re.sub(pattern, '', content, flags=re.MULTILINE | re.IGNORECASE)
 
-    # 23. 去除 SVG/XML 等代码残留（Play Video、Path 等）
-    content = re.sub(r"Play\s*Video\s*", '', content)
-    content = re.sub(r"id='[^']*'\s*fill='[^']*'\s*stroke='[^']*'\s*/[^>]*>", '', content)
-    content = re.sub(r"<[^>]+>", '', content)  # 去除剩余的 HTML/XML 标签
+    # 24. 去除 Play Video 等无意义文字残留
+    content = re.sub(r"Play\s*Video\s*", '', content, flags=re.IGNORECASE)
 
-    # 24. 再次清理空行
+    # 25. 去除无意义的占位符和提示文字
+    placeholder_patterns = [
+        r'^点击播放[^\n]*$',
+        r'^视频播放[^\n]*$',
+        r'^请输入关键字[^\n]*$',
+        r'^搜索[^\n]*$',
+        r'^分享到[^\n]*$',
+        r'^\d+:\d+\s*$',  # 纯时间格式行
+        r'^/0:\d+\s*$',  # /0:00 格式
+        r'^0:/0:\d+/0:\d+\s*$',  # 媒体时间显示残留
+    ]
+    for pattern in placeholder_patterns:
+        content = re.sub(pattern, '', content, flags=re.MULTILINE)
+
+    # 26. 去除 SVG/Path 等残留元素（更彻底）
+    svg_residual_patterns = [
+        # 整行匹配：id='Path' 或 d='M...' 等
+        r"^[^'\n]*'[^'\n]*$",  # 整行只有引号包裹的内容（可疑的 SVG 残留）
+        # 匹配 d='M数字字母...' 这样的 SVG 路径行
+        r"^\s*d\s*=\s*['\"][M\d.,\s\-Zz]+['\"]",
+        r"^\s*fill\s*=\s*['\"][^'\"]*['\"]",
+        r"^\s*stroke\s*=\s*['\"][^'\"]*['\"]",
+        r"^\s*transform\s*=\s*['\"][^'\"]*['\"]",
+        # 匹配 path d='...' 格式
+        r"path\s+d\s*=\s*['\"][^'\"]+['\"]",
+        r"^\s*path\s+d\s*=\s*['\"]",
+        # 匹配类似 "M1.67473 0.487896C1.53133..." 的 SVG 路径数据行
+        r"^\s*[Mm]\d+[\d.,\s\-Zz]+",
+        # URL 编码的 HTML 标签残留
+        r"%3c[^>]+>%s*",  # <...>
+        r"%3e\s*",  # >
+        r"\s*%3c",  # <
+        r"&lt;[^&]+&gt;",  # &lt;...&gt;
+    ]
+    for pattern in svg_residual_patterns:
+        content = re.sub(pattern, '', content, flags=re.MULTILINE | re.IGNORECASE)
+
+    # 26. 再次清理空行
+    lines = [line.strip() for line in content.split('\n')]
+    content = '\n'.join(line for line in lines if line)
+
+    # 27. 去除连续的无意义符号（如 _ _ _ _ 多个下划线）
+    content = re.sub(r'^[_]{3,}\s*$', '', content, flags=re.MULTILINE)
+    content = re.sub(r'^[_\-]{3,}\s*$', '', content, flags=re.MULTILINE)
+
+    # 28. 去除行首行尾空白，移除空行（最终清理）
     lines = [line.strip() for line in content.split('\n')]
     content = '\n'.join(line for line in lines if line)
 
@@ -450,6 +529,7 @@ class ScrapeOptions:
     max_depth: int = 0
     timeout: int = 30
     extract_metadata: bool = True
+    cookies: Optional[str] = None  # Cookie 字符串，用于绕过反爬
 
 
 @dataclass
@@ -468,6 +548,7 @@ class ScrapedResult:
     author: Optional[str] = None
     summary: Optional[str] = None
     keywords: List[str] = field(default_factory=list)
+    style: Optional[str] = None  # 文体（新闻、通知、纪要等）
 
     def __post_init__(self):
         if self.links is None:
@@ -838,10 +919,87 @@ def reset_firecrawl_client() -> None:
     _firecrawl_client = None
 
 
+class Crawl4AIWrapper:
+    """Crawl4AI 爬取包装器（备选方案）"""
+
+    @staticmethod
+    async def scrape(url: str, timeout: int = 30, cookies: str = None) -> Dict[str, Any]:
+        """使用 crawl4ai 爬取网页
+
+        Args:
+            url: 目标URL
+            timeout: 超时时间（秒）
+            cookies: Cookie字符串，用于绕过反爬（如 "name=value; name2=value2"）
+        """
+        try:
+            from crawl4ai import AsyncWebCrawler, BrowserConfig
+
+            # 构建浏览器配置
+            browser_config = BrowserConfig()
+
+            async with AsyncWebCrawler(config=browser_config, verbose=False) as crawler:
+                # 爬取参数
+                crawl_params = {"url": url}
+
+                # 如果有 Cookie，添加 cookies 参数
+                if cookies:
+                    crawl_params["cookies"] = cookies
+                    logger.info(f"使用 Cookie 爬取: {url}")
+
+                result = await crawler.arun(**crawl_params)
+
+                if result.success:
+                    # 检查是否是反爬页面
+                    if result.html:
+                        html_preview = result.html[:1000].lower()
+                        anti_bot_keywords = ["403", "访问频率", "blocked", "forbidden", "访问过于频繁", "captcha", "验证码"]
+                        if any(kw in html_preview for kw in anti_bot_keywords):
+                            domain = urlparse(url).netloc
+                            return {
+                                "success": False,
+                                "error": "anti_bot_detected",
+                                "error_detail": f"网站 ({domain}) 有反爬保护，请尝试输入 Cookie",
+                                "domain": domain,
+                            }
+
+                    return {
+                        "success": True,
+                        "content": result.markdown or "",
+                        "markdown": result.markdown or "",
+                        "title": result.metadata.get("title", "") if result.metadata else "",
+                        "links": result.links.get("internal", []) if result.links else [],
+                        "html": result.html or "",
+                        "metadata": result.metadata or {},
+                    }
+                else:
+                    error_msg = getattr(result, 'error_message', None) or getattr(result, 'error', None) or "Crawl4AI爬取失败"
+                    # 检测反爬
+                    if "403" in error_msg or "blocked" in error_msg.lower() or "forbidden" in error_msg.lower():
+                        domain = urlparse(url).netloc
+                        return {
+                            "success": False,
+                            "error": "anti_bot_detected",
+                            "error_detail": f"网站 ({domain}) 有反爬保护，请尝试输入 Cookie",
+                            "domain": domain,
+                        }
+                    return {"success": False, "error": error_msg}
+        except Exception as e:
+            error_str = str(e)
+            if "403" in error_str or "blocked" in error_str.lower() or "forbidden" in error_str.lower():
+                return {
+                    "success": False,
+                    "error": "anti_bot_detected",
+                    "error_detail": "网站有反爬保护，请尝试输入 Cookie",
+                    "domain": urlparse(url).netloc,
+                }
+            return {"success": False, "error": error_str}
+
+
 class WebScraper:
     """
     网页爬取引擎
     使用 Firecrawl + URL 日期提取 + LLM 摘要
+    如 Firecrawl 不可用，自动回退到 Crawl4AI
     """
 
     def __init__(self, cancel_event: Optional[asyncio.Event] = None, progress_callback: Optional[callable] = None):
@@ -849,6 +1007,7 @@ class WebScraper:
         self._cancel_event = cancel_event
         self._firecrawl = get_firecrawl_client()
         self._progress_callback = progress_callback
+        self._use_crawl4ai = False  # 是否使用 crawl4ai 作为回退
 
     def _is_cancelled(self) -> bool:
         """检查是否已取消"""
@@ -861,9 +1020,18 @@ class WebScraper:
             self._llm_service = llm_service
         return self._llm_service
 
-    def _extract_links_from_html(self, html: str, base_url: str) -> List[str]:
-        """从 HTML 提取链接"""
+    def _extract_links_from_html(self, html: str, base_url: str, markdown: str = "") -> List[str]:
+        """
+        从 HTML 和 markdown 内容提取链接
+
+        Args:
+            html: HTML 内容
+            base_url: 基础 URL
+            markdown: markdown 内容（用于动态渲染的页面，如热榜类网站）
+        """
         links = []
+
+        # 1. 从 HTML 提取链接
         pattern = r'<a[^>]+href=["\']([^"\']+)["\']'
         for match in re.finditer(pattern, html):
             href = match.group(1)
@@ -872,6 +1040,20 @@ class WebScraper:
                     links.append(href)
                 else:
                     links.append(urljoin(base_url, href))
+
+        # 2. 从 markdown 内容提取链接（用于动态渲染页面）
+        # 格式：[标题](url) 或 [标题](url "描述")
+        if markdown:
+            md_links = re.findall(r'\[([^\]]+)\]\((https?://[^\s\)]+)', markdown)
+            for text, href in md_links:
+                # 跳过无意义链接（图片、logo、空标题等）
+                skip_patterns = ['logo', '图片', 'image', 'icon', 'avatar', '缩略', 'thumbnail',
+                               '查看详细', '查看更多', 'more', 'icon', 'btn', 'button']
+                if any(p in text.lower() for p in skip_patterns):
+                    continue
+                if href and len(text) > 2:  # 标题太短跳过
+                    links.append(href)
+
         return list(set(links))
 
     async def scrape(self, url: str, options: Optional[ScrapeOptions] = None) -> ScrapedResult:
@@ -888,13 +1070,32 @@ class WebScraper:
         result = ScrapedResult(url=url)
         logger.info(f"开始爬取: {url}")
 
+        # 获取 cookies（如果有）
+        cookies = getattr(options, 'cookies', None)
+
         try:
-            # 1. Firecrawl 爬取
-            scrape_result = await self._firecrawl.scrape_url(url, timeout=options.timeout)
+            # 1. Firecrawl 爬取（优先）或 Crawl4AI（回退）
+            if self._use_crawl4ai:
+                scrape_result = await Crawl4AIWrapper.scrape(url, timeout=options.timeout, cookies=cookies)
+            else:
+                scrape_result = await self._firecrawl.scrape_url(url, timeout=options.timeout)
+
+            # Firecrawl 失败时自动回退到 Crawl4AI
+            if not scrape_result.get("success") and not self._use_crawl4ai:
+                logger.warning(f"Firecrawl 爬取失败，回退到 Crawl4AI: {url}")
+                scrape_result = await Crawl4AIWrapper.scrape(url, timeout=options.timeout, cookies=cookies)
+                if scrape_result.get("success"):
+                    self._use_crawl4ai = True  # 后续继续使用 crawl4ai
 
             if not scrape_result.get("success"):
-                result.status = "error"
-                result.error_message = scrape_result.get("error", "爬取失败")
+                # 检查是否是反爬错误
+                if scrape_result.get("error") == "anti_bot_detected":
+                    result.status = "anti_bot_blocked"
+                    result.error_message = scrape_result.get("error_detail", "网站有反爬保护")
+                    result.error_message += f" (域名: {scrape_result.get('domain', '')})"
+                else:
+                    result.status = "error"
+                    result.error_message = scrape_result.get("error", "爬取失败")
                 logger.error(f"爬取失败: {url}, 错误: {result.error_message}")
                 return result
 
@@ -912,7 +1113,8 @@ class WebScraper:
             if not result.title:
                 result.title = extract_title_from_content(result.content)
 
-            result.links = self._extract_links_from_html(raw_html, url)
+            # 提取链接（同时从 HTML 和 markdown 内容）
+            result.links = self._extract_links_from_html(raw_html, url, markdown)
             result.word_count = len(result.content.replace("\n", "").replace(" ", ""))
 
             # 3. 检测是否为列表页（通过内容判断）
@@ -963,6 +1165,12 @@ class WebScraper:
 
                 result.keywords = metadata.get("keywords", [])
 
+            # 6. 文体分析（可选，在摘要提取后进行）
+            if options.extract_metadata and result.content and result.word_count >= 50 and not result.style:
+                result.style = await self._extract_style_with_llm(result.title, result.content)
+                if result.style:
+                    logger.info(f"文体已识别: {result.style}")
+
                 # 如果没有 URL 日期也没有内容日期，用 LLM 日期（兜底）
                 if not result.published_at and metadata.get("published_at"):
                     if DateExtractor._validate_date(metadata["published_at"]):
@@ -983,6 +1191,146 @@ class WebScraper:
 
         return result
 
+    def save_to_database(
+        self,
+        result: ScrapedResult,
+        category_id: Optional[str] = None,
+        source_id: Optional[str] = None
+    ) -> Tuple[bool, str]:
+        """
+        将爬取结果保存到数据库
+
+        Args:
+            result: 爬取结果
+            category_id: 分类 ID
+            source_id: 来源 ID
+
+        Returns:
+            Tuple[bool, str]: (是否成功, 文章ID 或 错误信息)
+        """
+        try:
+            from app.core.database import get_session_local
+            from app.models.article import Article, Keyword, ArticleLink, ArticleKeyword
+
+            SessionLocal = get_session_local()
+            db = SessionLocal()
+
+            try:
+                # 检查是否已存在
+                existing = db.query(Article).filter(Article.url == result.url).first()
+
+                if existing:
+                    # 更新已存在的文章
+                    existing.title = result.title or existing.title
+                    existing.content = result.content or existing.content
+                    existing.html = result.html or existing.html
+                    existing.word_count = result.word_count or existing.word_count
+                    existing.author = result.author or existing.author
+                    existing.summary = result.summary or existing.summary
+                    existing.style = result.style or existing.style  # 文体
+                    existing.status = result.status
+                    existing.error_message = result.error_message
+
+                    # 更新分类和来源（如果文章没有分类）
+                    if category_id and not existing.category_id:
+                        existing.category_id = category_id
+                    if source_id and not existing.source_id:
+                        existing.source_id = source_id
+
+                    if result.published_at:
+                        try:
+                            from datetime import datetime as dt
+                            existing.published_at = dt.strptime(result.published_at, "%Y-%m-%d").date()
+                        except (ValueError, TypeError):
+                            pass
+
+                    existing.content_hash = existing.calculate_content_hash()
+
+                    # 更新关键词
+                    if result.keywords:
+                        db.query(ArticleKeyword).filter(
+                            ArticleKeyword.article_id == existing.id
+                        ).delete()
+
+                        for kw_name in result.keywords:
+                            if not kw_name or not kw_name.strip():
+                                continue
+                            kw_name = kw_name.strip()
+                            keyword = db.query(Keyword).filter(Keyword.name == kw_name).first()
+                            if not keyword:
+                                keyword = Keyword(name=kw_name)
+                                db.add(keyword)
+                                db.flush()
+                            existing.keywords.append(ArticleKeyword(keyword_id=keyword.id))
+
+                    db.commit()
+                    logger.info(f"更新数据库文章: id={existing.id}, url={existing.url[:50]}")
+                    return True, existing.id
+
+                # 创建新文章
+                article = Article(
+                    url=result.url,
+                    title=result.title or "",
+                    content=result.content or "",
+                    html=result.html or "",
+                    word_count=result.word_count or 0,
+                    author=result.author,
+                    summary=result.summary or "",
+                    style=result.style,  # 文体
+                    status=result.status,
+                    error_message=result.error_message,
+                    category_id=category_id,
+                    source_id=source_id,
+                )
+
+                # 解析日期
+                if result.published_at:
+                    try:
+                        from datetime import datetime as dt
+                        article.published_at = dt.strptime(result.published_at, "%Y-%m-%d").date()
+                    except (ValueError, TypeError):
+                        pass
+
+                if result.scraped_at:
+                    try:
+                        article.scraped_at = datetime.fromisoformat(result.scraped_at)
+                    except (ValueError, TypeError):
+                        pass
+
+                article.content_hash = article.calculate_content_hash()
+
+                # 保存链接
+                if result.links:
+                    for link_url in result.links:
+                        article.links.append(ArticleLink(target_url=link_url))
+
+                # 保存关键词
+                if result.keywords:
+                    for kw_name in result.keywords:
+                        if not kw_name or not kw_name.strip():
+                            continue
+                        kw_name = kw_name.strip()
+                        keyword = db.query(Keyword).filter(Keyword.name == kw_name).first()
+                        if not keyword:
+                            keyword = Keyword(name=kw_name)
+                            db.add(keyword)
+                            db.flush()
+                        article.keywords.append(ArticleKeyword(keyword_id=keyword.id))
+
+                db.add(article)
+                db.commit()
+                db.refresh(article)
+
+                logger.info(f"保存到数据库文章: id={article.id}, url={article.url[:50]}")
+                return True, article.id
+
+            finally:
+                db.close()
+
+        except Exception as e:
+            logger.error(f"保存到数据库失败: {e}")
+            return False, str(e)
+
     def _is_list_page(self, content: str, links: List[str]) -> bool:
         """判断是否为列表页（只有内容真正很少时才认为是列表页）"""
         # 只有内容非常少时才认为是列表页
@@ -1000,7 +1348,7 @@ class WebScraper:
         return False
 
     async def _extract_metadata_with_llm(self, title: str, content: str, url: str = "") -> Dict[str, Any]:
-        """使用大模型提取元信息，包括标题和摘要"""
+        """使用大模型提取元信息，包括标题、摘要和文体"""
         try:
             llm = self._get_llm_service()
 
@@ -1055,7 +1403,7 @@ class WebScraper:
                                 elif k:
                                     keywords.append(str(k).strip())
                         keywords = [k for k in keywords if k]  # 去重后去除空值
-                        
+
                         return {
                             "title": data.get("title", title) if title or not data.get("title") else data.get("title"),
                             "published_at": data.get("published_at", ""),
@@ -1069,6 +1417,60 @@ class WebScraper:
             logger.error(f"LLM 元信息提取失败: {e}")
 
         return {"title": title, "published_at": "", "author": "", "summary": "", "keywords": []}
+
+    async def _extract_style_with_llm(self, title: str, content: str) -> Optional[str]:
+        """使用大模型分析文章文体类型"""
+        try:
+            llm = self._get_llm_service()
+            content_preview = content[:3000]  # 限制内容长度
+
+            prompt = f"""你是一位专业的文档分类专家。请分析以下文章的文体类型。
+
+文章标题：{title if title else "（未找到标题）"}
+
+文章内容：
+{content_preview}
+
+请根据文章的内容、格式和语言风格，判断这篇文档属于以下哪种文体类型（请选择一个最合适的）：
+
+1. **新闻报道** - 报道事件、活动、会议等动态新闻
+2. **通知公告** - 政府或单位的行政通知、政策文件、招标公告等
+3. **会议纪要** - 记录会议内容、讨论事项、决议等
+4. **领导讲话** - 领导人在会议、活动上的发言稿、致辞
+5. **工作简报** - 工作总结、工作动态、工作进展报告
+6. **政策解读** - 对政策、法规的解读和分析
+7. **专题文章** - 深度分析、研究报告、专题论述
+8. **行业动态** - 行业发展趋势、市场分析、行业新闻
+9. **其他** - 不属于上述类型的其他文章
+
+请以JSON格式返回结果：
+{{"style":"文体类型","confidence":"高/中/低","reason":"简要说明判断理由"}}
+
+只返回JSON，不要添加任何解释或其他内容。"""
+
+            response = await llm.non_stream_chat(
+                model_id="",
+                messages=[{"role": "user", "content": prompt}],
+            )
+
+            logger.info(f"LLM 文体分析响应: {response[:300]}...")
+
+            if response and not response.startswith("[错误]"):
+                json_match = re.search(r'\{[\s\S]*\}', response)
+                if json_match:
+                    try:
+                        data = json.loads(json_match.group())
+                        style = data.get("style", "")
+                        if style:
+                            logger.info(f"文体分析结果: {style}")
+                            return style
+                    except json.JSONDecodeError:
+                        logger.error(f"文体分析 JSON 解析失败")
+
+        except Exception as e:
+            logger.error(f"LLM 文体分析失败: {e}")
+
+        return None
 
     async def scrape_batch(
         self,
@@ -1168,10 +1570,13 @@ class WebScraper:
                                 logger.debug(f"预过滤(日期不符): {link}")
                         except Exception as e:
                             logger.debug(f"预过滤(日期解析失败): {link}")
-                            no_date_count += 1
+                            # 解析失败的链接保留
+                            filtered_links.append(link)
                     else:
                         no_date_count += 1
-                        logger.debug(f"预过滤(无日期): {link}")
+                        # 无日期的链接也保留（如热榜类页面）
+                        filtered_links.append(link)
+                        logger.debug(f"保留(无日期): {link}")
 
                 logger.info(f"URL日期预过滤: {len(article_links)} -> {len(filtered_links)} 篇 (无日期: {no_date_count})")
                 article_links = filtered_links
@@ -1252,7 +1657,7 @@ class WebScraper:
         return list_page, valid_results
 
     def _filter_article_links(self, links: List[str], base_url: str) -> List[str]:
-        """过滤出文章链接，只保留与列表页同栏目的文章"""
+        """过滤出文章链接"""
         parsed_base = urlparse(base_url)
         domain = parsed_base.netloc
         base_path = parsed_base.path
@@ -1264,6 +1669,9 @@ class WebScraper:
         main_category = path_parts[0] if path_parts else ""
 
         logger.info(f"主栏目: /{main_category}/ (来自: {base_url})")
+
+        # 判断是否为热榜/聚合类页面（允许外部链接）
+        is_aggregation_page = any(x in base_url.lower() for x in ['/n/', '/hot', '/trending', '/rank', 'tophub', 'weibo.com', 'zhihu.com/'])
 
         article_links = []
 
@@ -1288,22 +1696,46 @@ class WebScraper:
             'share', 'share.html', '收藏', 'favorite', 'bookmark',
         ]
 
+        # 热榜/聚合类网站允许的外部域名
+        allowed_external_domains = [
+            'zhihu.com', 'weibo.com', 'sina.com', 'tencent.com',
+            'douban.com', 'bilibili.com', 'weixin', 'mp.weixin',
+            'xinhuanet.com', 'people.com.cn', 'cctv.com',
+            'baidu.com', 'sohu.com', 'ifeng.com', 'thepaper.cn',
+            'jiemian.com', 'caixin.com', 'yicai.com',
+        ]
+
         # 文章链接特征（更严格的要求）
         for link in links:
             if not link or link.startswith(('javascript:', '#', 'mailto:')):
                 continue
 
-            # 同域名检查
             parsed = urlparse(link)
-            if parsed.netloc and parsed.netloc != domain:
-                continue
-
-            # 转换为小写用于模式匹配
             link_lower = link.lower()
 
             # 跳过模式
             if any(p in link_lower for p in skip_patterns):
                 continue
+
+            is_external = parsed.netloc and parsed.netloc != domain
+
+            # 外部链接检查
+            if is_external:
+                # 热榜/聚合类页面：允许特定外部链接
+                if is_aggregation_page:
+                    # 检查是否是允许的外部域名
+                    is_allowed = any(d in parsed.netloc.lower() for d in allowed_external_domains)
+                    if is_allowed:
+                        article_links.append(link)
+                        logger.debug(f"  接受(外部): {link}")
+                    continue
+                else:
+                    # 非聚合页面：不接受外部链接
+                    continue
+
+            # 同域名链接检查
+            link_path = parsed.path
+            link_parts = link_path.strip('/').split('/')
 
             # 文章链接特征检查
             # 日期模式：/YYYYMM/ 或 /YYYYMMDD/ 或 tYYYYMMDD
@@ -1312,17 +1744,21 @@ class WebScraper:
             has_file_ext = any(link.endswith(ext) for ext in ['.html', '.htm', '.shtml', '.php'])
 
             # 栏目检查：只接受主栏目路径下的文章
-            # 例如：列表页 /yw/ -> 只接受 /yw/202606/xxx.shtml
-            #       不接受 /djcx/gz/202606/xxx.shtml
-            link_path = urlparse(link).path
-            link_parts = link_path.strip('/').split('/')
-            # 文章 URL 格式通常是: /主栏目/日期/xxx.shtml
-            # 所以第一个路径段应该是主栏目名
             is_same_category = len(link_parts) > 1 and link_parts[0] == main_category
 
             # 如果列表页是根路径（如 /），允许所有链接
             if not main_category:
                 is_same_category = True
+
+            # 热榜类页面（如 /n/xxx）：允许所有同域名的详情页
+            if main_category == 'n' and has_file_ext:
+                is_same_category = True
+
+            if has_date_in_url and has_file_ext and is_same_category:
+                article_links.append(link)
+                logger.debug(f"  接受: {link}")
+            elif has_date_in_url and has_file_ext and not is_same_category:
+                logger.debug(f"  过滤(不同栏目): {link}")
 
             if has_date_in_url and has_file_ext and is_same_category:
                 article_links.append(link)

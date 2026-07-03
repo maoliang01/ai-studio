@@ -449,3 +449,222 @@ export async function saveSettings(data: Record<string, unknown>): Promise<{ mes
 
   return response.json();
 }
+
+// ================================================
+// 文章管理 API（数据库）
+// ================================================
+
+import type {
+  Article,
+  ArticleListResponse,
+  ArticleStats,
+  ArticleSearchRequest,
+} from "@/types";
+
+/**
+ * 获取文章统计
+ */
+export async function fetchArticleStats(): Promise<ArticleStats> {
+  const response = await fetch(`${API_BASE}/articles/stats`);
+  if (!response.ok) {
+    throw new Error(`获取文章统计失败: ${response.status}`);
+  }
+  return response.json();
+}
+
+/**
+ * 获取文章列表
+ */
+export async function fetchArticles(params?: {
+  categoryId?: string;
+  sourceId?: string;
+  status?: string;
+  startDate?: string;
+  endDate?: string;
+  page?: number;
+  pageSize?: number;
+}): Promise<ArticleListResponse> {
+  const searchParams = new URLSearchParams();
+  if (params?.categoryId) searchParams.set("category_id", params.categoryId);
+  if (params?.sourceId) searchParams.set("source_id", params.sourceId);
+  if (params?.status) searchParams.set("status", params.status);
+  if (params?.startDate) searchParams.set("start_date", params.startDate);
+  if (params?.endDate) searchParams.set("end_date", params.endDate);
+  if (params?.page) searchParams.set("page", String(params.page));
+  if (params?.pageSize) searchParams.set("page_size", String(params.pageSize));
+
+  const response = await fetch(`${API_BASE}/articles?${searchParams}`);
+  if (!response.ok) {
+    throw new Error(`获取文章列表失败: ${response.status}`);
+  }
+
+  const data = await response.json();
+  // 规范化 snake_case -> camelCase
+  return {
+    ...data,
+    pageSize: data.page_size,
+  };
+}
+
+/**
+ * 获取单个文章
+ */
+export async function fetchArticle(id: string): Promise<Article> {
+  const response = await fetch(`${API_BASE}/articles/${id}`);
+  if (!response.ok) {
+    throw new Error(`获取文章失败: ${response.status}`);
+  }
+  return normalizeArticle(await response.json());
+}
+
+/**
+ * 创建文章
+ */
+export async function createArticle(data: {
+  url: string;
+  title?: string;
+  content?: string;
+  keywords?: string[];
+  categoryId?: string;
+  sourceId?: string;
+}): Promise<Article> {
+  const response = await fetch(`${API_BASE}/articles`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      url: data.url,
+      title: data.title,
+      content: data.content,
+      keywords: data.keywords,
+      category_id: data.categoryId,
+      source_id: data.sourceId,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(errorData.detail || `创建文章失败: ${response.status}`);
+  }
+
+  return normalizeArticle(await response.json());
+}
+
+/**
+ * 更新文章
+ */
+export async function updateArticle(id: string, data: Partial<Article>): Promise<Article> {
+  const body: Record<string, unknown> = {};
+  if (data.title !== undefined) body.title = data.title;
+  if (data.content !== undefined) body.content = data.content;
+  if (data.author !== undefined) body.author = data.author;
+  if (data.summary !== undefined) body.summary = data.summary;
+  if (data.categoryId !== undefined) body.category_id = data.categoryId;
+  if (data.keywords !== undefined) body.keywords = data.keywords;
+
+  const response = await fetch(`${API_BASE}/articles/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    throw new Error(`更新文章失败: ${response.status}`);
+  }
+
+  return normalizeArticle(await response.json());
+}
+
+/**
+ * 删除文章
+ */
+export async function deleteArticle(id: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/articles/${id}`, {
+    method: "DELETE",
+  });
+
+  if (!response.ok) {
+    throw new Error(`删除文章失败: ${response.status}`);
+  }
+}
+
+/**
+ * 搜索文章
+ */
+export async function searchArticles(params: ArticleSearchRequest): Promise<ArticleListResponse> {
+  const searchParams = new URLSearchParams();
+  searchParams.set("q", params.q);
+  if (params.categoryId) searchParams.set("category_id", params.categoryId);
+  if (params.sourceId) searchParams.set("source_id", params.sourceId);
+  if (params.status) searchParams.set("status", params.status);
+  if (params.page) searchParams.set("page", String(params.page));
+  if (params.pageSize) searchParams.set("page_size", String(params.pageSize));
+
+  const response = await fetch(`${API_BASE}/articles/search?${searchParams}`);
+  if (!response.ok) {
+    throw new Error(`搜索文章失败: ${response.status}`);
+  }
+
+  const data = await response.json();
+  return {
+    ...data,
+    pageSize: data.page_size,
+  };
+}
+
+/**
+ * 根据 URL 获取文章
+ */
+export async function fetchArticleByUrl(url: string): Promise<Article | null> {
+  try {
+    const response = await fetch(`${API_BASE}/articles/url/${encodeURIComponent(url)}`);
+    if (response.ok) {
+      return normalizeArticle(await response.json());
+    }
+    if (response.status === 404) {
+      return null;
+    }
+    throw new Error(`查询失败: ${response.status}`);
+  } catch (error) {
+    if ((error as { status?: number }).status === 404) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * 检查 URL 是否已存在
+ */
+export async function checkArticleUrlExists(url: string): Promise<{ exists: boolean; articleId?: string }> {
+  const response = await fetch(`${API_BASE}/articles/check-url/${encodeURIComponent(url)}`);
+  if (!response.ok) {
+    throw new Error(`检查 URL 失败: ${response.status}`);
+  }
+  return response.json();
+}
+
+/**
+ * 规范化后端返回的文章数据 (snake_case -> camelCase)
+ */
+function normalizeArticle(data: Record<string, unknown>): Article {
+  return {
+    id: data.id as string,
+    url: data.url as string,
+    title: data.title as string || "",
+    content: data.content as string || "",
+    html: data.html as string | undefined,
+    wordCount: data.word_count as number ?? data.wordCount as number ?? 0,
+    author: data.author as string | undefined,
+    summary: data.summary as string | undefined,
+    contentHash: data.content_hash as string | undefined,
+    sourceId: data.source_id as string | undefined,
+    categoryId: data.category_id as string | undefined,
+    publishedAt: data.published_at as string | undefined,
+    scrapedAt: data.scraped_at as string,
+    status: (data.status as Article["status"]) || "success",
+    errorMessage: data.error_message as string | undefined,
+    keywords: (data.keywords as string[]) || [],
+    createdAt: data.created_at as string | undefined,
+    updatedAt: data.updated_at as string | undefined,
+  };
+}

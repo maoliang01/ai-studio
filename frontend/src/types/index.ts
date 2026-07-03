@@ -108,6 +108,69 @@ export interface PromptCategory {
 }
 
 // ================================================
+// 文章相关类型（数据库存储）
+// ================================================
+
+/** 文章状态 */
+export type ArticleStatus = "pending" | "success" | "error";
+
+/** 文章模型（数据库存储） */
+export interface Article {
+  id: string;
+  url: string;
+  title: string;
+  content: string;
+  html?: string;
+  wordCount: number;
+  author?: string;
+  summary?: string;
+  style?: string;         // 文体：新闻报道、通知公告、会议纪要等
+  contentHash?: string;
+  sourceId?: string;
+  sourceName?: string;    // 来源名称
+  categoryId?: string;
+  categoryName?: string;  // 分类名称
+  publishedAt?: string;
+  scrapedAt: string;
+  status: ArticleStatus;
+  errorMessage?: string;
+  keywords: string[];
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/** 文章列表响应 */
+export interface ArticleListResponse {
+  items: Article[];
+  total: number;
+  page: number;
+  pageSize: number;
+  pages: number;
+}
+
+/** 文章统计 */
+export interface ArticleStats {
+  total: number;
+  success: number;
+  pending: number;
+  error: number;
+  byCategory: Array<{
+    category: string;
+    count: number;
+  }>;
+}
+
+/** 文章搜索请求 */
+export interface ArticleSearchRequest {
+  q: string;
+  categoryId?: string;
+  sourceId?: string;
+  status?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+// ================================================
 // 爬取相关类型
 // ================================================
 
@@ -128,7 +191,7 @@ export interface ScrapeResult {
   html?: string;
   wordCount: number;
   links: string[];
-  status: "success" | "error";
+  status: "success" | "error" | "anti_bot_blocked";
   errorMessage?: string;
   scrapedAt: string;
   // 新增：文章元信息
@@ -136,6 +199,16 @@ export interface ScrapeResult {
   author?: string;       // 作者
   summary?: string;      // 内容摘要
   keywords?: string[];   // 关键字标签
+  style?: string;        // 文体（新闻、通知、纪要等）
+  dbId?: string;         // 数据库文章 ID（保存后返回）
+  // 反爬相关
+  needsCookie?: boolean;     // 是否需要 Cookie 才能继续
+  blockedDomain?: string;    // 被反爬的域名
+  // 来源信息（用于文章列表显示）
+  sourceId?: string;
+  sourceName?: string;
+  categoryId?: string;
+  categoryName?: string;
 }
 
 /** 深度爬取响应 */
@@ -181,7 +254,25 @@ export interface DeepScrapeParams {
 }
 
 /** 网页种类 */
-export type WebsiteCategory = "government" | "business" | "academic";
+export type WebsiteCategory = string;  // 支持自定义分类，不再限制为固定三种
+
+/** 分类配置 */
+export interface Category {
+  id: string;
+  name: string;
+  color: string;
+  description: string;
+  folderName: string;        // 对应的文件夹名称
+  sourceCount: number;       // 该分类下的来源数量
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 分类请求 */
+export interface CategoryRequest {
+  name: string;
+  color?: string;
+}
 
 /** 爬取源配置 */
 export interface ScrapeSource {
@@ -193,6 +284,94 @@ export interface ScrapeSource {
   isEnabled: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+/** 内容文件信息 */
+export interface ContentFile {
+  filename: string;
+  path: string;
+  size: number;
+  createdAt: string;
+  modifiedAt: string;
+}
+
+/** 导出位置类型 */
+export type ExportLocation = "server" | "local";
+
+/** 导出配置 */
+export interface ExportConfig {
+  location: ExportLocation;
+  categoryId?: string;      // 服务端导出时的分类
+  customPath?: string;       // 本地导出时的自定义路径（用于显示提示）
+}
+
+// ================================================
+// 定时任务相关类型
+// ================================================
+
+/** 任务状态 */
+export type TaskStatusType = "pending" | "running" | "success" | "failed" | "cancelled";
+
+/** 爬取范围选项 */
+export type ScrapeRangeOption = "1d" | "7d" | "30d";
+
+/** 爬取范围描述 */
+export const SCRAPE_RANGE_LABELS: Record<ScrapeRangeOption, string> = {
+  "1d": "前一天",
+  "7d": "前一周",
+  "30d": "前一月",
+};
+
+/** 定时任务配置 */
+export interface ScheduledTask {
+  id: string;
+  name: string;
+  sourceId?: string;         // 兼容旧字段
+  sourceIds: string[];       // 新的多源ID列表
+  sourceNames: string[];     // 源名称列表
+  customUrl?: string;
+  scheduleTime: string;      // HH:MM 格式
+  scrapeRange: ScrapeRangeOption;  // 爬取范围
+  isEnabled: boolean;
+  lastRunAt?: string;
+  nextRunAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 定时任务统计 */
+export interface TaskStats {
+  totalTasks: number;
+  enabledTasks: number;
+  todayRuns: number;
+  todaySuccess: number;
+  todayFailed: number;
+}
+
+/** 爬取历史记录 */
+export interface ScrapeHistory {
+  id: string;
+  taskId?: string;
+  taskName?: string;
+  url: string;
+  articleTitle?: string;
+  articleId?: string;
+  status: TaskStatusType;
+  errorMessage?: string;
+  startedAt: string;
+  finishedAt?: string;
+  duration?: number;
+  articlesCount: number;
+  createdAt: string;
+}
+
+/** 每日爬取汇总 */
+export interface DailySummary {
+  date: string;
+  total: number;
+  success: number;
+  failed: number;
+  articles: number;
 }
 
 // ================================================

@@ -21,7 +21,7 @@ function normalizeScrapeResult(raw: Record<string, unknown>): ScrapeResult {
     html: raw.html ? String(raw.html) : undefined,
     wordCount: Number(raw.word_count ?? raw.wordCount ?? 0),
     links: Array.isArray(raw.links) ? raw.links.map(String) : [],
-    status: raw.status === "error" ? "error" : "success",
+    status: (raw.status === "error" ? "error" : raw.status === "anti_bot_blocked" ? "anti_bot_blocked" : "success") as ScrapeResult["status"],
     errorMessage: raw.error_message as string | undefined,
     scrapedAt: String(raw.scraped_at || raw.scrapedAt || new Date().toISOString()),
     // 新增字段
@@ -29,6 +29,16 @@ function normalizeScrapeResult(raw: Record<string, unknown>): ScrapeResult {
     author: raw.author as string | undefined,
     summary: raw.summary as string | undefined,
     keywords: Array.isArray(raw.keywords) ? raw.keywords.map(String) : [],
+    style: raw.style as string | undefined,  // 文体
+    dbId: raw.db_id as string | undefined,   // 数据库 ID
+    // 反爬相关
+    needsCookie: raw.needs_cookie as boolean | undefined,
+    blockedDomain: raw.blocked_domain as string | undefined,
+    // 来源信息（用于文章列表显示）
+    sourceId: raw.source_id as string | undefined,
+    sourceName: raw.source_name as string | undefined,
+    categoryId: raw.category_id as string | undefined,
+    categoryName: raw.category_name as string | undefined,
   };
 }
 
@@ -65,7 +75,8 @@ interface ScrapeStore {
     dateRange?: DateRangePreset,
     customDateRange?: CustomDateRange,
     options?: Partial<ScrapeOptions>,
-    scrapeLevel?: ScrapeLevel
+    scrapeLevel?: ScrapeLevel,
+    cookies?: string
   ) => Promise<{ success: boolean; scrapeId?: string; blocked?: boolean; error?: string }>;
   cancelScrape: () => Promise<void>;
   clearResults: () => void;
@@ -241,7 +252,8 @@ export const useScrapeStore = create<ScrapeStore>((set, get) => ({
     dateRange?: DateRangePreset,
     customDateRange?: CustomDateRange,
     options?: Partial<ScrapeOptions>,
-    scrapeLevel?: ScrapeLevel
+    scrapeLevel?: ScrapeLevel,
+    cookies?: string
   ) => {
     set({ isScraping: true, error: null, progress: { current: 0, total: 1, stage: 0, stageName: "正在启动...", stageDetail: "准备爬取任务" } });
 
@@ -265,6 +277,11 @@ export const useScrapeStore = create<ScrapeStore>((set, get) => ({
           start_date: customDateRange.startDate || null,
           end_date: customDateRange.endDate || null,
         };
+      }
+
+      // 添加 cookies 参数
+      if (cookies) {
+        requestData.cookies = cookies;
       }
 
       // 调用 API（后端会在后台线程执行爬取，立即返回 scrape_id）
