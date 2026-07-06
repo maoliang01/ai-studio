@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import type { Article, ArticleStats } from "@/types";
 import {
   Card,
@@ -37,7 +38,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Loader2, Search, Trash2, Eye, ChevronLeft, ChevronRight, RefreshCw, Database, Filter, X, FileText, Download, AlertTriangle } from "lucide-react";
+import { Loader2, Search, Trash2, Eye, ChevronLeft, ChevronRight, RefreshCw, Database, Filter, X, FileText, Download, AlertTriangle, Network } from "lucide-react";
 import { toast } from "sonner";
 
 // 格式化数字
@@ -67,6 +68,7 @@ function formatDate(dateStr: string | undefined): string {
 }
 
 export default function ArticlesPage() {
+  const router = useRouter();
   const [articles, setArticles] = useState<Article[]>([]);
   const [stats, setStats] = useState<ArticleStats | null>(null);
   const [loading, setLoading] = useState(true);
@@ -88,6 +90,13 @@ export default function ArticlesPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [batchDeleteDialogOpen, setBatchDeleteDialogOpen] = useState(false);
   const [isBatchDeleting, setIsBatchDeleting] = useState(false);
+
+  // 知识图谱相关状态
+  const [graphDialogOpen, setGraphDialogOpen] = useState(false);
+  const [graphArticle, setGraphArticle] = useState<Article | null>(null);
+  const [graphData, setGraphData] = useState<{nodes: Array<{id: string, label: string, type: string}>, edges: Array<{source: string, target: string, type: string}>}>({nodes: [], edges: []});
+  const [loadingGraph, setLoadingGraph] = useState(false);
+  const [kgConnected, setKgConnected] = useState(false);
 
   // 复选辅助
   const allSelected = articles.length > 0 && selectedIds.size === articles.length;
@@ -324,12 +333,52 @@ export default function ArticlesPage() {
     }
   };
 
+  // 检查知识图谱连接
+  const checkKgConnection = async () => {
+    try {
+      const res = await fetch("/api/kg/health");
+      const data = await res.json();
+      setKgConnected(data.neo4j?.connected || false);
+    } catch {
+      setKgConnected(false);
+    }
+  };
+
+  // 打开文章知识图谱
+  const handleShowArticleGraph = async (article: Article) => {
+    setGraphArticle(article);
+    setGraphDialogOpen(true);
+    setLoadingGraph(true);
+    try {
+      const res = await fetch(`/api/kg/article/${article.id}`);
+      const data = await res.json();
+      if (data.status === "success") {
+        setGraphData(data.data);
+      } else {
+        setGraphData({nodes: [], edges: []});
+      }
+    } catch (err) {
+      console.error("加载文章图谱失败:", err);
+      setGraphData({nodes: [], edges: []});
+    } finally {
+      setLoadingGraph(false);
+    }
+  };
+
+  // 跳转到知识图谱页面并高亮该文章
+  const handleJumpToGraph = () => {
+    if (graphArticle) {
+      router.push(`/kg?highlight=${encodeURIComponent(graphArticle.title)}`);
+    }
+  };
+
   // 初始化
   useEffect(() => {
     loadArticles();
     loadStats();
     loadStyles();
     checkDbConnection();
+    checkKgConnection();
   }, []);
 
   // 获取分类信息
@@ -704,6 +753,11 @@ export default function ArticlesPage() {
                                 <Eye className="w-4 h-4 mr-2" />
                                 查看详情
                               </DropdownMenuItem>
+                              <DropdownMenuItem onClick={() => handleShowArticleGraph(article)}>
+                                <Network className="w-4 h-4 mr-2" />
+                                知识图谱
+                                {kgConnected && <Badge className="ml-2" variant="secondary">新</Badge>}
+                              </DropdownMenuItem>
                               <DropdownMenuItem onClick={() => handleDownload(article)}>
                                 <Download className="w-4 h-4 mr-2" />
                                 下载 MD
@@ -909,6 +963,97 @@ export default function ArticlesPage() {
               )}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 文章知识图谱查看对话框 */}
+      <Dialog open={graphDialogOpen} onOpenChange={setGraphDialogOpen}>
+        <DialogContent className="max-w-3xl max-h-[80vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Network className="w-5 h-5" />
+              {graphArticle?.title || "文章知识图谱"}
+            </DialogTitle>
+            <DialogDescription>
+              查看该文章提取的实体和关系网络
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-auto">
+            {loadingGraph ? (
+              <div className="flex items-center justify-center h-60">
+                <Loader2 className="w-8 h-8 animate-spin" />
+              </div>
+            ) : graphData.nodes.length > 0 ? (
+              <div className="space-y-4">
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="bg-muted p-3 rounded-lg text-center">
+                    <div className="text-2xl font-bold">{graphData.nodes.filter(n => n.type === "Entity").length}</div>
+                    <div className="text-xs text-muted-foreground">实体数</div>
+                  </div>
+                  <div className="bg-muted p-3 rounded-lg text-center">
+                    <div className="text-2xl font-bold">{graphData.edges.length}</div>
+                    <div className="text-xs text-muted-foreground">关系数</div>
+                  </div>
+                  <div className="bg-muted p-3 rounded-lg text-center">
+                    <div className="text-2xl font-bold">{new Set(graphData.nodes.map(n => n.type)).size - 1}</div>
+                    <div className="text-xs text-muted-foreground">实体类型</div>
+                  </div>
+                </div>
+
+                {/* 实体列表 */}
+                <div>
+                  <h4 className="text-sm font-medium mb-2">提取的实体</h4>
+                  <div className="flex flex-wrap gap-2">
+                    {graphData.nodes.filter(n => n.type !== "Article").map((node) => (
+                      <Badge
+                        key={node.id}
+                        variant="outline"
+                        className="px-2 py-1"
+                      >
+                        {node.label}
+                        <span className="ml-1 text-[10px] opacity-60">({node.type})</span>
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 关系列表 */}
+                {graphData.edges.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-medium mb-2">关系网络</h4>
+                    <div className="bg-muted rounded-lg p-3 space-y-2 max-h-40 overflow-auto">
+                      {graphData.edges.map((edge, idx) => (
+                        <div key={idx} className="text-sm flex items-center gap-2">
+                          <Badge variant="secondary" className="shrink-0">{edge.source.split(":")[1] || edge.source}</Badge>
+                          <span className="text-muted-foreground">--{edge.type}--</span>
+                          <Badge variant="secondary" className="shrink-0">{edge.target.split(":")[1] || edge.target}</Badge>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <Button onClick={handleJumpToGraph} className="w-full gap-2">
+                  <Network className="w-4 h-4" />
+                  在知识图谱中查看完整视图
+                </Button>
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center h-60 text-center">
+                <Network className="w-12 h-12 text-muted-foreground mb-3" />
+                <p className="text-muted-foreground">该文章尚未提取实体</p>
+                <p className="text-xs text-muted-foreground mt-1">请在知识图谱页面批量处理文章后查看</p>
+                <Button
+                  variant="outline"
+                  className="mt-4"
+                  onClick={handleJumpToGraph}
+                >
+                  前往知识图谱
+                </Button>
+              </div>
+            )}
+          </div>
         </DialogContent>
       </Dialog>
     </div>

@@ -1,0 +1,652 @@
+"use client";
+
+import { useState, useEffect, useRef, useCallback, Suspense } from "react";
+import { useSearchParams } from "next/navigation";
+import * as d3 from "d3";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Card } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Network,
+  Search,
+  Play,
+  RefreshCw,
+  Database,
+  Loader2,
+  AlertCircle,
+  CheckCircle2,
+  Eye,
+  Filter,
+  ZoomIn,
+  ZoomOut,
+  Maximize2,
+  Trash2,
+  Upload,
+  Star,
+  X,
+} from "lucide-react";
+
+interface GraphNode {
+  id: string;
+  label: string;
+  type: string;
+  data: Record<string, any>;
+}
+
+interface GraphEdge {
+  source: string;
+  target: string;
+  type: string;
+  data: Record<string, any>;
+}
+
+interface GraphData {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+interface Stats {
+  articles: number;
+  entities: number;
+  article_entity_links: number;
+  entity_relations: number;
+}
+
+function KnowledgeGraphPageContent() {
+  const [graphData, setGraphData] = useState<GraphData>({ nodes: [], edges: [] });
+  const [stats, setStats] = useState<Stats | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [health, setHealth] = useState<{ status: string; neo4j: { connected: boolean } } | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
+  const [entityTypeFilter, setEntityTypeFilter] = useState<string | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [highlightQuery, setHighlightQuery] = useState<string | null>(null);
+  const [highlightedNodeIds, setHighlightedNodeIds] = useState<Set<string>>(new Set());
+
+  const svgRef = useRef<SVGSVGElement>(null);
+  const simulationRef = useRef<any>(null);
+
+  // 获取 URL 参数
+  const searchParams = useSearchParams();
+  const highlight = searchParams.get("highlight");
+
+  // 加载图谱数据
+  const loadGraphData = useCallback(async (limit = 500) => {
+    setIsLoading(true);
+    try {
+      const response = await fetch(`/api/kg/graph?limit=${limit}`);
+      const data = await response.json();
+      if (data.status === "success") {
+        setGraphData(data.data);
+      }
+    } catch (error) {
+      console.error("加载图谱失败:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  // 加载统计数据
+  const loadStats = useCallback(async () => {
+    try {
+      const response = await fetch("/api/kg/stats");
+      const data = await response.json();
+      if (data.status === "success") {
+        setStats(data.stats);
+      }
+    } catch (error) {
+      console.error("加载统计失败:", error);
+    }
+  }, []);
+
+  // 加载健康状态
+  const checkHealth = useCallback(async () => {
+    try {
+      const response = await fetch("/api/kg/health");
+      const data = await response.json();
+      setHealth(data);
+    } catch (error) {
+      console.error("健康检查失败:", error);
+      setHealth({ status: "unhealthy", neo4j: { connected: false } });
+    }
+  }, []);
+
+  // 处理高亮查询 - 根据文章标题查找相关节点
+  const handleHighlight = useCallback(async (query: string) => {
+    setHighlightQuery(query);
+    if (!query || graphData.nodes.length === 0) return;
+
+    // 直接在前端匹配文章标题
+    const normalizedQuery = query.toLowerCase();
+    const articleNodes = graphData.nodes.filter(
+      (n) => n.type === "Article" && n.label.toLowerCase().includes(normalizedQuery)
+    );
+
+    if (articleNodes.length > 0) {
+      // 找到文章节点后，查找所有关联的实体
+      const articleIds = new Set(articleNodes.map((n) => n.id));
+      const relatedEdges = graphData.edges.filter(
+        (e) => articleIds.has(e.source) || articleIds.has(e.target)
+      );
+      const relatedNodeIds = new Set<string>();
+      relatedEdges.forEach((e) => {
+        relatedNodeIds.add(e.source);
+        relatedNodeIds.add(e.target);
+      });
+      setHighlightedNodeIds(relatedNodeIds);
+    }
+  }, [graphData]);
+
+  // 初始化
+  useEffect(() => {
+    checkHealth();
+    loadStats();
+    loadGraphData();
+  }, [checkHealth, loadStats, loadGraphData]);
+
+  // 处理 URL 参数中的 highlight
+  useEffect(() => {
+    if (highlight && graphData.nodes.length > 0) {
+      handleHighlight(decodeURIComponent(highlight));
+    }
+  }, [highlight, graphData.nodes.length, handleHighlight]);
+
+  // 清除高亮
+  const clearHighlight = () => {
+    setHighlightQuery(null);
+    setHighlightedNodeIds(new Set());
+  };
+
+  // 搜索实体
+  const handleSearch = async () => {
+    if (!searchQuery.trim()) return;
+
+    try {
+      const response = await fetch(
+        `/api/kg/search?query=${encodeURIComponent(searchQuery)}&limit=20`
+      );
+      const data = await response.json();
+      if (data.status === "success") {
+        setSearchResults(data.entities);
+        // 将搜索结果作为高亮
+        const ids = new Set(data.entities.map((e: any) => `${e.entity_type}:${e.name}`));
+        setHighlightedNodeIds((prev) => new Set([...prev, ...ids]));
+      }
+    } catch (error) {
+      console.error("搜索失败:", error);
+    }
+  };
+
+  // 批量处理文章
+  const handleBatchProcess = async (limit = 50) => {
+    setIsProcessing(true);
+    try {
+      const response = await fetch(`/api/kg/batch-process?limit=${limit}`, {
+        method: "POST",
+      });
+      const data = await response.json();
+      if (data.status === "success") {
+        alert(
+          `处理完成！成功: ${data.results.success}, 跳过: ${data.results.skipped}, 失败: ${data.results.failed}`
+        );
+        loadGraphData();
+        loadStats();
+      }
+    } catch (error) {
+      console.error("批量处理失败:", error);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // 获取实体详情
+  const getEntityDetails = async (entityName: string) => {
+    try {
+      const response = await fetch(`/api/kg/entity/${encodeURIComponent(entityName)}`);
+      const data = await response.json();
+      if (data.status === "success") {
+        return data.data;
+      }
+    } catch (error) {
+      console.error("获取实体详情失败:", error);
+    }
+    return null;
+  };
+
+  // 节点点击处理
+  const handleNodeClick = async (node: GraphNode) => {
+    setSelectedNode(node);
+
+    // 如果是实体节点，获取邻居
+    if (node.type === "Entity") {
+      const details = await getEntityDetails(node.label);
+      if (details) {
+        // 可以在这里扩展显示邻居信息
+        console.log("实体邻居:", details);
+      }
+    }
+  };
+
+  // D3.js 可视化渲染
+  useEffect(() => {
+    if (!svgRef.current || graphData.nodes.length === 0) return;
+
+    const svg = d3.select(svgRef.current);
+    const width = svgRef.current.clientWidth;
+    const height = svgRef.current.clientHeight;
+
+    // 清空已有内容
+    svg.selectAll("*").remove();
+
+    // 创建缩放容器
+    const g = svg.append("g");
+
+    // 添加缩放功能
+    const zoom = d3.zoom<SVGSVGElement, unknown>()
+      .scaleExtent([0.1, 4])
+      .on("zoom", (event) => {
+        g.attr("transform", event.transform);
+      });
+
+    svg.call(zoom);
+
+    // 过滤节点
+    let nodes = graphData.nodes;
+    let edges = graphData.edges;
+
+    if (entityTypeFilter) {
+      nodes = nodes.filter((n) => n.type === entityTypeFilter);
+      const nodeIds = new Set(nodes.map((n) => n.id));
+      edges = edges.filter(
+        (e) => nodeIds.has(e.source) && nodeIds.has(e.target)
+      );
+    }
+
+    // 节点颜色映射
+    const colorMap: Record<string, string> = {
+      Article: "#4f46e5",
+      Entity: "#10b981",
+      PERSON: "#f59e0b",
+      ORGANIZATION: "#3b82f6",
+      LOCATION: "#8b5cf6",
+      TECHNOLOGY: "#ec4899",
+      EVENT: "#ef4444",
+      CONCEPT: "#06b6d4",
+    };
+
+    // 力导向模拟
+    const simulation = d3.forceSimulation(nodes as any)
+      .force("link", d3.forceLink(edges as any).id((d: any) => d.id).distance(100))
+      .force("charge", d3.forceManyBody().strength(-300))
+      .force("center", d3.forceCenter(width / 2, height / 2))
+      .force("collision", d3.forceCollide().radius(40));
+
+    simulationRef.current = simulation;
+
+    // 绘制边
+    const link = g
+      .append("g")
+      .selectAll("line")
+      .data(edges)
+      .enter()
+      .append("line")
+      .attr("stroke", "#94a3b8")
+      .attr("stroke-opacity", 0.6)
+      .attr("stroke-width", 1.5);
+
+    // 绘制节点
+    const node = g
+      .append("g")
+      .selectAll("circle")
+      .data(nodes)
+      .enter()
+      .append("circle")
+      .attr("r", (d: GraphNode) => d.type === "Article" ? 12 : 8)
+      .attr("fill", (d: GraphNode) => colorMap[d.type] || "#64748b")
+      .attr("stroke", "#fff")
+      .attr("stroke-width", (d: GraphNode) => highlightedNodeIds.has(d.id) ? 4 : 2)
+      .attr("stroke-opacity", (d: GraphNode) => highlightedNodeIds.has(d.id) ? 1 : 0.6)
+      .style("cursor", "pointer")
+      .style("filter", (d: GraphNode) => highlightedNodeIds.has(d.id) ? "drop-shadow(0 0 8px rgba(79, 70, 229, 0.8))" : "none")
+      .on("click", (event, d: GraphNode) => {
+        event.stopPropagation();
+        handleNodeClick(d);
+      });
+
+    // 添加标签
+    const label = g
+      .append("g")
+      .selectAll("text")
+      .data(nodes)
+      .enter()
+      .append("text")
+      .text((d: GraphNode) => d.label.substring(0, 20))
+      .attr("font-size", 10)
+      .attr("fill", "#475569")
+      .attr("text-anchor", "middle")
+      .attr("dy", 20);
+
+    // 拖拽事件
+    const drag = d3.drag<SVGCircleElement, GraphNode>()
+      .on("start", (event, d: any) => {
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+      })
+      .on("drag", (event, d: any) => {
+        d.fx = event.x;
+        d.fy = event.y;
+      })
+      .on("end", (event, d: any) => {
+        if (!event.active) simulation.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+      });
+
+    node.call(drag as any);
+
+    // 更新位置
+    simulation.on("tick", () => {
+      link
+        .attr("x1", (d: any) => d.source.x)
+        .attr("y1", (d: any) => d.source.y)
+        .attr("x2", (d: any) => d.target.x)
+        .attr("y2", (d: any) => d.target.y);
+
+      node.attr("cx", (d: any) => d.x).attr("cy", (d: any) => d.y);
+      label.attr("x", (d: any) => d.x).attr("y", (d: any) => d.y);
+    });
+
+    return () => {
+      simulation.stop();
+    };
+  }, [graphData, entityTypeFilter, highlightedNodeIds]);
+
+  // 获取唯一实体类型
+  const entityTypes = [...new Set(graphData.nodes.map((n) => n.type))];
+
+  return (
+    <div className="flex h-[calc(100vh-4rem)]">
+      {/* 左侧边栏 */}
+      <div className="w-80 border-r bg-gray-50/50 flex flex-col">
+        <div className="p-4 border-b">
+          <div className="flex items-center justify-between">
+            <h1 className="text-lg font-semibold flex items-center gap-2">
+              <Network className="w-5 h-5" />
+              知识图谱
+            </h1>
+            {highlightQuery && (
+              <Button size="sm" variant="ghost" onClick={clearHighlight}>
+                <X className="w-4 h-4" />
+              </Button>
+            )}
+          </div>
+          {highlightQuery && (
+            <div className="mt-2 flex items-center gap-2 text-sm text-indigo-600 bg-indigo-50 px-3 py-2 rounded-lg">
+              <Star className="w-4 h-4" />
+              <span className="truncate">{highlightQuery}</span>
+            </div>
+          )}
+        </div>
+
+        {/* 统计信息 */}
+        {stats && (
+          <div className="p-4 border-b">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="bg-white p-3 rounded-lg">
+                <div className="text-2xl font-bold text-indigo-600">
+                  {stats.articles}
+                </div>
+                <div className="text-xs text-gray-500">文章</div>
+              </div>
+              <div className="bg-white p-3 rounded-lg">
+                <div className="text-2xl font-bold text-emerald-600">
+                  {stats.entities}
+                </div>
+                <div className="text-xs text-gray-500">实体</div>
+              </div>
+              <div className="bg-white p-3 rounded-lg">
+                <div className="text-2xl font-bold text-blue-600">
+                  {stats.article_entity_links}
+                </div>
+                <div className="text-xs text-gray-500">文章-实体</div>
+              </div>
+              <div className="bg-white p-3 rounded-lg">
+                <div className="text-2xl font-bold text-purple-600">
+                  {stats.entity_relations}
+                </div>
+                <div className="text-xs text-gray-500">实体关系</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 搜索 */}
+        <div className="p-4 border-b">
+          <div className="flex gap-2">
+            <Input
+              placeholder="搜索实体..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+            />
+            <Button size="icon" onClick={handleSearch}>
+              <Search className="w-4 h-4" />
+            </Button>
+          </div>
+
+          {searchResults.length > 0 && (
+            <div className="mt-3 space-y-2">
+              {searchResults.slice(0, 5).map((entity, idx) => (
+                <div
+                  key={idx}
+                  className="bg-white p-2 rounded cursor-pointer hover:bg-gray-100"
+                  onClick={() => {
+                    setSelectedNode({
+                      id: entity.name,
+                      label: entity.name,
+                      type: entity.entity_type,
+                      data: entity,
+                    });
+                  }}
+                >
+                  <div className="font-medium text-sm">{entity.name}</div>
+                  <Badge variant="secondary" className="text-xs mt-1">
+                    {entity.entity_type}
+                  </Badge>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 筛选 */}
+        <div className="p-4 border-b">
+          <div className="flex items-center gap-2 mb-2">
+            <Filter className="w-4 h-4" />
+            <span className="text-sm font-medium">筛选类型</span>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant={entityTypeFilter === null ? "default" : "outline"}
+              onClick={() => setEntityTypeFilter(null)}
+            >
+              全部
+            </Button>
+            {entityTypes.map((type) => (
+              <Button
+                key={type}
+                size="sm"
+                variant={entityTypeFilter === type ? "default" : "outline"}
+                onClick={() => setEntityTypeFilter(type)}
+              >
+                {type}
+              </Button>
+            ))}
+          </div>
+        </div>
+
+        {/* 操作 */}
+        <div className="p-4 border-b space-y-2">
+          <Button
+            className="w-full"
+            onClick={() => handleBatchProcess(50)}
+            disabled={isProcessing}
+          >
+            {isProcessing ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                处理中...
+              </>
+            ) : (
+              <>
+                <Play className="w-4 h-4 mr-2" />
+                批量处理文章
+              </>
+            )}
+          </Button>
+          <Button
+            variant="outline"
+            className="w-full"
+            onClick={() => loadGraphData()}
+            disabled={isLoading}
+          >
+            <RefreshCw className="w-4 h-4 mr-2" />
+            刷新图谱
+          </Button>
+        </div>
+
+        {/* 选中节点详情 */}
+        {selectedNode && (
+          <div className="p-4 flex-1 overflow-auto">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-medium">选中节点</span>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setSelectedNode(null)}
+              >
+                <Trash2 className="w-4 h-4" />
+              </Button>
+            </div>
+            <Card className="p-3">
+              <div className="space-y-2">
+                <div>
+                  <div className="text-xs text-gray-500">名称</div>
+                  <div className="font-medium">{selectedNode.label}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-gray-500">类型</div>
+                  <Badge>{selectedNode.type}</Badge>
+                </div>
+                {selectedNode.data?.description && (
+                  <div>
+                    <div className="text-xs text-gray-500">描述</div>
+                    <div className="text-sm text-gray-700">
+                      {selectedNode.data.description}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </Card>
+          </div>
+        )}
+
+        {/* 状态信息 */}
+        <div className="p-4 border-t mt-auto">
+          <div className="flex items-center gap-2 text-sm">
+            {health?.neo4j?.connected ? (
+              <>
+                <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+                <span className="text-emerald-600">Neo4j 已连接</span>
+              </>
+            ) : (
+              <>
+                <AlertCircle className="w-4 h-4 text-red-500" />
+                <span className="text-red-600">Neo4j 未连接</span>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* 主图谱区域 */}
+      <div className="flex-1 flex flex-col bg-gray-100">
+        {/* 工具栏 */}
+        <div className="h-12 border-b bg-white flex items-center px-4 gap-4">
+          <span className="text-sm text-gray-500">
+            {graphData.nodes.length} 节点 / {graphData.edges.length} 边
+          </span>
+          <Separator orientation="vertical" className="h-6" />
+          <span className="text-xs text-gray-400">
+            拖拽节点可移动 | 滚轮缩放 | 点击节点查看详情
+          </span>
+        </div>
+
+        {/* 图谱画布 */}
+        <div className="flex-1 relative">
+          {isLoading ? (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
+            </div>
+          ) : graphData.nodes.length === 0 ? (
+            <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-500">
+              <Network className="w-16 h-16 mb-4 text-gray-300" />
+              <p className="text-lg mb-2">暂无图谱数据</p>
+              <p className="text-sm">点击"批量处理文章"开始构建知识图谱</p>
+            </div>
+          ) : (
+            <svg
+              ref={svgRef}
+              className="w-full h-full"
+              style={{ background: "#f8fafc" }}
+            />
+          )}
+        </div>
+
+        {/* 图例 */}
+        <div className="h-10 border-t bg-white flex items-center px-4 gap-4">
+          <span className="text-xs text-gray-500">图例：</span>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-1">
+              <div className="w-3 h-3 rounded-full bg-indigo-600" />
+              <span className="text-xs">文章</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <div className="w-3 h-3 rounded-full bg-emerald-500" />
+              <span className="text-xs">实体</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <div className="w-3 h-3 rounded-full bg-amber-500" />
+              <span className="text-xs">人物</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <div className="w-3 h-3 rounded-full bg-blue-500" />
+              <span className="text-xs">组织</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <div className="w-3 h-3 rounded-full bg-pink-500" />
+              <span className="text-xs">技术</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 使用 Suspense 包装以支持 useSearchParams
+export default function KnowledgeGraphPage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center h-screen"><Loader2 className="w-8 h-8 animate-spin" /></div>}>
+      <KnowledgeGraphPageContent />
+    </Suspense>
+  );
+}

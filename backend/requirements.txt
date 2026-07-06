@@ -15,3 +15,8 @@ trafilatura>=1.6.0
 sqlalchemy>=2.0.0
 psycopg2-binary>=2.9.9
 alembic>=1.13.0
+
+# 知识图谱相关
+neo4j>=5.18.0
+sentence-transformers>=2.3.0
+torch>=2.0.0
