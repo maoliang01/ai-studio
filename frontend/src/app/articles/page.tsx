@@ -23,6 +23,7 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -34,8 +35,9 @@ import {
   DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Loader2, Search, Trash2, Eye, ChevronLeft, ChevronRight, RefreshCw, Database, Filter, X, FileText, Download } from "lucide-react";
+import { Loader2, Search, Trash2, Eye, ChevronLeft, ChevronRight, RefreshCw, Database, Filter, X, FileText, Download, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 
 // 格式化数字
@@ -81,6 +83,68 @@ export default function ArticlesPage() {
   const [categoryFilter, setCategoryFilter] = useState<string>("");
   const [styleFilter, setStyleFilter] = useState<string>("");
   const [availableStyles, setAvailableStyles] = useState<Array<{name: string, count: number}>>([]);
+
+  // 复选相关状态
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [batchDeleteDialogOpen, setBatchDeleteDialogOpen] = useState(false);
+  const [isBatchDeleting, setIsBatchDeleting] = useState(false);
+
+  // 复选辅助
+  const allSelected = articles.length > 0 && selectedIds.size === articles.length;
+  const someSelected = selectedIds.size > 0 && selectedIds.size < articles.length;
+
+  // 全选/取消全选
+  const handleSelectAll = (checked: boolean) => {
+    if (checked) {
+      setSelectedIds(new Set(articles.map(a => a.id)));
+    } else {
+      setSelectedIds(new Set());
+    }
+  };
+
+  // 切换单条选中
+  const handleSelectOne = (id: string, checked: boolean) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (checked) {
+        next.add(id);
+      } else {
+        next.delete(id);
+      }
+      return next;
+    });
+  };
+
+  // 批量删除
+  const handleBatchDelete = async () => {
+    if (selectedIds.size === 0) return;
+    setIsBatchDeleting(true);
+    try {
+      const ids = Array.from(selectedIds);
+      console.log("[批量删除] 发送请求, ids:", ids);
+      const res = await fetch("/api/articles/batch-delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      const data = await res.json();
+      console.log("[批量删除] 响应:", res.status, data);
+      if (res.ok) {
+        toast.success(`成功删除 ${data.deleted} 篇文章`);
+        setSelectedIds(new Set());
+        setBatchDeleteDialogOpen(false);
+        loadArticles(page);
+        loadStats();
+      } else {
+        toast.error(data.error || "批量删除失败");
+      }
+    } catch (err) {
+      console.error("[批量删除] 异常:", err);
+      toast.error("批量删除失败，请检查后端服务");
+    } finally {
+      setIsBatchDeleting(false);
+    }
+  };
 
   // 分类配置
   const categories = [
@@ -500,13 +564,42 @@ export default function ArticlesPage() {
 
       {/* 文章列表 */}
       <Card>
-        <CardHeader>
-          <CardTitle>文章列表</CardTitle>
-          <CardDescription>
-            共 {total} 篇文章
-            {isSearching && searchQuery && ` (搜索结果: "${searchQuery}")`}
-          </CardDescription>
-        </CardHeader>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle>文章列表</CardTitle>
+              <CardDescription>
+                共 {total} 篇文章
+                {isSearching && searchQuery && ` (搜索结果: "${searchQuery}")`}
+              </CardDescription>
+            </div>
+            {/* 批量操作栏 */}
+            {selectedIds.size > 0 && (
+              <div className="flex items-center gap-2">
+                <Badge variant="secondary" className="text-sm px-3 py-1">
+                  已选 {selectedIds.size} 篇
+                </Badge>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => setBatchDeleteDialogOpen(true)}
+                  className="gap-1"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  批量删除
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSelectedIds(new Set())}
+                >
+                  <X className="h-4 w-4 mr-1" />
+                  取消选择
+                </Button>
+              </div>
+            )}
+          </div>
+          </CardHeader>
         <CardContent>
           {loading ? (
             <div className="flex items-center justify-center h-40">
@@ -517,6 +610,14 @@ export default function ArticlesPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
+                    <TableHead className="w-10">
+                      <Checkbox
+                        checked={allSelected}
+                        indeterminate={someSelected}
+                        onCheckedChange={(checked) => handleSelectAll(!!checked)}
+                        aria-label="全选"
+                      />
+                    </TableHead>
                     <TableHead className="w-[250px]">标题</TableHead>
                     <TableHead>来源</TableHead>
                     <TableHead className="w-[200px]">发布链接</TableHead>
@@ -530,14 +631,22 @@ export default function ArticlesPage() {
                 <TableBody>
                   {articles.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={8} className="text-center text-muted-foreground">
+                      <TableCell colSpan={9} className="text-center text-muted-foreground">
                         暂无文章
                       </TableCell>
                     </TableRow>
                   ) : (
                     articles.map((article) => {
+                      const isSelected = selectedIds.has(article.id);
                       return (
-                      <TableRow key={article.id}>
+                      <TableRow key={article.id} className={isSelected ? "bg-primary/5" : undefined}>
+                        <TableCell>
+                          <Checkbox
+                            checked={isSelected}
+                            onCheckedChange={(checked) => handleSelectOne(article.id, !!checked)}
+                            aria-label={`选择 ${article.title || "无标题"}`}
+                          />
+                        </TableCell>
                         <TableCell className="font-medium">
                           <div className="line-clamp-2">
                             {article.title || "无标题"}
@@ -742,6 +851,64 @@ export default function ArticlesPage() {
               </TabsContent>
             </Tabs>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* 批量删除确认对话框 */}
+      <Dialog open={batchDeleteDialogOpen} onOpenChange={setBatchDeleteDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-destructive" />
+              确认批量删除
+            </DialogTitle>
+            <DialogDescription>
+              此操作将永久删除以下 {selectedIds.size} 篇文章，且不可恢复。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="max-h-[200px] overflow-y-auto border rounded-lg p-2 text-sm space-y-1">
+            {articles
+              .filter(a => selectedIds.has(a.id))
+              .map(a => (
+                <div key={a.id} className="truncate py-0.5 px-2 rounded hover:bg-muted">
+                  {a.title || "无标题"}
+                </div>
+              ))}
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setBatchDeleteDialogOpen(false)}
+              disabled={isBatchDeleting}
+            >
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={(e: React.MouseEvent) => {
+                e.preventDefault();
+                console.log("[批量删除] 按钮被点击, selectedIds:", Array.from(selectedIds));
+                setBatchDeleteDialogOpen(false);
+                handleBatchDelete();
+              }}
+              disabled={isBatchDeleting}
+              className="gap-1"
+            >
+              {isBatchDeleting ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  删除中...
+                </>
+              ) : (
+                <>
+                  <Trash2 className="h-4 w-4" />
+                  确认删除 {selectedIds.size} 篇
+                </>
+              )}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

@@ -1195,7 +1195,8 @@ class WebScraper:
         self,
         result: ScrapedResult,
         category_id: Optional[str] = None,
-        source_id: Optional[str] = None
+        source_id: Optional[str] = None,
+        deduplicate: bool = True
     ) -> Tuple[bool, str]:
         """
         将爬取结果保存到数据库
@@ -1204,6 +1205,7 @@ class WebScraper:
             result: 爬取结果
             category_id: 分类 ID
             source_id: 来源 ID
+            deduplicate: 是否去重（默认True，URL重复时删除旧文章保存新文章）
 
         Returns:
             Tuple[bool, str]: (是否成功, 文章ID 或 错误信息)
@@ -1220,52 +1222,71 @@ class WebScraper:
                 existing = db.query(Article).filter(Article.url == result.url).first()
 
                 if existing:
-                    # 更新已存在的文章
-                    existing.title = result.title or existing.title
-                    existing.content = result.content or existing.content
-                    existing.html = result.html or existing.html
-                    existing.word_count = result.word_count or existing.word_count
-                    existing.author = result.author or existing.author
-                    existing.summary = result.summary or existing.summary
-                    existing.style = result.style or existing.style  # 文体
-                    existing.status = result.status
-                    existing.error_message = result.error_message
+                    if deduplicate:
+                        # 去重模式：删除旧文章，保存新文章
+                        old_id = existing.id
+                        old_title = existing.title[:30] if existing.title else "未知"
 
-                    # 更新分类和来源（如果文章没有分类）
-                    if category_id and not existing.category_id:
-                        existing.category_id = category_id
-                    if source_id and not existing.source_id:
-                        existing.source_id = source_id
-
-                    if result.published_at:
-                        try:
-                            from datetime import datetime as dt
-                            existing.published_at = dt.strptime(result.published_at, "%Y-%m-%d").date()
-                        except (ValueError, TypeError):
-                            pass
-
-                    existing.content_hash = existing.calculate_content_hash()
-
-                    # 更新关键词
-                    if result.keywords:
+                        # 先删除关联的关键词和链接
                         db.query(ArticleKeyword).filter(
                             ArticleKeyword.article_id == existing.id
                         ).delete()
+                        db.query(ArticleLink).filter(
+                            ArticleLink.source_article_id == existing.id
+                        ).delete()
+                        db.delete(existing)
+                        db.commit()
 
-                        for kw_name in result.keywords:
-                            if not kw_name or not kw_name.strip():
-                                continue
-                            kw_name = kw_name.strip()
-                            keyword = db.query(Keyword).filter(Keyword.name == kw_name).first()
-                            if not keyword:
-                                keyword = Keyword(name=kw_name)
-                                db.add(keyword)
-                                db.flush()
-                            existing.keywords.append(ArticleKeyword(keyword_id=keyword.id))
+                        logger.info(f"去重删除旧文章: id={old_id}, title={old_title}...")
 
-                    db.commit()
-                    logger.info(f"更新数据库文章: id={existing.id}, url={existing.url[:50]}")
-                    return True, existing.id
+                        # 继续创建新文章（下面的代码）
+                    else:
+                        # 非去重模式：更新已存在的文章
+                        existing.title = result.title or existing.title
+                        existing.content = result.content or existing.content
+                        existing.html = result.html or existing.html
+                        existing.word_count = result.word_count or existing.word_count
+                        existing.author = result.author or existing.author
+                        existing.summary = result.summary or existing.summary
+                        existing.style = result.style or existing.style  # 文体
+                        existing.status = result.status
+                        existing.error_message = result.error_message
+
+                        # 更新分类和来源（如果文章没有分类）
+                        if category_id and not existing.category_id:
+                            existing.category_id = category_id
+                        if source_id and not existing.source_id:
+                            existing.source_id = source_id
+
+                        if result.published_at:
+                            try:
+                                from datetime import datetime as dt
+                                existing.published_at = dt.strptime(result.published_at, "%Y-%m-%d").date()
+                            except (ValueError, TypeError):
+                                pass
+
+                        existing.content_hash = existing.calculate_content_hash()
+
+                        # 更新关键词
+                        if result.keywords:
+                            db.query(ArticleKeyword).filter(
+                                ArticleKeyword.article_id == existing.id
+                            ).delete()
+
+                            for kw_name in result.keywords:
+                                if not kw_name or not kw_name.strip():
+                                    continue
+                                kw_name = kw_name.strip()
+                                keyword = db.query(Keyword).filter(Keyword.name == kw_name).first()
+                                if not keyword:
+                                    keyword = Keyword(name=kw_name)
+                                    db.add(keyword)
+                                    db.flush()
+                                existing.keywords.append(ArticleKeyword(keyword_id=keyword.id))
+
+                        db.commit()
+                        logger.info(f"更新数据库文章: id={existing.id}, url={existing.url[:50]}")
+                        return True, existing.id
 
                 # 创建新文章
                 article = Article(
@@ -1587,7 +1608,7 @@ class WebScraper:
 
         # 3. 批量爬取文章（逐个爬取并更新进度）
         if not article_links:
-            logger.info("没有符合日期条件的文章链接")
+            logger.info("⚠️ 没有符合日期条件的文章链接，请调整日期范围")
             return list_page, []
 
         logger.info(f"开始爬取 {len(article_links)} 篇文章")
@@ -1606,51 +1627,10 @@ class WebScraper:
         valid_results = [r for r in article_results if r.status == "success" and r.word_count > 0]
         logger.info(f"有效文章: {len(valid_results)} 篇")
 
-        # 5. 为每篇文章补充 URL 日期（如没有）
-        for r in valid_results:
-            if not r.published_at:
-                url_date = DateExtractor.extract_from_url(r.url)
-                if url_date:
-                    r.published_at = url_date
-
-        # 6. 日期过滤
-        logger.info(f"日期过滤检查 | date_range={date_range} | custom={custom_date_range}")
-        if date_range or custom_date_range:
-            today = date.today()
-            if date_range == "today":
-                start_date, end_date = today, today
-            elif date_range == "week":
-                start_date, end_date = today - timedelta(days=7), today
-            elif date_range == "month":
-                start_date, end_date = today - timedelta(days=30), today
-            elif custom_date_range:
-                start_date = custom_date_range.get("start_date") or date(2000, 1, 1)
-                end_date = custom_date_range.get("end_date") or today
-            else:
-                start_date, end_date = None, None
-
-            logger.info(f"日期范围: [{start_date} ~ {end_date}]")
-
-            if start_date and end_date:
-                # 确保起始日期 <= 结束日期
-                if start_date > end_date:
-                    start_date, end_date = end_date, start_date
-
-                before_count = len(valid_results)
-                # 详细日志：显示每篇文章的日期
-                for r in valid_results:
-                    logger.info(f"  文章日期检查: {r.title[:30]}... -> {r.published_at}")
-
-                valid_results = [
-                    r for r in valid_results
-                    if r.published_at and self._date_in_range(r.published_at, start_date, end_date)
-                ]
-                logger.info(f"日期过滤 [{start_date} ~ {end_date}]: {before_count} -> {len(valid_results)} 篇")
-
-        # 7. 按日期排序（最新的在前）
+        # 5. 按日期排序（最新的在前）
         valid_results = self._sort_by_date(valid_results)
 
-        # 8. 限制最终数量
+        # 6. 限制最终数量
         valid_results = valid_results[:max_articles]
 
         logger.info(f"深度爬取完成: {len(valid_results)} 篇文章")
@@ -1754,19 +1734,21 @@ class WebScraper:
             if main_category == 'n' and has_file_ext:
                 is_same_category = True
 
-            if has_date_in_url and has_file_ext and is_same_category:
-                article_links.append(link)
-                logger.debug(f"  接受: {link}")
-            elif has_date_in_url and has_file_ext and not is_same_category:
-                logger.debug(f"  过滤(不同栏目): {link}")
+            # 栏目首页模式：列表页是栏目首页（如 /cpc/index.htm）时，允许根目录下按日期组织的文章
+            # 例如求是网：列表页 /cpc/，文章 /20260705/...
+            is_category_index_page = any(base_url.rstrip('/').endswith(x) for x in ['/index.htm', '/index.html', '/index.php', '/index'])
 
             if has_date_in_url and has_file_ext and is_same_category:
                 article_links.append(link)
-                logger.debug(f"  接受: {link}")
+                logger.debug(f"  接受(栏目匹配): {link}")
+            elif has_date_in_url and has_file_ext and not is_same_category and is_category_index_page:
+                # 栏目首页模式下，也接受根目录下按日期组织的文章
+                article_links.append(link)
+                logger.debug(f"  接受(栏目首页，根目录日期): {link}")
             elif has_date_in_url and has_file_ext and not is_same_category:
                 logger.debug(f"  过滤(不同栏目): {link}")
 
-        logger.info(f"文章链接过滤完成: 识别到 {len(article_links)} 个 /{main_category}/ 栏目链接")
+        logger.info(f"文章链接过滤完成: 识别到 {len(article_links)} 个文章链接")
         return list(set(article_links))
 
     def _date_in_range(self, date_str: str, start: date, end: date) -> bool:

@@ -124,6 +124,8 @@ export default function ScrapePage() {
     dateRange?: any;
     customDateRange?: any;
     scrapeLevel?: "list" | "detail" | "deep";
+    categoryId?: string;
+    sourceId?: string;
   } | null>(null);
   const [blockedDomain, setBlockedDomain] = useState<string>("");
 
@@ -287,14 +289,17 @@ export default function ScrapePage() {
       await scrapeUrl(url, advancedOptions);
     } else {
       // 如果是列表页，使用深度爬取
-      console.log('检测到列表页，使用深度爬取', { dateRange, scrapeLevel });
+      console.log('检测到列表页，使用深度爬取', { dateRange, scrapeLevel, selectedCategory, sourceId: selectedSource?.id });
       await deepScrape(
         url,
         maxArticles,
         dateRange?.preset,
         dateRange?.custom,
         advancedOptions,
-        scrapeLevel
+        scrapeLevel,
+        undefined,  // cookies
+        selectedCategory,  // categoryId
+        selectedSource?.id  // sourceId
       );
     }
   };
@@ -603,6 +608,8 @@ export default function ScrapePage() {
     dateRange?: any;
     customDateRange?: any;
     scrapeLevel?: "list" | "detail" | "deep";
+    categoryId?: string;
+    sourceId?: string;
   }) => {
     setBlockedDomain(domain);
     setPendingScrapeParams(params);
@@ -624,7 +631,9 @@ export default function ScrapePage() {
         pendingScrapeParams.customDateRange,
         pendingScrapeParams.options,
         pendingScrapeParams.scrapeLevel,
-        cookieInput.trim()
+        cookieInput.trim(),
+        pendingScrapeParams.categoryId,
+        pendingScrapeParams.sourceId
       );
     } else {
       // 单页爬取

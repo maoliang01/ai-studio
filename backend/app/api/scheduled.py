@@ -16,46 +16,165 @@ from app.core.database import get_db
 from app.models.scheduled_task import (
     ScheduledTask, ScrapeHistory, TaskStatus
 )
+from app.models.article import ScrapeSource
 
 logger = logging.getLogger("ai-studio")
 
 router = APIRouter(prefix="/api/scheduled", tags=["定时任务"])
 
 
-# ============ Pydantic Schemas ============
+# ============ 辅助函数 ============
+
+def _calculate_next_run(schedule_time: str) -> datetime:
+    """计算下次执行时间"""
+    hour, minute = map(int, schedule_time.split(":"))
+    now = datetime.now()
+    next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if next_run <= now:
+        next_run += timedelta(days=1)
+    return next_run
+
+
+def _sync_scheduler():
+    """同步调度器任务"""
+    try:
+        from app.core.scheduler import get_scheduler, sync_scheduler_tasks
+        scheduler = get_scheduler()
+        if scheduler:
+            sync_scheduler_tasks(scheduler)
+    except Exception:
+        pass  # 调度器可能未初始化
+
+
+def _get_source_name(source_id: Optional[str]) -> Optional[str]:
+    """获取爬取源名称（从 settings.json）"""
+    if not source_id:
+        return None
+    from app.api.settings import settings_store
+    source = settings_store.scrape_sources.get(source_id)
+    return source.get("name") if source else None
+
+
+def _ensure_scrape_source_in_db(db: Session, settings_store, source_id: str):
+    """确保爬取源和分类在数据库中存在（同步 settings.json → scrape_sources 表）"""
+    from app.models.article import ScrapeSource, Category
+    existing = db.query(ScrapeSource).filter(ScrapeSource.id == source_id).first()
+    if existing:
+        return
+    src = settings_store.scrape_sources[source_id]
+    category_id = src.get("category")
+    if category_id and not db.query(Category).filter(Category.id == category_id).first():
+        cat = settings_store.categories.get(category_id, {})
+        db.add(Category(
+            id=category_id,
+            name=cat.get("name", category_id),
+            color=cat.get("color", "#6B7280"),
+            folder_name=cat.get("folder_name", cat.get("name", category_id)),
+        ))
+    db.add(ScrapeSource(
+        id=source_id,
+        name=src.get("name", source_id),
+        url=src.get("url", ""),
+        category_id=category_id,
+        description=src.get("description", ""),
+    ))
+    db.flush()
+
+
+def _task_to_response(task: ScheduledTask) -> dict:
+    """将任务模型转换为响应字典"""
+    source_ids_list = task.get_source_ids_list()
+
+    # 获取源名称列表
+    source_names = []
+    for sid in source_ids_list:
+        name = _get_source_name(sid)
+        if name:
+            source_names.append(name)
+
+    return {
+        "id": task.id,
+        "name": task.name,
+        "source_id": task.source_id,
+        "source_ids": source_ids_list,
+        "source_names": source_names,
+        "custom_url": task.custom_url,
+        "schedule_time": task.schedule_time,
+        "scrape_range": task.scrape_range,
+        "is_enabled": task.is_enabled,
+        "last_run_at": task.last_run_at.isoformat() if task.last_run_at else None,
+        "next_run_at": task.next_run_at.isoformat() if task.next_run_at else None,
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+        "updated_at": task.updated_at.isoformat() if task.updated_at else None,
+    }
+
+
+def _history_to_response(history: ScrapeHistory) -> dict:
+    """将历史记录模型转换为响应字典"""
+    from app.api.settings import settings_store
+
+    duration = None
+    if history.started_at and history.finished_at:
+        duration = (history.finished_at - history.started_at).total_seconds()
+
+    # 获取任务名称和源名称
+    task_name = None
+    source_name = None
+    if history.task_id:
+        from app.core.database import get_session_local
+        db = get_session_local()()
+        try:
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == history.task_id).first()
+            if task:
+                task_name = task.name
+                if task.source_id:
+                    source_name = _get_source_name(task.source_id)
+        finally:
+            db.close()
+
+    return {
+        "id": history.id,
+        "task_id": history.task_id,
+        "task_name": task_name,
+        "source_name": source_name,
+        "url": history.url,
+        "article_title": history.article_title,
+        "article_id": history.article_id,
+        "status": history.status,
+        "error_message": history.error_message,
+        "started_at": history.started_at.isoformat() if history.started_at else None,
+        "finished_at": history.finished_at.isoformat() if history.finished_at else None,
+        "duration": duration,
+        "articles_count": history.articles_count,
+        "created_at": history.created_at.isoformat() if history.created_at else None,
+    }
+
+
+# ============ 基础 Pydantic Schemas ============
 
 class ScheduledTaskCreate(BaseModel):
     name: str
     source_ids: Optional[List[str]] = []
-    source_id: Optional[str] = None
     custom_url: Optional[str] = None
     schedule_time: str
-    scrape_range: Optional[str] = "1d"
-    is_enabled: Optional[bool] = True
+    scrape_range: str = "1d"
+    is_enabled: bool = False  # 新任务默认禁用，点击"启动"后才启用
 
 
 class ScheduledTaskUpdate(BaseModel):
     name: Optional[str] = None
     source_ids: Optional[List[str]] = None
-    source_id: Optional[str] = None
     custom_url: Optional[str] = None
     schedule_time: Optional[str] = None
     scrape_range: Optional[str] = None
     is_enabled: Optional[bool] = None
 
 
-class SourceBrief(BaseModel):
-    id: str
-    name: str
-    url: str
-
-
 class ScheduledTaskResponse(BaseModel):
     id: str
     name: str
-    source_ids: Optional[List[str]] = []
-    source_id: Optional[str] = None
-    source: Optional[SourceBrief] = None
+    source_ids: List[str]
+    source_names: List[str]
     custom_url: Optional[str] = None
     schedule_time: str
     scrape_range: str
@@ -69,6 +188,8 @@ class ScheduledTaskResponse(BaseModel):
 class ScrapeHistoryResponse(BaseModel):
     id: str
     task_id: Optional[str] = None
+    task_name: Optional[str] = None
+    source_name: Optional[str] = None
     url: str
     article_title: Optional[str] = None
     article_id: Optional[str] = None
@@ -89,65 +210,13 @@ class TaskStatsResponse(BaseModel):
     today_failed: int
 
 
-def _calculate_next_run(schedule_time: str) -> datetime:
-    """计算下次执行时间"""
-    hour, minute = map(int, schedule_time.split(":"))
-    now = datetime.now()
-    next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if next_run <= now:
-        next_run += timedelta(days=1)
-    return next_run
+class RunningTaskResponse(BaseModel):
+    """正在运行的任务信息"""
+    running_count: int
+    running_tasks: List[dict]  # 正在运行的历史记录列表
 
 
-def _task_to_response(task: ScheduledTask, db: Session, include_source: bool = False) -> dict:
-    """将任务模型转换为响应字典"""
-    source = None
-    if task.source_id:
-        from app.models.article import ScrapeSource
-        src = db.query(ScrapeSource).filter(ScrapeSource.id == task.source_id).first()
-        if src:
-            source = {"id": src.id, "name": src.name, "url": src.url}
-
-    return {
-        "id": task.id,
-        "name": task.name,
-        "source_ids": task.get_source_ids_list(),
-        "source_id": task.source_id,
-        "source": source,
-        "custom_url": task.custom_url,
-        "schedule_time": task.schedule_time,
-        "scrape_range": task.scrape_range,
-        "is_enabled": task.is_enabled,
-        "last_run_at": task.last_run_at.isoformat() if task.last_run_at else None,
-        "next_run_at": task.next_run_at.isoformat() if task.next_run_at else None,
-        "created_at": task.created_at.isoformat() if task.created_at else None,
-        "updated_at": task.updated_at.isoformat() if task.updated_at else None,
-    }
-
-
-def _history_to_response(history: ScrapeHistory) -> dict:
-    """将历史记录模型转换为响应字典"""
-    duration = None
-    if history.started_at and history.finished_at:
-        duration = (history.finished_at - history.started_at).total_seconds()
-
-    return {
-        "id": history.id,
-        "task_id": history.task_id,
-        "url": history.url,
-        "article_title": history.article_title,
-        "article_id": history.article_id,
-        "status": history.status,
-        "error_message": history.error_message,
-        "started_at": history.started_at.isoformat() if history.started_at else None,
-        "finished_at": history.finished_at.isoformat() if history.finished_at else None,
-        "duration": duration,
-        "articles_count": history.articles_count,
-        "created_at": history.created_at.isoformat() if history.created_at else None,
-    }
-
-
-# ============ 定时任务 CRUD ============
+# ============ 基础列表/统计路由（无路径参数）============
 
 @router.get("", response_model=List[ScheduledTaskResponse])
 async def list_tasks(
@@ -159,288 +228,94 @@ async def list_tasks(
     if not include_disabled:
         query = query.filter(ScheduledTask.is_enabled == True)
     tasks = query.order_by(ScheduledTask.created_at.desc()).all()
-    return [_task_to_response(t, db, include_source=True) for t in tasks]
+    return [_task_to_response(t) for t in tasks]
 
 
-@router.post("", response_model=ScheduledTaskResponse)
-async def create_task(request: ScheduledTaskCreate, db: Session = Depends(get_db)):
-    """创建定时任务"""
-    # 验证时间格式
-    try:
-        hour, minute = map(int, request.schedule_time.split(":"))
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError("Invalid time")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="时间格式错误，请使用 HH:MM 格式")
+@router.get("/stats", response_model=TaskStatsResponse)
+async def get_stats(db: Session = Depends(get_db)):
+    """获取任务统计"""
+    total_tasks = db.query(ScheduledTask).count()
+    enabled_tasks = db.query(ScheduledTask).filter(ScheduledTask.is_enabled == True).count()
 
-    # 验证爬取范围
-    valid_ranges = ["1d", "7d", "30d"]
-    if request.scrape_range and request.scrape_range not in valid_ranges:
-        raise HTTPException(status_code=400, detail="爬取范围只能是 1d、7d 或 30d")
+    # 今日统计
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today_histories = db.query(ScrapeHistory).filter(
+        ScrapeHistory.started_at >= today
+    ).all()
 
-    # 处理源ID列表
-    source_ids = request.source_ids or []
-    if request.source_id:
-        source_ids = list(set(source_ids + [request.source_id]))
+    today_runs = len(today_histories)
+    today_success = sum(1 for h in today_histories if h.status == TaskStatus.SUCCESS.value)
+    today_failed = sum(1 for h in today_histories if h.status == TaskStatus.FAILED.value)
 
-    # 验证爬取源存在
-    for sid in source_ids:
-        source = db.query(ScrapeSource).filter(ScrapeSource.id == sid).first()
-        if not source:
-            raise HTTPException(status_code=400, detail=f"爬取源 {sid} 不存在")
-
-    # 计算下次执行时间
-    next_run_at = _calculate_next_run(request.schedule_time)
-
-    # 保存第一个源ID到 source_id 字段（兼容）
-    primary_source_id = source_ids[0] if source_ids else None
-
-    task = ScheduledTask(
-        name=request.name,
-        source_ids=json.dumps(source_ids) if source_ids else None,
-        source_id=primary_source_id,
-        custom_url=request.custom_url,
-        schedule_time=request.schedule_time,
-        scrape_range=request.scrape_range,
-        is_enabled=request.is_enabled,
-        next_run_at=next_run_at,
+    return TaskStatsResponse(
+        total_tasks=total_tasks,
+        enabled_tasks=enabled_tasks,
+        today_runs=today_runs,
+        today_success=today_success,
+        today_failed=today_failed,
     )
-    db.add(task)
-    db.commit()
-    db.refresh(task)
-
-    # 同步调度器
-    _sync_scheduler()
-
-    return _task_to_response(task, db, include_source=True)
 
 
-def _sync_scheduler():
-    """同步调度器任务"""
-    try:
-        from app.core.scheduler import get_scheduler
-        scheduler = get_scheduler()
-        if scheduler:
-            from app.core.scheduler import sync_scheduler_tasks
-            sync_scheduler_tasks(scheduler)
-    except Exception:
-        pass  # 调度器可能未初始化
+@router.get("/running", response_model=RunningTaskResponse)
+async def get_running_tasks(db: Session = Depends(get_db)):
+    """获取当前正在运行的爬取任务"""
+    # 只查询状态为 running 的历史记录（最近4小时内的，避免遗漏长时间运行的任务）
+    # 使用 UTC 时间保持与数据库一致
+    cutoff_time = datetime.utcnow() - timedelta(hours=4)
+    running_histories = db.query(ScrapeHistory).filter(
+        ScrapeHistory.status == TaskStatus.RUNNING.value,
+        ScrapeHistory.started_at >= cutoff_time
+    ).order_by(ScrapeHistory.started_at.desc()).all()
 
+    running_tasks = []
+    for h in running_histories:
+        # 计算已运行时长
+        elapsed = None
+        if h.started_at:
+            elapsed = (datetime.utcnow() - h.started_at).total_seconds()
 
-@router.get("/{task_id}/sync")
-def _sync_scheduler():
-    """同步调度器任务"""
-    try:
-        from app.core.scheduler import get_scheduler
-        scheduler = get_scheduler()
-        if scheduler:
-            from app.core.scheduler import sync_scheduler_tasks
-            sync_scheduler_tasks(scheduler)
-    except Exception:
-        pass  # 调度器可能未初始化
+        running_tasks.append({
+            "id": h.id,
+            "task_id": h.task_id,
+            "task_name": _history_to_response(h).get("task_name"),
+            "url": h.url,
+            "started_at": h.started_at.isoformat() if h.started_at else None,
+            "elapsed_seconds": elapsed,
+        })
 
-
-# ============ 爬取历史记录 ============
-
-@router.get("/{task_id}", response_model=ScheduledTaskResponse)
-async def get_task(task_id: str, db: Session = Depends(get_db)):
-    """获取单个定时任务"""
-    task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-    return _task_to_response(task, db)
-
-
-@router.put("/{task_id}", response_model=ScheduledTaskResponse)
-async def update_task(task_id: str, request: ScheduledTaskUpdate, db: Session = Depends(get_db)):
-    """更新定时任务"""
-    task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-
-    # 验证时间格式
-    if request.schedule_time:
-        try:
-            hour, minute = map(int, request.schedule_time.split(":"))
-            if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                raise ValueError("Invalid time")
-        except ValueError:
-            raise HTTPException(status_code=400, detail="时间格式错误，请使用 HH:MM 格式")
-
-    # 验证爬取范围
-    if request.scrape_range:
-        valid_ranges = ["1d", "7d", "30d"]
-        if request.scrape_range not in valid_ranges:
-            raise HTTPException(status_code=400, detail="爬取范围只能是 1d、7d 或 30d")
-
-    # 处理源ID列表
-    if request.source_ids is not None or request.source_id is not None:
-        source_ids = request.source_ids or []
-        if request.source_id:
-            source_ids = list(set(source_ids + [request.source_id]))
-
-        # 验证爬取源
-        for sid in source_ids:
-            source = db.query(ScrapeSource).filter(ScrapeSource.id == sid).first()
-            if not source:
-                raise HTTPException(status_code=400, detail=f"爬取源 {sid} 不存在")
-
-        task.source_ids = json.dumps(source_ids) if source_ids else None
-        task.source_id = source_ids[0] if source_ids else None
-
-    # 更新字段
-    if request.name is not None:
-        task.name = request.name
-    if request.custom_url is not None:
-        task.custom_url = request.custom_url
-    if request.schedule_time is not None:
-        task.schedule_time = request.schedule_time
-        task.next_run_at = _calculate_next_run(request.schedule_time)
-    if request.scrape_range is not None:
-        task.scrape_range = request.scrape_range
-    if request.is_enabled is not None:
-        task.is_enabled = request.is_enabled
-
-    task.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(task)
-
-    # 同步调度器
-    _sync_scheduler()
-
-    return _task_to_response(task, db)
-
-
-@router.delete("/{task_id}")
-async def delete_task(task_id: str, db: Session = Depends(get_db)):
-    """删除定时任务"""
-    task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-
-    db.delete(task)
-    db.commit()
-    return {"message": "任务已删除"}
-
-
-@router.post("/{task_id}/toggle", response_model=ScheduledTaskResponse)
-async def toggle_task(task_id: str, db: Session = Depends(get_db)):
-    """切换任务启用状态"""
-    task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-
-    task.is_enabled = not task.is_enabled
-    task.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(task)
-
-    # 同步调度器
-    _sync_scheduler()
-
-    return _task_to_response(task, db)
-
-
-@router.post("/{task_id}/run")
-async def run_task_now(task_id: str, db: Session = Depends(get_db)):
-    """手动触发立即执行任务"""
-    task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="任务不存在")
-
-    # 获取要爬取的URL列表
-    source_ids = task.get_source_ids_list()
-    urls = []
-    if task.custom_url:
-        urls = [task.custom_url]
-    else:
-        for sid in source_ids:
-            source = db.query(ScrapeSource).filter(ScrapeSource.id == sid).first()
-            if source:
-                urls.append(source.url)
-
-    # 获取爬取范围
-    scrape_range = task.scrape_range or "1d"
-
-    if not urls:
-        raise HTTPException(status_code=400, detail="任务没有配置爬取URL")
-
-    # 创建历史记录
-    history = ScrapeHistory(
-        task_id=task_id,
-        url=", ".join(urls[:3]) + ("..." if len(urls) > 3 else ""),
-        status=TaskStatus.RUNNING.value,
+    return RunningTaskResponse(
+        running_count=len(running_tasks),
+        running_tasks=running_tasks,
     )
-    db.add(history)
-    task.last_run_at = datetime.utcnow()
-    task.next_run_at = _calculate_next_run(task.schedule_time)
-    db.commit()
-    db.refresh(history)
-
-    # 在后台运行实际爬取任务
-    try:
-        from concurrent.futures import ThreadPoolExecutor
-        from app.core.scheduler import run_scheduled_task
-
-        executor = ThreadPoolExecutor(max_workers=1)
-        executor.submit(run_scheduled_task, task_id)
-        executor.shutdown(wait=False)
-    except Exception as e:
-        logging.getLogger("ai-studio").error(f"启动爬取任务失败: {e}")
-
-    return {
-        "message": "任务已开始执行",
-        "history_id": history.id,
-        "urls": urls,
-        "scrape_range": scrape_range,
-        "sources_count": len(source_ids),
-        "urls": urls,
-        "scrape_range": scrape_range,
-        "sources_count": len(source_ids),
-    }
 
 
-# ============ 爬取历史记录 ============
+# ============ 历史记录路由 ============
 
 @router.get("/history", response_model=List[ScrapeHistoryResponse])
 async def list_history(
     task_id: Optional[str] = Query(None, description="按任务ID过滤"),
-    status: Optional[str] = Query(None, description="按状态过滤"),
-    date: Optional[str] = Query(None, description="按日期过滤，格式 YYYY-MM-DD"),
-    page: int = Query(1, ge=1, description="页码"),
-    page_size: int = Query(50, ge=1, le=200, description="每页数量"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    limit: Optional[int] = Query(None, description="返回数量限制（别名，用于兼容）"),
     db: Session = Depends(get_db)
 ):
+    # 使用 limit 参数覆盖 page_size（如果提供）
+    if limit is not None and limit > 0:
+        page_size = min(limit, 200)
     """获取爬取历史记录"""
     query = db.query(ScrapeHistory)
 
     if task_id:
         query = query.filter(ScrapeHistory.task_id == task_id)
-    if status:
-        query = query.filter(ScrapeHistory.status == status)
-    if date:
-        try:
-            filter_date = datetime.strptime(date, "%Y-%m-%d").date()
-            query = query.filter(
-                ScrapeHistory.started_at >= datetime.combine(filter_date, datetime.min.time()),
-                ScrapeHistory.started_at < datetime.combine(filter_date, datetime.max.time())
-            )
-        except ValueError:
-            raise HTTPException(status_code=400, detail="日期格式错误，请使用 YYYY-MM-DD")
 
-    total = query.count()
     histories = query.order_by(ScrapeHistory.started_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
 
     return [_history_to_response(h) for h in histories]
 
 
 @router.get("/history/summary")
-async def get_history_summary(
-    db: Session = Depends(get_db)
-):
+async def get_history_summary(db: Session = Depends(get_db)):
     """获取每日爬取汇总（最近7天）"""
-    # 获取最近7天的历史记录
-    from datetime import timedelta
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     week_ago = today - timedelta(days=7)
 
@@ -470,31 +345,6 @@ async def get_history_summary(
     return list(daily_summary.values())
 
 
-@router.get("/stats", response_model=TaskStatsResponse)
-async def get_stats(db: Session = Depends(get_db)):
-    """获取任务统计"""
-    total_tasks = db.query(ScheduledTask).count()
-    enabled_tasks = db.query(ScheduledTask).filter(ScheduledTask.is_enabled == True).count()
-
-    # 今日统计
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    today_histories = db.query(ScrapeHistory).filter(
-        ScrapeHistory.started_at >= today
-    ).all()
-
-    today_runs = len(today_histories)
-    today_success = sum(1 for h in today_histories if h.status == TaskStatus.SUCCESS.value)
-    today_failed = sum(1 for h in today_histories if h.status == TaskStatus.FAILED.value)
-
-    return TaskStatsResponse(
-        total_tasks=total_tasks,
-        enabled_tasks=enabled_tasks,
-        today_runs=today_runs,
-        today_success=today_success,
-        today_failed=today_failed,
-    )
-
-
 @router.delete("/history/{history_id}")
 async def delete_history(history_id: str, db: Session = Depends(get_db)):
     """删除历史记录"""
@@ -505,3 +355,298 @@ async def delete_history(history_id: str, db: Session = Depends(get_db)):
     db.delete(history)
     db.commit()
     return {"message": "历史记录已删除"}
+
+
+# ============ 任务 CRUD 路由 ============
+
+@router.post("", response_model=ScheduledTaskResponse)
+async def create_task(request: ScheduledTaskCreate, db: Session = Depends(get_db)):
+    """创建定时任务"""
+    # 验证时间格式
+    try:
+        hour, minute = map(int, request.schedule_time.split(":"))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError("Invalid time")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="时间格式错误，请使用 HH:MM 格式")
+
+    # 验证爬取范围
+    if request.scrape_range not in ["1d", "7d", "30d"]:
+        raise HTTPException(status_code=400, detail="爬取范围只能是 1d、7d 或 30d")
+
+    # 验证爬取源存在（从 settings.json 读取）
+    if request.source_ids:
+        from app.api.settings import settings_store
+        for sid in request.source_ids:
+            if sid not in settings_store.scrape_sources:
+                raise HTTPException(status_code=400, detail=f"爬取源不存在: {sid}")
+
+        # 同步爬取源到数据库（确保外键约束满足）
+        for sid in request.source_ids:
+            _ensure_scrape_source_in_db(db, settings_store, sid)
+        db.commit()
+
+    # 计算下次执行时间
+    next_run_at = _calculate_next_run(request.schedule_time)
+
+    # 保存源ID列表
+    source_id = request.source_ids[0] if request.source_ids else None
+
+    task = ScheduledTask(
+        name=request.name,
+        source_ids=json.dumps(request.source_ids) if request.source_ids else None,
+        source_id=source_id,
+        custom_url=request.custom_url,
+        schedule_time=request.schedule_time,
+        scrape_range=request.scrape_range,
+        is_enabled=request.is_enabled,
+        next_run_at=next_run_at,
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+
+    # 同步调度器
+    _sync_scheduler()
+
+    return _task_to_response(task)
+
+
+@router.get("/{task_id}", response_model=ScheduledTaskResponse)
+async def get_task(task_id: str, db: Session = Depends(get_db)):
+    """获取单个定时任务"""
+    task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return _task_to_response(task)
+
+
+@router.put("/{task_id}", response_model=ScheduledTaskResponse)
+async def update_task(task_id: str, request: ScheduledTaskUpdate, db: Session = Depends(get_db)):
+    """更新定时任务"""
+    task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    # 验证时间格式
+    if request.schedule_time:
+        try:
+            hour, minute = map(int, request.schedule_time.split(":"))
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                raise ValueError("Invalid time")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="时间格式错误，请使用 HH:MM 格式")
+
+    # 验证爬取范围
+    if request.scrape_range and request.scrape_range not in ["1d", "7d", "30d"]:
+        raise HTTPException(status_code=400, detail="爬取范围只能是 1d、7d 或 30d")
+
+    # 处理源ID列表（从 settings.json 验证）
+    if request.source_ids is not None:
+        from app.api.settings import settings_store
+        for sid in request.source_ids:
+            if sid not in settings_store.scrape_sources:
+                raise HTTPException(status_code=400, detail=f"爬取源不存在: {sid}")
+            # 同步爬取源到数据库（确保外键约束满足）
+            _ensure_scrape_source_in_db(db, settings_store, sid)
+        task.source_ids = json.dumps(request.source_ids) if request.source_ids else None
+        task.source_id = request.source_ids[0] if request.source_ids else None
+
+    # 更新字段
+    if request.name is not None:
+        task.name = request.name
+    if request.custom_url is not None:
+        task.custom_url = request.custom_url
+    if request.schedule_time is not None:
+        task.schedule_time = request.schedule_time
+        task.next_run_at = _calculate_next_run(request.schedule_time)
+    if request.scrape_range is not None:
+        task.scrape_range = request.scrape_range
+    if request.is_enabled is not None:
+        task.is_enabled = request.is_enabled
+
+    task.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(task)
+
+    # 同步调度器
+    _sync_scheduler()
+
+    return _task_to_response(task)
+
+
+@router.delete("/{task_id}")
+async def delete_task(task_id: str, db: Session = Depends(get_db)):
+    """删除定时任务"""
+    task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    db.delete(task)
+    db.commit()
+
+    # 同步调度器
+    _sync_scheduler()
+
+    return {"message": "任务已删除"}
+
+
+# ============ 任务操作路由 ============
+
+@router.post("/{task_id}/toggle", response_model=ScheduledTaskResponse)
+async def toggle_task(task_id: str, db: Session = Depends(get_db)):
+    """切换任务启用状态"""
+    task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    task.is_enabled = not task.is_enabled
+    task.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(task)
+
+    # 同步调度器
+    _sync_scheduler()
+
+    return _task_to_response(task)
+
+
+@router.post("/{task_id}/run")
+async def run_task_now(task_id: str, db: Session = Depends(get_db)):
+    """手动触发立即执行任务（与定时任务完全独立）"""
+    task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+
+    # 获取要爬取的URL列表
+    source_ids = task.get_source_ids_list()
+    urls = []
+    if task.custom_url:
+        urls = [task.custom_url]
+    else:
+        for sid in source_ids:
+            source = db.query(ScrapeSource).filter(ScrapeSource.id == sid).first()
+            if source:
+                urls.append(source.url)
+
+    if not urls:
+        raise HTTPException(status_code=400, detail="任务没有配置爬取URL")
+
+    # 创建历史记录
+    history = ScrapeHistory(
+        task_id=task_id,
+        url=", ".join(urls[:3]) + ("..." if len(urls) > 3 else ""),
+        status=TaskStatus.RUNNING.value,
+    )
+    db.add(history)
+    task.last_run_at = datetime.utcnow()
+    task.next_run_at = _calculate_next_run(task.schedule_time)
+    db.commit()
+    db.refresh(history)
+
+    # 独立执行函数（不通过 APScheduler）
+    def run_immediately():
+        """立即执行函数 - 独立于调度器"""
+        logger.info(f"[立即执行] 任务 {task.name} 开始执行 (history_id={history.id})")
+
+        from app.core.database import get_session_local
+        db = get_session_local()
+        try:
+            from app.services.scraper import get_scraper, ScrapeOptions
+            from app.models.article import ScrapeSource
+            import asyncio
+
+            start_time = datetime.utcnow()
+
+            # 获取爬取源的 category_id
+            category_id = None
+            source_id = source_ids[0] if source_ids else None
+            if source_ids:
+                source = db.query(ScrapeSource).filter(ScrapeSource.id == source_ids[0]).first()
+                if source:
+                    category_id = source.category_id
+
+            total_articles = 0
+            scraper = get_scraper()
+            options = ScrapeOptions()
+            scraped_articles = []
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            for url in urls:
+                logger.info(f"[立即执行] 深度爬取: {url}")
+                try:
+                    list_page, article_results = loop.run_until_complete(
+                        scraper.deep_scrape(
+                            url=url,
+                            options=options,
+                            max_articles=20,
+                            date_range=task.scrape_range,
+                            scrape_level="deep"
+                        )
+                    )
+                    logger.info(f"  [立即执行] 识别到 {len(article_results)} 篇文章")
+
+                    for result in article_results:
+                        if result.content and result.word_count > 50:
+                            saved, article_id = scraper.save_to_database(
+                                result, category_id=category_id, source_id=source_id
+                            )
+                            if saved:
+                                total_articles += 1
+                                title = result.title or "无标题"
+                                scraped_articles.append(title)
+                                logger.info(f"    [立即执行] 已保存: {title[:50]}")
+
+                except Exception as url_error:
+                    logger.error(f"  [立即执行] 爬取失败: {url_error}")
+
+            loop.close()
+
+            # 更新历史记录
+            end_time = datetime.utcnow()
+            duration = (end_time - start_time).total_seconds()
+
+            history_obj = db.query(ScrapeHistory).filter(ScrapeHistory.id == history.id).first()
+            if history_obj:
+                if scraped_articles:
+                    article_list = [f"{i+1}. {t[:40]}" for i, t in enumerate(scraped_articles[:10])]
+                    if len(scraped_articles) > 10:
+                        article_list.append(f"... 还有 {len(scraped_articles) - 10} 篇")
+                    history_obj.article_title = "\n".join(article_list)
+                else:
+                    history_obj.article_title = "无文章"
+
+                history_obj.status = TaskStatus.SUCCESS.value
+                history_obj.finished_at = end_time
+                history_obj.duration = duration
+                history_obj.articles_count = total_articles
+                db.commit()
+
+            logger.info(f"[立即执行] 任务 {task.name} 完成，保存了 {total_articles} 篇文章")
+
+        except Exception as e:
+            logger.error(f"[立即执行] 任务执行失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            history_obj = db.query(ScrapeHistory).filter(ScrapeHistory.id == history.id).first()
+            if history_obj:
+                history_obj.status = TaskStatus.FAILED.value
+                history_obj.error_message = str(e)
+                history_obj.finished_at = datetime.utcnow()
+                db.commit()
+        finally:
+            db.close()
+
+    # 在独立线程中执行
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        executor = ThreadPoolExecutor(max_workers=5)  # 允许最多5个立即执行并发
+        executor.submit(run_immediately)
+        executor.shutdown(wait=False)
+        logger.info(f"[立即执行] 任务已提交到独立线程池")
+    except Exception as e:
+        logger.error(f"[立即执行] 启动任务失败: {e}")
+
+    return {"message": "任务已开始执行", "history_id": history.id}

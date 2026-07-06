@@ -76,7 +76,9 @@ interface ScrapeStore {
     customDateRange?: CustomDateRange,
     options?: Partial<ScrapeOptions>,
     scrapeLevel?: ScrapeLevel,
-    cookies?: string
+    cookies?: string,
+    categoryId?: string,
+    sourceId?: string
   ) => Promise<{ success: boolean; scrapeId?: string; blocked?: boolean; error?: string }>;
   cancelScrape: () => Promise<void>;
   clearResults: () => void;
@@ -253,7 +255,9 @@ export const useScrapeStore = create<ScrapeStore>((set, get) => ({
     customDateRange?: CustomDateRange,
     options?: Partial<ScrapeOptions>,
     scrapeLevel?: ScrapeLevel,
-    cookies?: string
+    cookies?: string,
+    categoryId?: string,
+    sourceId?: string
   ) => {
     set({ isScraping: true, error: null, progress: { current: 0, total: 1, stage: 0, stageName: "正在启动...", stageDetail: "准备爬取任务" } });
 
@@ -284,8 +288,13 @@ export const useScrapeStore = create<ScrapeStore>((set, get) => ({
         requestData.cookies = cookies;
       }
 
+      // 添加分类和来源参数（即使为空也强制发送）
+      console.log('[DEBUG] deepScrape 参数: categoryId=', categoryId, 'sourceId=', sourceId);
+      requestData.category_id = categoryId || null;
+      requestData.source_id = sourceId || null;
+
       // 调用 API（后端会在后台线程执行爬取，立即返回 scrape_id）
-      console.log('发送爬取请求:', requestData);
+      console.log('发送爬取请求:', JSON.stringify(requestData, null, 2));
       const response = await fetch("/api/scrape/deep", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -302,7 +311,7 @@ export const useScrapeStore = create<ScrapeStore>((set, get) => ({
 
       // 轮询进度
       const pollProgress = async () => {
-        let maxPolls = 300; // 最多轮询 5 分钟（5秒 * 60）
+        let maxPolls = 600; // 最多轮询 20 分钟（2秒 * 600）
         const poll = async (): Promise<void> => {
           if (!get().isScraping || maxPolls <= 0) return;
 

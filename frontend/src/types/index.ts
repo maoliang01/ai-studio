@@ -132,6 +132,7 @@ export interface Article {
   categoryName?: string;  // 分类名称
   publishedAt?: string;
   scrapedAt: string;
+  scrapedAtDisplay?: string;  // 用于前端显示的格式化爬取时间
   status: ArticleStatus;
   errorMessage?: string;
   keywords: string[];
@@ -372,6 +373,22 @@ export interface DailySummary {
   success: number;
   failed: number;
   articles: number;
+}
+
+/** 运行中的任务信息 */
+export interface RunningTask {
+  id: string;
+  taskId: string;
+  taskName?: string;
+  url: string;
+  startedAt: string;
+  elapsedSeconds?: number;
+}
+
+/** 运行中任务响应 */
+export interface RunningTasksResponse {
+  runningCount: number;
+  runningTasks: RunningTask[];
 }
 
 // ================================================

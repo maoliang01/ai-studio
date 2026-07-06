@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useSettingsStore } from "@/stores/settings-store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -61,6 +61,7 @@ import type {
   DailySummary,
   TaskStats,
   ScrapeRangeOption,
+  RunningTask,
 } from "@/types";
 
 // 默认分类颜色列表
@@ -151,12 +152,105 @@ export default function ScrapeSettingsPage() {
   const [isSavingTask, setIsSavingTask] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [activeTab, setActiveTab] = useState("sources");
+  const [runningHistoryIds, setRunningHistoryIds] = useState<Set<string>>(new Set());  // 追踪正在运行的历史记录
+  const [expandedHistoryIds, setExpandedHistoryIds] = useState<Set<string>>(new Set());  // 展开的历史记录
+  const [runningTasks, setRunningTasks] = useState<RunningTask[]>([]);  // 运行中的任务列表
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);  // 轮询定时器
 
-  // 当切换到定时爬取选项卡时加载数据
-  useEffect(() => {
-    if (activeTab === "scheduled" && tasks.length === 0) {
-      loadTasks();
+  // 加载定时任务数据（使用 ref 确保可在 useEffect 中使用）
+  const loadTasksRef = useRef<() => Promise<void>>(async () => {
+    console.log("[debug] loadTasksRef 开始加载");
+    setIsLoadingTasks(true);
+    try {
+      const [tasksRes, statsRes, summaryRes] = await Promise.all([
+        fetch("/api/scheduled?include_disabled=true"),
+        fetch("/api/scheduled/stats"),
+        fetch("/api/scheduled/history/summary"),
+      ]);
+      console.log("[debug] 任务列表API状态:", tasksRes.status);
+      if (tasksRes.ok) {
+        const data = await tasksRes.json();
+        console.log("[debug] 任务列表返回数据:", JSON.stringify(data));
+        setTasks(Array.isArray(data) ? data : []);
+      }
+      if (statsRes.ok) {
+        const data = await statsRes.json();
+        setTaskStats(data.error ? null : data);
+      }
+      if (summaryRes.ok) {
+        const data = await summaryRes.json();
+        setDailySummary(Array.isArray(data) ? data : []);
+      }
+    } catch (error) {
+      console.error("[debug] 加载定时任务失败:", error);
+    } finally {
+      setIsLoadingTasks(false);
+      console.log("[debug] loadTasksRef 加载完成");
     }
+  });
+
+  const loadHistoryRef = useRef<() => Promise<void>>(async () => {
+    try {
+      const res = await fetch("/api/scheduled/history?limit=50");
+      if (res.ok) {
+        const data = await res.json();
+        setHistory(Array.isArray(data) ? data : []);
+      }
+    } catch (error) {
+      console.error("加载历史记录失败:", error);
+    }
+  });
+
+  // 加载运行中的任务
+  const loadRunningTasks = useRef<() => Promise<void>>(async () => {
+    try {
+      const res = await fetch("/api/scheduled/running");
+      if (res.ok) {
+        const data = await res.json();
+        setRunningTasks(data.running_tasks || []);
+        // 同时检查是否有正在运行的历史记录需要追踪
+        if (data.running_tasks && data.running_tasks.length > 0) {
+          setRunningHistoryIds(new Set(data.running_tasks.map((t: RunningTask) => t.id)));
+        }
+      }
+    } catch (error) {
+      console.error("加载运行中任务失败:", error);
+    }
+  });
+
+  // 格式化已运行时间
+  const formatElapsedTime = (seconds?: number) => {
+    if (!seconds) return "-";
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    if (mins > 0) {
+      return `${mins}分${secs}秒`;
+    }
+    return `${secs}秒`;
+  };
+
+  // 当切换到定时爬取选项卡时加载数据并启动轮询
+  useEffect(() => {
+    if (activeTab === "scheduled") {
+      loadTasksRef.current();
+      loadRunningTasks.current();
+
+      // 启动轮询（每10秒检查一次）
+      if (!pollingIntervalRef.current) {
+        pollingIntervalRef.current = setInterval(() => {
+          loadRunningTasks.current();
+          loadHistoryRef.current();
+        }, 10000);
+      }
+    }
+
+    return () => {
+      // 离开选项卡时清除轮询
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+        pollingIntervalRef.current = null;
+      }
+    };
   }, [activeTab]);
 
   // 调用页签分析 API
@@ -376,68 +470,6 @@ export default function ScrapeSettingsPage() {
     }
   };
 
-  // 加载定时任务数据
-  const loadTasks = async () => {
-    setIsLoadingTasks(true);
-    try {
-      const [tasksRes, statsRes, summaryRes] = await Promise.all([
-        fetch("/api/scheduled"),
-        fetch("/api/scheduled/history/stats"),
-        fetch("/api/scheduled/history/summary"),
-      ]);
-      // 处理 tasks 响应
-      if (tasksRes.ok) {
-        const data = await tasksRes.json();
-        setTasks(Array.isArray(data) ? data : []);
-      } else {
-        setTasks([]);
-      }
-      // 处理 stats 响应
-      if (statsRes.ok) {
-        const data = await statsRes.json();
-        setTaskStats(data.error ? null : data);
-      } else {
-        setTaskStats(null);
-      }
-      // 处理 summary 响应
-      if (summaryRes.ok) {
-        const data = await summaryRes.json();
-        setDailySummary(Array.isArray(data) ? data : []);
-      } else {
-        setDailySummary([]);
-      }
-    } catch (error) {
-      console.error("加载定时任务失败:", error);
-      setTasks([]);
-      setTaskStats(null);
-      setDailySummary([]);
-    } finally {
-      setIsLoadingTasks(false);
-    }
-  };
-
-  // 加载历史记录
-  const loadHistory = async () => {
-    try {
-      const res = await fetch("/api/scheduled/history?limit=50");
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          setHistory(data);
-        } else if (data && data.items && Array.isArray(data.items)) {
-          setHistory(data.items);
-        } else {
-          setHistory([]);
-        }
-      } else {
-        setHistory([]);
-      }
-    } catch (error) {
-      console.error("加载历史记录失败:", error);
-      setHistory([]);
-    }
-  };
-
   // 切换任务启用状态
   const handleToggleTask = async (taskId: string) => {
     try {
@@ -452,20 +484,42 @@ export default function ScrapeSettingsPage() {
     }
   };
 
-  // 手动触发任务
-  const handleRunTask = async (taskId: string) => {
-    try {
-      const res = await fetch(`/api/scheduled/${taskId}/run`, { method: "POST" });
-      if (res.ok) {
-        await loadHistory();
-        alert("任务已开始执行");
-      } else {
-        const data = await res.json();
-        alert(data.error || "执行失败");
+  // 启动任务（仅启用，等待定时执行）或立即执行已启用的任务
+  const handleToggleOrRunTask = async (task: ScheduledTask) => {
+    if (!task.isEnabled) {
+      // 任务未启用，点击"启动"按钮：只启用任务，让调度器在定时时间自动执行
+      try {
+        const res = await fetch(`/api/scheduled/${task.id}/toggle`, { method: "POST" });
+        if (res.ok) {
+          // 立即更新本地状态
+          setTasks((prev) =>
+            prev.map((t) => (t.id === task.id ? { ...t, isEnabled: true } : t))
+          );
+          // 重新加载获取最新的 nextRunAt
+          await loadTasksRef.current();
+        }
+      } catch (error) {
+        console.error("启动任务失败:", error);
       }
-    } catch (error) {
-      console.error("执行任务失败:", error);
-      alert("执行失败，请检查后端服务");
+    } else {
+      // 任务已启用，点击"立即执行"：手动触发立即爬取
+      try {
+        const res = await fetch(`/api/scheduled/${task.id}/run`, { method: "POST" });
+        if (res.ok) {
+          const data = await res.json();
+          // 追踪正在运行的历史记录，开始轮询状态
+          if (data.history_id) {
+            setRunningHistoryIds((prev) => new Set([...prev, data.history_id]));
+          }
+          await loadHistoryRef.current();
+        } else {
+          const data = await res.json();
+          alert(data.error || "执行失败");
+        }
+      } catch (error) {
+        console.error("执行任务失败:", error);
+        alert("执行失败，请检查后端服务");
+      }
     }
   };
 
@@ -497,6 +551,7 @@ export default function ScrapeSettingsPage() {
 
   // 保存定时任务
   const handleSaveTask = async () => {
+    console.log("[debug] handleSaveTask 被调用, taskForm:", JSON.stringify(taskForm));
     if (!taskForm.name.trim()) {
       alert("请输入任务名称");
       return;
@@ -530,21 +585,27 @@ export default function ScrapeSettingsPage() {
         body.customUrl = taskForm.customUrl.trim();
       }
 
+      console.log("[debug] 发送请求:", url, method, JSON.stringify(body));
       const res = await fetch(url, {
         method,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
+      console.log("[debug] 响应状态:", res.status);
 
       if (res.ok) {
-        await loadTasks();
+        console.log("[debug] 保存成功，开始刷新任务列表");
+        await loadTasksRef.current();
+        console.log("[debug] 任务列表刷新完成，关闭对话框");
         setTaskDialogOpen(false);
+        console.log("[debug] 对话框已关闭");
       } else {
         const data = await res.json();
+        console.log("[debug] 保存失败:", data.error);
         alert(data.error || "保存失败");
       }
     } catch (error) {
-      console.error("保存任务失败:", error);
+      console.error("[debug] 保存任务失败:", error);
       alert("保存失败");
     } finally {
       setIsSavingTask(false);
@@ -868,7 +929,7 @@ export default function ScrapeSettingsPage() {
                   <h3 className="text-lg font-semibold">定时任务</h3>
                   <p className="text-sm text-muted-foreground">设置每日自动爬取网页</p>
                 </div>
-                <Button onClick={() => { loadTasks(); handleOpenTaskDialog(); }} className="gap-2">
+                <Button onClick={() => { loadTasksRef.current(); handleOpenTaskDialog(); }} className="gap-2">
                   <Plus className="h-4 w-4" />
                   添加任务
                 </Button>
@@ -897,6 +958,41 @@ export default function ScrapeSettingsPage() {
                     <p className="text-xl font-bold text-red-600">{taskStats.todayFailed}</p>
                     <p className="text-xs text-muted-foreground">今日失败</p>
                   </Card>
+                </div>
+              )}
+
+              {/* 运行状态显示 */}
+              {runningTasks.length > 0 && (
+                <div className="border-2 border-blue-200 bg-blue-50 dark:bg-blue-950/30 rounded-lg p-4 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
+                    <span className="text-sm font-medium text-blue-700 dark:text-blue-400">
+                      正在运行 ({runningTasks.length})
+                    </span>
+                    <span className="text-xs text-muted-foreground ml-auto">
+                      每10秒自动刷新
+                    </span>
+                  </div>
+                  {runningTasks.map((task) => (
+                    <div key={task.id} className="flex items-center gap-4 p-3 bg-white/80 dark:bg-slate-900/50 rounded-lg">
+                      <Loader2 className="h-4 w-4 animate-spin text-blue-500 shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-sm">{task.taskName || "定时任务"}</span>
+                          <Badge variant="outline" className="text-xs bg-blue-50 border-blue-200 text-blue-700">
+                            运行中
+                          </Badge>
+                        </div>
+                        <p className="text-xs text-muted-foreground truncate mt-0.5">
+                          {task.url}
+                        </p>
+                        <div className="flex items-center gap-3 text-xs text-muted-foreground mt-1">
+                          <span>开始时间: {formatTime(task.startedAt)}</span>
+                          <span>已运行: {formatElapsedTime(task.elapsedSeconds)}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
 
@@ -938,13 +1034,13 @@ export default function ScrapeSettingsPage() {
                       </div>
                       <div className="flex items-center gap-1">
                         <Button
-                          variant="outline"
+                          variant={task.isEnabled ? "default" : "outline"}
                           size="sm"
-                          onClick={() => handleRunTask(task.id)}
+                          onClick={() => handleToggleOrRunTask(task)}
                           className="gap-1"
                         >
                           <Play className="h-3 w-3" />
-                          执行
+                          {task.isEnabled ? "立即执行" : "启动"}
                         </Button>
                         <Button
                           variant="ghost"
@@ -971,7 +1067,7 @@ export default function ScrapeSettingsPage() {
               <div className="border-t pt-4 mt-4">
                 <button
                   onClick={() => {
-                    if (!showHistory) loadHistory();
+                    if (!showHistory) loadHistoryRef.current();
                     setShowHistory(!showHistory);
                   }}
                   className="flex items-center gap-2 text-sm font-medium mb-3 hover:text-primary transition-colors"
@@ -1017,28 +1113,75 @@ export default function ScrapeSettingsPage() {
 
                     {/* 历史记录列表 */}
                     {history.length > 0 ? (
-                      <div className="space-y-2 max-h-[300px] overflow-y-auto">
-                        {history.map((item) => (
-                          <div
-                            key={item.id}
-                            className="flex items-center gap-3 p-3 rounded-lg bg-muted/30 hover:bg-muted/50 transition-colors"
-                          >
-                            {getStatusIcon(item.status)}
-                            <div className="flex-1 min-w-0">
-                              <p className="text-sm font-medium truncate">
-                                {item.articleTitle || item.url}
-                              </p>
-                              <p className="text-xs text-muted-foreground">
-                                {item.taskName && <span>{item.taskName} · </span>}
-                                {formatTime(item.startedAt)}
-                                {item.articlesCount > 0 && ` · ${item.articlesCount} 篇文章`}
-                              </p>
-                              {item.errorMessage && (
-                                <p className="text-xs text-red-500 mt-1">{item.errorMessage}</p>
+                      <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                        {history.map((item) => {
+                          const isExpanded = expandedHistoryIds.has(item.id);
+                          const hasMultipleArticles = item.articleTitle && item.articleTitle.includes('\n');
+                          const articleLines = item.articleTitle ? item.articleTitle.split('\n') : [];
+
+                          return (
+                            <div
+                              key={item.id}
+                              className="border rounded-lg p-3 bg-muted/30 hover:bg-muted/50 transition-colors"
+                            >
+                              {/* 主行 - 可点击展开 */}
+                              <div
+                                className={cn("flex items-center gap-3", hasMultipleArticles && "cursor-pointer")}
+                                onClick={() => {
+                                  if (hasMultipleArticles) {
+                                    setExpandedHistoryIds(prev => {
+                                      const next = new Set(prev);
+                                      if (next.has(item.id)) {
+                                        next.delete(item.id);
+                                      } else {
+                                        next.add(item.id);
+                                      }
+                                      return next;
+                                    });
+                                  }
+                                }}
+                              >
+                                {getStatusIcon(item.status)}
+                                <div className="flex-1 min-w-0">
+                                  {/* 显示第一行标题或 URL */}
+                                  <p className="text-sm font-medium truncate">
+                                    {articleLines[0] || item.url || "无标题"}
+                                  </p>
+                                  <p className="text-xs text-muted-foreground">
+                                    {item.taskName && <span>{item.taskName} · </span>}
+                                    {formatTime(item.startedAt)}
+                                    {item.articlesCount > 0 && ` · ${item.articlesCount} 篇文章`}
+                                  </p>
+                                  {item.errorMessage && (
+                                    <p className="text-xs text-red-500 mt-1">{item.errorMessage}</p>
+                                  )}
+                                </div>
+                                {hasMultipleArticles && (
+                                  <ChevronDown
+                                    className={cn(
+                                      "h-4 w-4 text-muted-foreground shrink-0 transition-transform",
+                                      isExpanded && "rotate-180"
+                                    )}
+                                  />
+                                )}
+                              </div>
+
+                              {/* 展开后的文章列表 */}
+                              {isExpanded && articleLines.length > 1 && (
+                                <div className="mt-3 pl-9 space-y-1.5 border-t pt-3">
+                                  <p className="text-xs font-medium text-muted-foreground mb-2">
+                                    文章列表：
+                                  </p>
+                                  {articleLines.map((line, idx) => (
+                                    <p key={idx} className="text-xs text-muted-foreground">
+                                      <span className="text-muted-foreground/60">{idx + 1}.</span> {line}
+                                    </p>
+                                  ))}
+                                </div>
                               )}
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     ) : (
                       <p className="text-center text-sm text-muted-foreground py-4">
@@ -1347,41 +1490,95 @@ export default function ScrapeSettingsPage() {
                 />
               </div>
 
-              {/* 爬取来源（多选） */}
+              {/* 爬取来源（按分类分组） */}
               <div className="space-y-2">
-                <Label>爬取来源（可多选）</Label>
+                <Label>爬取来源（按分类分组）</Label>
                 {scrapeSources.length === 0 ? (
                   <p className="text-sm text-muted-foreground py-2">暂无已配置的爬取源，请先在「网页来源」中添加</p>
                 ) : (
-                  <div className="border rounded-lg p-3 space-y-2 max-h-[150px] overflow-y-auto">
-                    {scrapeSources.map((source) => (
-                      <div key={source.id} className="flex items-center gap-2">
-                        <Checkbox
-                          id={`source-${source.id}`}
-                          checked={taskForm.sourceIds.includes(source.id)}
-                          onCheckedChange={(checked) => {
-                            if (checked) {
-                              setTaskForm({
-                                ...taskForm,
-                                sourceIds: [...taskForm.sourceIds, source.id],
-                              });
-                            } else {
-                              setTaskForm({
-                                ...taskForm,
-                                sourceIds: taskForm.sourceIds.filter((id) => id !== source.id),
-                              });
-                            }
-                          }}
-                        />
-                        <Label
-                          htmlFor={`source-${source.id}`}
-                          className="text-sm cursor-pointer flex items-center gap-2"
-                        >
-                          <Globe className="h-3 w-3 text-muted-foreground" />
-                          {source.name}
-                        </Label>
-                      </div>
-                    ))}
+                  <div className="border rounded-lg p-3 max-h-[200px] overflow-y-auto space-y-2">
+                    {categories.map((cat) => {
+                      // 过滤出该分类下的爬取源
+                      const catSources = scrapeSources.filter(s => s.category === cat.id);
+                      if (catSources.length === 0) return null;
+
+                      return (
+                        <div key={cat.id} className="border rounded-md p-2 bg-muted/20">
+                          {/* 分类标题 */}
+                          <div className="flex items-center gap-2 mb-2 px-1">
+                            <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: cat.color }} />
+                            <span className="text-sm font-medium">{cat.name}</span>
+                            <Badge variant="secondary" className="ml-auto text-xs">{catSources.length}</Badge>
+                          </div>
+                          {/* 该分类下的爬取源 */}
+                          <div className="space-y-1 pl-4">
+                            {catSources.map((source) => (
+                              <div key={source.id} className="flex items-center gap-2">
+                                <Checkbox
+                                  id={`source-${source.id}`}
+                                  checked={taskForm.sourceIds.includes(source.id)}
+                                  onCheckedChange={(checked) => {
+                                    if (checked) {
+                                      setTaskForm({
+                                        ...taskForm,
+                                        sourceIds: [...taskForm.sourceIds, source.id],
+                                      });
+                                    } else {
+                                      setTaskForm({
+                                        ...taskForm,
+                                        sourceIds: taskForm.sourceIds.filter((id) => id !== source.id),
+                                      });
+                                    }
+                                  }}
+                                />
+                                <Label
+                                  htmlFor={`source-${source.id}`}
+                                  className="text-sm cursor-pointer flex items-center gap-2"
+                                >
+                                  <Globe className="h-3 w-3 text-muted-foreground shrink-0" />
+                                  <span className="truncate">{source.name}</span>
+                                </Label>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {/* 未分类的爬取源 */}
+                    {(() => {
+                      const uncategorized = scrapeSources.filter(s => !categories.some(c => c.id === s.category));
+                      if (uncategorized.length === 0) return null;
+                      return (
+                        <div className="border rounded-md p-2 bg-muted/20">
+                          <div className="flex items-center gap-2 mb-2 px-1">
+                            <div className="w-2 h-2 rounded-full bg-gray-400 shrink-0" />
+                            <span className="text-sm font-medium">未分类</span>
+                            <Badge variant="secondary" className="ml-auto text-xs">{uncategorized.length}</Badge>
+                          </div>
+                          <div className="space-y-1 pl-4">
+                            {uncategorized.map((source) => (
+                              <div key={source.id} className="flex items-center gap-2">
+                                <Checkbox
+                                  id={`source-${source.id}`}
+                                  checked={taskForm.sourceIds.includes(source.id)}
+                                  onCheckedChange={(checked) => {
+                                    if (checked) {
+                                      setTaskForm({ ...taskForm, sourceIds: [...taskForm.sourceIds, source.id] });
+                                    } else {
+                                      setTaskForm({ ...taskForm, sourceIds: taskForm.sourceIds.filter((id) => id !== source.id) });
+                                    }
+                                  }}
+                                />
+                                <Label htmlFor={`source-${source.id}`} className="text-sm cursor-pointer flex items-center gap-2">
+                                  <Globe className="h-3 w-3 text-muted-foreground shrink-0" />
+                                  <span className="truncate">{source.name}</span>
+                                </Label>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
                 )}
                 <p className="text-xs text-muted-foreground">选择已配置的网页来源，或使用下面的自定义URL</p>

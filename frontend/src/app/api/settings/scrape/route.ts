@@ -1,15 +1,19 @@
 import { NextResponse } from "next/server";
 
-const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8080";
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8500";
 
 // 获取所有爬取源
 export async function GET() {
   try {
+    console.log('[API] Fetching from:', `${BACKEND_URL}/settings/scrape`);
     const res = await fetch(`${BACKEND_URL}/settings/scrape`);
+    console.log('[API] Response status:', res.status);
     const data = await res.json();
+    console.log('[API] Data length:', Array.isArray(data) ? data.length : 'not array');
     return NextResponse.json(data);
   } catch (error) {
-    return NextResponse.json({ error: "Failed to fetch scrape sources" }, { status: 500 });
+    console.error('[API] Error:', error);
+    return NextResponse.json({ error: String(error) }, { status: 500 });
   }
 }
 

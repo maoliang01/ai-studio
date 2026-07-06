@@ -240,6 +240,9 @@ class ScrapeDeepRequest(BaseModel):
     scrape_level: Optional[Literal["list", "detail", "deep"]] = "deep"
     scrape_id: Optional[str] = None
     cookies: Optional[str] = None  # Cookie 字符串，用于绕过反爬
+    save_to_db: bool = True  # 是否自动保存到数据库
+    category_id: Optional[str] = None  # 分类 ID
+    source_id: Optional[str] = None  # 来源 ID
 
 
 class DeepScrapeResponse(BaseModel):
@@ -264,7 +267,7 @@ async def scrape_deep(request: ScrapeDeepRequest):
     from concurrent.futures import ThreadPoolExecutor
 
     api_logger = logging.getLogger(__name__)
-    api_logger.info(f"[DEBUG] 接收请求: url={request.url}, date_range={request.date_range}, scrape_level={request.scrape_level}")
+    api_logger.info(f"[DEBUG] 接收请求: url={request.url}, date_range={request.date_range}, scrape_level={request.scrape_level}, category_id={request.category_id}, source_id={request.source_id}, save_to_db={request.save_to_db}")
 
     # 生成 scrape_id
     import uuid
@@ -349,14 +352,36 @@ async def scrape_deep(request: ScrapeDeepRequest):
                     )
                 )
 
+                # 如果启用自动保存，保存到数据库
+                saved_count = 0
+                db_ids = []
+                if request.save_to_db:
+                    update_progress(4, "正在保存到数据库", f"保存 {len(article_results)} 篇文章...")
+                    for result in article_results:
+                        if result.status == "success" and result.content and result.word_count and result.word_count > 50:
+                            # 传递分类和来源信息
+                            saved, article_id = scraper.save_to_database(
+                                result,
+                                category_id=request.category_id,
+                                source_id=request.source_id
+                            )
+                            if saved:
+                                saved_count += 1
+                                db_ids.append(str(article_id))
+                                api_logger.info(f"  ✓ 自动保存: {result.title[:40]} [分类:{request.category_id}, 来源:{request.source_id}]")
+
+                    api_logger.info(f"✅ [自动保存] 共保存 {saved_count} 篇文章到数据库")
+
                 # 保存结果到进度管理器
                 progress_manager.set_progress(scrape_id, {
                     "status": "completed",
                     "stage": 5,
-                    "stage_name": "已完成",
-                    "stage_detail": f"成功爬取 {len(article_results)} 篇文章",
+                    "stage_name": "已完成" + ("，已保存到数据库" if saved_count > 0 else ""),
+                    "stage_detail": f"成功爬取 {len(article_results)} 篇文章" + (f"，保存 {saved_count} 篇" if request.save_to_db else ""),
                     "current": len(article_results),
                     "total": len(article_results),
+                    "saved_to_db": saved_count,
+                    "db_ids": db_ids,
                     "results": {
                         "list_page": _result_to_response(list_page_result).__dict__ if list_page_result else None,
                         "articles": [_result_to_response(r).__dict__ for r in article_results],

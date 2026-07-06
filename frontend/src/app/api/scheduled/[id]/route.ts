@@ -1,20 +1,36 @@
 import { NextResponse } from "next/server";
 
-const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8080";
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8500";
 
 /**
- * 将 snake_case 键转换为 camelCase
+ * 将 snake_case 键转换为 camelCase（修复数组处理）
  */
-function toCamelCase(obj: Record<string, unknown>): Record<string, unknown> {
-  if (obj === null || typeof obj !== "object") return obj;
-  return Object.keys(obj).reduce((acc, key) => {
+function toCamelCase(obj: unknown): unknown {
+  if (obj === null || obj === undefined) return obj;
+  if (Array.isArray(obj)) return obj.map(item => toCamelCase(item));
+  if (typeof obj !== "object") return obj;
+
+  return Object.keys(obj as Record<string, unknown>).reduce((acc, key) => {
     const camelKey = key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
-    const value = obj[key];
-    acc[camelKey] = typeof value === "object" && value !== null
-      ? toCamelCase(value as Record<string, unknown>)
+    const value = (obj as Record<string, unknown>)[key];
+    // 递归处理嵌套对象，但不处理数组（数组在上面处理）
+    acc[camelKey] = (typeof value === "object" && value !== null && !Array.isArray(value))
+      ? toCamelCase(value)
       : value;
     return acc;
   }, {} as Record<string, unknown>);
+}
+
+/**
+ * 安全解析 JSON
+ */
+async function safeJsonParse(res: Response): Promise<unknown> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: text || `HTTP ${res.status}` };
+  }
 }
 
 /**
@@ -27,10 +43,10 @@ export async function GET(
   try {
     const { id } = await params;
     const res = await fetch(`${BACKEND_URL}/api/scheduled/${id}`);
-    const data = await res.json();
+    const data = await safeJsonParse(res);
 
     if (!res.ok) {
-      return NextResponse.json({ error: data.detail || "获取失败" }, { status: res.status });
+      return NextResponse.json({ error: (data as any).detail || "获取失败" }, { status: res.status });
     }
 
     return NextResponse.json(toCamelCase(data));
@@ -69,9 +85,9 @@ export async function PUT(
       body: JSON.stringify(payload),
     });
 
-    const data = await res.json();
+    const data = await safeJsonParse(res);
     if (!res.ok) {
-      return NextResponse.json({ error: data.detail || "更新失败" }, { status: res.status });
+      return NextResponse.json({ error: (data as any).detail || "更新失败" }, { status: res.status });
     }
 
     return NextResponse.json(toCamelCase(data));
@@ -97,8 +113,8 @@ export async function DELETE(
     });
 
     if (!res.ok) {
-      const data = await res.json();
-      return NextResponse.json({ error: data.detail || "删除失败" }, { status: res.status });
+      const data = await safeJsonParse(res);
+      return NextResponse.json({ error: (data as any).detail || "删除失败" }, { status: res.status });
     }
 
     return NextResponse.json({ message: "删除成功" });

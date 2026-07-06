@@ -8,7 +8,7 @@ from datetime import datetime, date
 from typing import Optional, List
 from math import ceil
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from sqlalchemy import or_, func, text
 from sqlalchemy.orm import Session
 
@@ -435,6 +435,45 @@ async def delete_article(article_id: str, db: Session = Depends(get_db)):
     logger.info(f"删除文章: id={article_id}")
 
     return {"message": "文章已删除"}
+
+
+@router.post("/batch-delete")
+async def batch_delete_articles(
+    ids: List[str] = Body(..., embed=True, description="文章ID列表"),
+    db: Session = Depends(get_db)
+):
+    """批量删除文章"""
+    if not ids:
+        raise HTTPException(status_code=400, detail="ID列表不能为空")
+
+    deleted = 0
+    errors = []
+
+    for article_id in ids:
+        try:
+            article = db.query(Article).filter(Article.id == article_id).first()
+            if article:
+                # 先删除关联的关键词
+                db.query(ArticleKeyword).filter(
+                    ArticleKeyword.article_id == article_id
+                ).delete()
+                # 再删除关联的链接
+                db.query(ArticleLink).filter(
+                    ArticleLink.source_article_id == article_id
+                ).delete()
+                db.delete(article)
+                deleted += 1
+            else:
+                errors.append({"id": article_id, "error": "文章不存在"})
+        except Exception as e:
+            errors.append({"id": article_id, "error": str(e)})
+            db.rollback()
+
+    db.commit()
+
+    logger.info(f"批量删除完成: 成功删除={deleted}, 失败={len(errors)}")
+
+    return {"deleted": deleted, "errors": errors}
 
 
 @router.post("/scrape-result")

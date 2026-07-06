@@ -17,13 +17,20 @@ logger = logging.getLogger("scheduler")
 
 def create_scheduler() -> BackgroundScheduler:
     """创建调度器"""
-    scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
+    scheduler = BackgroundScheduler(
+        timezone="Asia/Shanghai",
+        job_defaults={
+            'max_instances': 3,  # 允许同一任务最多3个实例并发
+            'coalesce': False,   # 不合并错过的执行
+            'misfire_grace_time': 60,  # 错过触发时间60秒内仍执行
+        }
+    )
     return scheduler
 
 
 def run_scheduled_task(task_id: str):
     """执行单个定时任务"""
-    logger.info(f"开始执行定时任务: {task_id}")
+    logger.info(f"⏰ [定时执行] 开始执行任务: {task_id}")
 
     # 创建新的数据库会话确保线程安全
     from app.core.database import get_session_local
@@ -47,7 +54,7 @@ def run_scheduled_task(task_id: str):
         db.add(history)
         db.flush()
 
-        logger.info(f"任务 {task.name} 开始爬取...")
+        logger.info(f"⏰ [定时执行] 任务 '{task.name}' 开始爬取...")
 
         # 执行爬取
         try:
@@ -91,25 +98,33 @@ def run_scheduled_task(task_id: str):
             scraped_articles = []
 
             for url in urls:
-                logger.info(f"爬取 URL: {url}")
+                logger.info(f"深度爬取 URL: {url}")
                 try:
-                    # 使用 asyncio 运行异步爬取（与 /api/scrape 保持一致）
-                    result = loop.run_until_complete(scraper.scrape(url, options))
-                    logger.info(f"  状态: {result.status}, 字数: {result.word_count}")
-
-                    # 保存到数据库
-                    if result.content and result.word_count > 50:
-                        saved, article_id = scraper.save_to_database(
-                            result, category_id=category_id, source_id=source_id
+                    # 使用 deep_scrape 识别文章链接并爬取（与手动爬取方式一致）
+                    list_page, article_results = loop.run_until_complete(
+                        scraper.deep_scrape(
+                            url=url,
+                            options=options,
+                            max_articles=20,  # 限制每批次爬取数量
+                            date_range=task.scrape_range,  # 使用任务的爬取时间范围
+                            scrape_level="deep"
                         )
-                        if saved:
-                            total_articles += 1
-                            title = result.title or "无标题"
-                            scraped_articles.append(title)
-                            logger.info(f"  已保存: {title[:50]}")
-                            logger.info(f"    分类: {category_id}, 发布时间: {result.published_at or '未提取'}")
-                    else:
-                        logger.info(f"  内容不足，跳过保存")
+                    )
+                    logger.info(f"  列表页: {list_page.title}, 识别到 {len(article_results)} 篇文章")
+
+                    # 保存每篇文章到数据库
+                    for result in article_results:
+                        if result.content and result.word_count > 50:
+                            saved, article_id = scraper.save_to_database(
+                                result, category_id=category_id, source_id=source_id
+                            )
+                            if saved:
+                                total_articles += 1
+                                title = result.title or "无标题"
+                                scraped_articles.append(title)
+                                logger.info(f"      ✓ 已保存: {title[:50]}")
+                        else:
+                            logger.info(f"    内容不足，跳过: {result.url}")
 
                 except Exception as url_error:
                     logger.error(f"  爬取失败: {url_error}")
@@ -142,10 +157,10 @@ def run_scheduled_task(task_id: str):
             task.next_run_at = _calculate_next_run(task.schedule_time)
             db.commit()
 
-            logger.info(f"任务 {task.name} 执行完成，保存了 {total_articles} 篇文章，耗时 {duration:.1f}秒")
+            logger.info(f"✅ [定时执行] 任务 '{task.name}' 完成！保存了 {total_articles} 篇文章，耗时 {duration:.1f}秒")
 
         except Exception as e:
-            logger.error(f"任务 {task.name} 执行失败: {e}")
+            logger.error(f"❌ [定时执行] 任务 '{task.name}' 执行失败: {e}")
             import traceback
             logger.error(traceback.format_exc())
             history.status = TaskStatus.FAILED.value
@@ -195,7 +210,7 @@ def sync_scheduler_tasks(scheduler: BackgroundScheduler):
                 replace_existing=True,
                 name=f"定时爬取: {task.name}",
             )
-            logger.info(f"添加调度任务: {task.name} ({task.schedule_time})")
+            logger.info(f"📅 [调度器] 添加任务: '{task.name}' → 每日 {task.schedule_time}")
 
         logger.info(f"调度器同步完成，共 {len(tasks)} 个任务")
 

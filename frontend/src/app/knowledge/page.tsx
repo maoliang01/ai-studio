@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useKnowledgeStore } from "@/stores/knowledge-store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,6 +23,8 @@ import {
   Database,
   FileUp,
   ExternalLink,
+  Link,
+  Tag,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -36,11 +38,23 @@ export default function KnowledgePage() {
     setSearchQuery,
     isUploading,
     setUploading,
+    isLoading,
+    loadDocuments,
   } = useKnowledgeStore();
 
   const [dragActive, setDragActive] = useState(false);
   const [searchTestQuery, setSearchTestQuery] = useState("");
   const [testResults, setTestResults] = useState<Array<{ content: string; score: number }>>([]);
+
+  // 页面加载时获取文档列表
+  useEffect(() => {
+    loadDocuments();
+  }, [loadDocuments]);
+
+  // 刷新文档列表
+  const handleRefresh = () => {
+    loadDocuments();
+  };
 
   const selectedDoc = documents.find((d) => d.id === selectedDocumentId);
 
@@ -117,15 +131,21 @@ export default function KnowledgePage() {
               className="pl-9"
             />
           </div>
-          <Button className="w-full gap-2">
-            <Upload className="h-4 w-4" />
-            上传文档
-          </Button>
+          <div className="flex gap-2">
+            <Button className="flex-1 gap-2" onClick={handleRefresh} variant="outline">
+              <RefreshCw className="h-4 w-4" />
+              刷新
+            </Button>
+            <Button className="flex-1 gap-2" variant="secondary">
+              <Upload className="h-4 w-4" />
+              上传
+            </Button>
+          </div>
         </div>
 
         {/* 标签筛选 */}
         <div className="px-3 py-2 flex gap-2 flex-wrap border-b border-border">
-          {["全部", "技术", "产品", "公司"].map((tag) => (
+          {["全部"].map((tag) => (
             <Badge
               key={tag}
               variant={tag === "全部" ? "default" : "secondary"}
@@ -134,40 +154,63 @@ export default function KnowledgePage() {
               {tag}
             </Badge>
           ))}
+          {/* 显示文档数量 */}
+          <Badge variant="secondary" className="ml-auto">
+            {documents.length} 篇
+          </Badge>
         </div>
 
         <ScrollArea className="flex-1">
           <div className="p-2 space-y-1">
-            {filteredDocs.map((doc) => (
-              <button
-                key={doc.id}
-                onClick={() => selectDocument(doc.id)}
-                className={cn(
-                  "w-full text-left p-3 rounded-lg transition-colors",
-                  selectedDocumentId === doc.id
-                    ? "bg-primary/10 border border-primary/20"
-                    : "hover:bg-accent"
-                )}
-              >
-                <div className="flex items-start gap-2">
-                  <FileText className="h-4 w-4 shrink-0 mt-0.5" />
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium text-sm truncate">{doc.title}</p>
-                    <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
-                      <span>{doc.chunkCount} 个块</span>
-                      <span>·</span>
-                      <div className="flex items-center gap-1">
-                        {getStatusIcon(doc.status)}
-                        <span>{getStatusText(doc.status)}</span>
+            {isLoading ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+              </div>
+            ) : filteredDocs.length === 0 ? (
+              <div className="text-center py-8 text-sm text-muted-foreground">
+                {documents.length === 0 ? "暂无文档" : "无匹配结果"}
+              </div>
+            ) : (
+              filteredDocs.map((doc) => (
+                <button
+                  key={doc.id}
+                  onClick={() => selectDocument(doc.id)}
+                  className={cn(
+                    "w-full text-left p-3 rounded-lg transition-colors",
+                    selectedDocumentId === doc.id
+                      ? "bg-primary/10 border border-primary/20"
+                      : "hover:bg-accent"
+                  )}
+                >
+                  <div className="flex items-start gap-2">
+                    <FileText className="h-4 w-4 shrink-0 mt-0.5" />
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium text-sm truncate">{doc.title}</p>
+                      <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground flex-wrap">
+                        <Clock className="h-3 w-3" />
+                        <span>{doc.scrapedAtDisplay || "未知时间"}</span>
+                        <span>·</span>
+                        <span>{doc.wordCount ? `${doc.wordCount.toLocaleString()}字` : "-"}</span>
+                        {doc.sourceName && (
+                          <>
+                            <span>·</span>
+                            <span className="truncate max-w-[70px]">{doc.sourceName}</span>
+                          </>
+                        )}
+                        {doc.categoryName && (
+                          <>
+                            <span>·</span>
+                            <Badge variant="outline" className="text-[10px] px-1 py-0 h-4">
+                              {doc.categoryName}
+                            </Badge>
+                          </>
+                        )}
                       </div>
                     </div>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      {(doc.fileSize / 1024 / 1024).toFixed(1)} MB
-                    </p>
                   </div>
-                </div>
-              </button>
-            ))}
+                </button>
+              ))
+            )}
           </div>
         </ScrollArea>
       </div>
@@ -189,17 +232,26 @@ export default function KnowledgePage() {
             <div className="p-4 border-b border-border flex items-center justify-between">
               <div>
                 <h2 className="text-lg font-semibold">{selectedDoc.title}</h2>
-                <div className="flex items-center gap-3 mt-1 text-sm text-muted-foreground">
+                <div className="flex items-center gap-3 mt-1 text-sm text-muted-foreground flex-wrap">
                   <span className="flex items-center gap-1">
                     <Globe className="h-3.5 w-3.5" />
                     {selectedDoc.sourceType === "upload" ? "本地上传" : "网页"}
                   </span>
+                  {selectedDoc.sourceName && (
+                    <span className="flex items-center gap-1">
+                      <Link className="h-3.5 w-3.5" />
+                      {selectedDoc.sourceName}
+                    </span>
+                  )}
                   <span>{selectedDoc.chunkCount} 个块</span>
                   <span>·</span>
-                  <span className="flex items-center gap-1">
-                    {getStatusIcon(selectedDoc.status)}
-                    {getStatusText(selectedDoc.status)}
-                  </span>
+                  <span>{selectedDoc.wordCount?.toLocaleString() || 0} 字</span>
+                  {selectedDoc.publishedAt && (
+                    <>
+                      <span>·</span>
+                      <span>发布于 {new Date(selectedDoc.publishedAt).toLocaleDateString("zh-CN")}</span>
+                    </>
+                  )}
                 </div>
               </div>
               <div className="flex items-center gap-2">
@@ -230,6 +282,7 @@ export default function KnowledgePage() {
               <TabsContent value="preview" className="flex-1 m-0">
                 <ScrollArea className="h-full p-4">
                   <div className="max-w-3xl mx-auto space-y-4">
+                    {/* 来源 URL */}
                     {selectedDoc.sourceUrl && (
                       <a
                         href={selectedDoc.sourceUrl}
@@ -242,60 +295,79 @@ export default function KnowledgePage() {
                       </a>
                     )}
 
+                    {/* 元信息卡片 */}
+                    <Card className="p-4">
+                      <div className="flex items-center justify-between mb-3">
+                        <h3 className="font-medium">文档信息</h3>
+                        <Badge variant="secondary">{selectedDoc.chunkCount} 个块</Badge>
+                      </div>
+                      <div className="grid grid-cols-2 gap-3 text-sm">
+                        {selectedDoc.sourceName && (
+                          <div>
+                            <span className="text-muted-foreground">来源：</span>
+                            <span className="font-medium">{selectedDoc.sourceName}</span>
+                          </div>
+                        )}
+                        {selectedDoc.categoryName && (
+                          <div>
+                            <span className="text-muted-foreground">分类：</span>
+                            <span className="font-medium">{selectedDoc.categoryName}</span>
+                          </div>
+                        )}
+                        <div>
+                          <span className="text-muted-foreground">字数：</span>
+                          <span className="font-medium">{selectedDoc.wordCount?.toLocaleString() || 0}</span>
+                        </div>
+                        {selectedDoc.publishedAt && (
+                          <div>
+                            <span className="text-muted-foreground">发布时间：</span>
+                            <span className="font-medium">
+                              {new Date(selectedDoc.publishedAt).toLocaleDateString("zh-CN")}
+                            </span>
+                          </div>
+                        )}
+                        {selectedDoc.scrapedAt && (
+                          <div>
+                            <span className="text-muted-foreground">爬取时间：</span>
+                            <span className="font-medium">
+                              {new Date(selectedDoc.scrapedAt).toLocaleString("zh-CN")}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                      {/* 关键词标签 */}
+                      {selectedDoc.tags && selectedDoc.tags.length > 0 && (
+                        <div className="mt-3 flex items-start gap-2">
+                          <Tag className="h-4 w-4 text-muted-foreground mt-0.5" />
+                          <div className="flex flex-wrap gap-1">
+                            {selectedDoc.tags.map((tag, i) => (
+                              <Badge key={i} variant="secondary" className="text-xs">
+                                {tag}
+                              </Badge>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </Card>
+
+                    {/* 文章内容预览 */}
                     <Card className="p-6 space-y-4">
                       <div className="flex items-center justify-between">
-                        <h3 className="font-medium">文档块 (Chunks)</h3>
-                        <Badge variant="secondary">{selectedDoc.chunkCount} 个</Badge>
+                        <h3 className="font-medium">文章内容</h3>
+                        <Badge variant="outline">{selectedDoc.chunkCount} 个块</Badge>
                       </div>
                       <Separator />
 
-                      {/* 模拟块内容 */}
-                      {[
-                        {
-                          index: 1,
-                          content: `产品简介
-
-本产品是一款功能强大的 AI 工作台，旨在帮助用户更高效地完成各种 AI 相关任务。
-
-核心功能：
-- 多模型对话
-- 知识库管理
-- 提示词模板
-- 网页爬取`,
-                        },
-                        {
-                          index: 2,
-                          content: `安装指南
-
-1. 系统要求
-   - 操作系统：Ubuntu 20.04+ / macOS 12+ / Windows 10+
-   - 内存：至少 8GB RAM
-   - 磁盘空间：至少 2GB 可用空间
-
-2. 安装步骤
-   - 下载对应平台的安装包
-   - 运行安装程序
-   - 按照提示完成安装`,
-                        },
-                        {
-                          index: 3,
-                          content: `常见问题
-
-Q: 如何获取 API Key？
-A: 请访问各模型提供商的官网注册账号并获取 API Key。
-
-Q: 支持哪些文件格式？
-A: 目前支持 PDF、TXT、Markdown、DOCX 等格式。`,
-                        },
-                      ].map((chunk) => (
-                        <div key={chunk.index} className="space-y-2">
+                      {/* 动态分块内容 - 将文章内容按块分割显示 */}
+                      {generateChunks(selectedDoc.content || "", selectedDoc.chunkCount).map((chunk, index) => (
+                        <div key={index} className="space-y-2">
                           <div className="flex items-center gap-2">
                             <Badge variant="outline" className="text-xs">
-                              Chunk {chunk.index}
+                              Chunk {index + 1}
                             </Badge>
                           </div>
                           <pre className="text-sm whitespace-pre-wrap bg-muted/50 p-3 rounded-lg">
-                            {chunk.content}
+                            {chunk}
                           </pre>
                         </div>
                       ))}
@@ -367,4 +439,21 @@ A: 目前支持 PDF、TXT、Markdown、DOCX 等格式。`,
       )}
     </div>
   );
+}
+
+// 将文章内容分割为多个块
+function generateChunks(content: string, chunkCount: number): string[] {
+  if (!content) return ["暂无内容"];
+  if (chunkCount <= 1) return [content];
+
+  const chunks: string[] = [];
+  const chunkSize = Math.ceil(content.length / chunkCount);
+
+  for (let i = 0; i < chunkCount; i++) {
+    const start = i * chunkSize;
+    const end = Math.min(start + chunkSize, content.length);
+    chunks.push(content.slice(start, end));
+  }
+
+  return chunks;
 }
