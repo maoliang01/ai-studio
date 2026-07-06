@@ -236,7 +236,7 @@ async def get_article_stats(db: Session = Depends(get_db)):
 
 @router.get("")
 async def list_articles(
-    q: Optional[str] = Query(None, description="标题模糊搜索关键词"),
+    q: Optional[str] = Query(None, description="搜索关键词（匹配标题、内容、摘要、关键词）"),
     category_id: Optional[str] = Query(None, description="按分类过滤 (government/business/academic)"),
     source_id: Optional[str] = Query(None, description="按来源过滤"),
     style: Optional[str] = Query(None, description="按文体过滤 (新闻报道/通知公告/会议纪要等)"),
@@ -247,13 +247,25 @@ async def list_articles(
     page_size: int = Query(20, ge=1, le=100, description="每页数量"),
     db: Session = Depends(get_db)
 ):
-    """获取文章列表（支持分页和过滤，含标题模糊搜索）"""
+    """获取文章列表（支持分页和过滤，含标题/内容/摘要/关键词模糊搜索）"""
     query = db.query(Article)
 
     # 应用过滤器
     if q:
-        # 标题模糊匹配
-        query = query.filter(Article.title.ilike(f"%{q}%"))
+        # 模糊匹配：标题、内容、摘要、关键词
+        keyword_pattern = f"%{q}%"
+        query = query.outerjoin(
+            ArticleKeyword, Article.id == ArticleKeyword.article_id
+        ).outerjoin(
+            Keyword, ArticleKeyword.keyword_id == Keyword.id
+        ).filter(
+            or_(
+                Article.title.ilike(keyword_pattern),
+                Article.content.ilike(keyword_pattern),
+                Article.summary.ilike(keyword_pattern),
+                Keyword.name.ilike(keyword_pattern)
+            )
+        )
     if category_id:
         query = query.filter(Article.category_id == category_id)
     if source_id:
@@ -597,7 +609,7 @@ async def batch_save_articles(
 
 @router.post("/search")
 async def search_articles(
-    q: str = Query(..., min_length=1, description="搜索关键词"),
+    q: str = Query(..., min_length=1, description="搜索关键词（全文搜索 + 关键词匹配）"),
     category_id: Optional[str] = Query(None, description="按分类过滤 (government/business/academic)"),
     source_id: Optional[str] = Query(None, description="按来源过滤"),
     style: Optional[str] = Query(None, description="按文体过滤 (新闻报道/通知公告/会议纪要等)"),
@@ -606,12 +618,20 @@ async def search_articles(
     page_size: int = Query(20, ge=1, le=100, description="每页数量"),
     db: Session = Depends(get_db)
 ):
-    """全文搜索文章"""
-    # 使用 PostgreSQL 全文搜索
+    """全文搜索文章（标题/内容/摘要 + 关键词模糊匹配）"""
+    # 使用 PostgreSQL 全文搜索 + 关键词匹配
     search_query = q.replace("'", "''")
+    keyword_pattern = f"%{search_query}%"
 
     # 构建基本查询
     query = db.query(Article)
+
+    # 添加关键词 JOIN
+    query = query.outerjoin(
+        ArticleKeyword, Article.id == ArticleKeyword.article_id
+    ).outerjoin(
+        Keyword, ArticleKeyword.keyword_id == Keyword.id
+    )
 
     # 添加过滤条件
     if category_id:
@@ -634,24 +654,40 @@ async def search_articles(
     result = db.execute(fts_query, {"query": search_query})
     article_ids = [row[0] for row in result.fetchall()]
 
-    if not article_ids:
+    # 添加关键词模糊匹配（独立查询）
+    keyword_query = text("""
+        SELECT DISTINCT ak.article_id FROM article_keywords ak
+        JOIN keywords k ON ak.keyword_id = k.id
+        WHERE k.name ILIKE :pattern
+    """)
+    keyword_result = db.execute(keyword_query, {"pattern": keyword_pattern})
+    keyword_article_ids = [row[0] for row in keyword_result.fetchall()]
+
+    # 合并全文搜索和关键词搜索结果
+    all_article_ids = list(set(article_ids + keyword_article_ids))
+
+    if not all_article_ids:
         return ArticleListResponse.create([], 0, page, page_size)
 
-    # 按搜索排名排序
-    query = query.filter(Article.id.in_(article_ids))
+    # 按搜索排名排序（全文搜索结果优先）
+    id_order = {aid: i for i, aid in enumerate(article_ids)}
+    keyword_articles = [aid for aid in all_article_ids if aid not in id_order]
+    sorted_ids = article_ids + keyword_articles
+
+    # 按排序结果筛选
+    query = query.filter(Article.id.in_(all_article_ids))
 
     # 获取总数
-    total = query.count()
+    total = query.distinct().count()
 
     # 分页
     offset = (page - 1) * page_size
     articles = query.offset(offset).limit(page_size).all()
 
-    # 由于 ID 顺序可能不对，按搜索排名重新排序
-    id_order = {aid: i for i, aid in enumerate(article_ids)}
-    articles = sorted(articles, key=lambda a: id_order.get(a.id, 999))
+    # 按搜索排名重新排序
+    sorted_articles = sorted(articles, key=lambda a: sorted_ids.index(a.id) if a.id in sorted_ids else 999)
 
-    items = [ArticleBase.from_orm_with_keywords(a) for a in articles]
+    items = [ArticleBase.from_orm_with_keywords(a) for a in sorted_articles]
 
     return ArticleListResponse.create(items, total, page, page_size)
 

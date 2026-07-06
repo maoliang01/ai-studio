@@ -451,7 +451,7 @@ export default function ArticlesPage() {
             <div className="relative flex-1 min-w-[200px]">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
               <Input
-                placeholder="搜索文章标题、内容、摘要..."
+                placeholder="搜索标题、内容、摘要、关键词..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && applyFilters()}
