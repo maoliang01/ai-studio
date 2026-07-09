@@ -15,6 +15,10 @@ import re
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta
+from urllib.parse import urlparse, urljoin
+import httpx
+
+from app.services.alternate_scraper import strip_semantic_noise_blocks
 
 
 def extract_date_from_content(content: str, base_url: str = "") -> Tuple[Optional[str], Optional[str]]:
@@ -96,14 +100,107 @@ def extract_date_from_content(content: str, base_url: str = "") -> Tuple[Optiona
             break
 
     return published_at, author
-from urllib.parse import urlparse, urljoin
-import httpx
+
 
 logger = logging.getLogger(__name__)
 
 # ================================================
 # 内容清理工具
 # ================================================
+
+def clean_content_light(content: str) -> str:
+    """
+    轻度清理文章内容（用于已经过正文提取的内容）
+    只去除明显的干扰项，保留正文完整性
+    """
+    if not content:
+        return content
+
+    lines = content.split('\n')
+
+    # 过滤规则
+    skip_patterns = [
+        # 只包含图片链接的行（或多个链接）
+        r'^\s*!\[?\s*\]\(https?://[^\)]+\)\s*$',
+        r'^\s*!\[\]\([^)]+\)(\s*!\[?\s*\]\([^)]+\)\s*)*$',
+        # 纯图片链接 + 少量文字的行（如 "![logo](url) [logo](url)")
+        r'^\s*(!\[?\s*\]\(https?://[^\)]+\)\s*){1,3}$',
+        # 导航类标题
+        r'^#{1,3}\s*(?:工作动态|党群园地|首页|科普园地|新闻中心|通知公告)',
+        # 附件标记（单独一行或后面只有图片）
+        r'^#{0,3}\s*附件[：:]?\s*$',
+        # 纯粹的地址/邮编行
+        r'^地址[：:]\s*[^\n]+邮编[：:]\s*\d+\s*$',
+        # 备案/版权信息
+        r'^备案序号[：:]',
+        r'^京ICP备\d+号',
+        # 工具栏/分享类
+        r'^\s*\*\s*!\[\]\(https?://[^\)]+toolbar',
+        r'^\s*\*\s*!\[\]\(https?://[^\)]+wx[^\)]*\)\s*!\[\]\(https?://[^\)]+\)\s*$',
+        # 无意义的分隔行
+        r'^#+$',
+        r'^-+$',
+        # 无障碍工具条残留
+        r'^\s*(?:声音开关|显示屏|帮助|返回|退出)',
+        r'^\s*请按F11切换大界面模式',
+        r'^\s*提示：该链接属站外链接',
+        r'^\s*请注意，该操作',
+        r'^\s*该网站无法启动',
+        r'^\s*当前访问页面超出',
+        r'^\s*无障碍辅助工具',
+        r'^\s*ALT\+\d+',
+        r'^\s*语音播报',
+        r'^\s*【字体：大 中 小】',
+        r'^\s*浏览量[：:]\s*\d+',
+        r'^\s*javascript:void',
+        r'^\s*是否继续访问',
+        r'^\s*快捷方式',
+        r'^\s*(?:视窗区|交互区|服务区|列表区|正文区|导航区)',
+        r'^\s*更多分享',
+        r'^\s*打印',
+        r'^\s*分享到',
+        # 面包屑导航
+        r'^\[首页\]\(https?://[^\)]+\)\s*>',
+        r'^\[.+?\]\([^)]+\)\s*$',  # 单个链接行（通常是面包屑）
+    ]
+
+    filtered = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        is_skip = False
+        for pattern in skip_patterns:
+            if re.match(pattern, stripped, re.IGNORECASE):
+                is_skip = True
+                break
+
+        if not is_skip:
+            filtered.append(line)
+
+    # 从后往前扫描，移除末尾的图片链接块
+    while filtered:
+        last = filtered[-1].strip()
+        # 如果最后一行是纯图片链接或附件标题，移除
+        if re.match(r'^\s*!\[?\s*\]\(https?://[^\)]+\)\s*$', last):
+            filtered.pop()
+        elif re.match(r'^\s*!\[\]\([^)]+\)\s*$', last):
+            filtered.pop()
+        elif last in ['###### 附件：', '#### 附件：', '### 附件：', '## 附件：', '# 附件：', '附件：', '附件']:
+            filtered.pop()
+        else:
+            break
+
+    # 规范化换行
+    result = '\n'.join(filtered)
+
+    # 去除行首行尾空白
+    lines = [l.strip() for l in result.split('\n')]
+    result = '\n'.join(line for line in lines if line)
+
+    return result.strip()
+
 
 def clean_content(content: str) -> str:
     """
@@ -323,6 +420,100 @@ def clean_content(content: str) -> str:
     lines = [line.strip() for line in content.split('\n')]
     content = '\n'.join(line for line in lines if line)
 
+    # 29. 清理 CAS 特有的无障碍工具残留（如 "PC ;)"、") (url)" 等）
+    content = re.sub(r'^\s*PC\s*\)?\s*;+\s*\)?\s*$', '', content, flags=re.MULTILINE | re.IGNORECASE)
+    content = re.sub(r'^\s*PC\s*/\s*English\s*$', '', content, flags=re.MULTILINE | re.IGNORECASE)
+    content = re.sub(r'^\s*;\)\s*\)?\s*$', '', content, flags=re.MULTILINE)
+    content = re.sub(r'^\s*;\)\s*\(https?://[^\)]+\)\s*$', '', content, flags=re.MULTILINE)
+    content = re.sub(r'^\s*\(https?://[^\)]+\)\s*$', '', content, flags=re.MULTILINE)
+    content = re.sub(r'^\s*/\s*无障碍.*$', '', content, flags=re.MULTILINE | re.IGNORECASE)
+    content = re.sub(r'^\s*/\s*关怀版.*$', '', content, flags=re.MULTILINE | re.IGNORECASE)
+    content = re.sub(r'^\s*/\s*联系我们.*$', '', content, flags=re.MULTILINE | re.IGNORECASE)
+    content = re.sub(r'^\s*/\s*网站地图.*$', '', content, flags=re.MULTILINE | re.IGNORECASE)
+    content = re.sub(r'^\s*/\s*邮箱\s*$', '', content, flags=re.MULTILINE | re.IGNORECASE)
+
+    # 30. 检测并清理文章末尾的导航块（连续 "* xxx" 列表）
+    # 同时检测开头的导航块
+    nav_block_start = None
+    star_lines = []
+    lines = content.split('\n')
+
+    # 先检查开头是否有导航块（前 1/3 部分）
+    head_nav_end = None
+    head_star_count = 0
+    for i, line in enumerate(lines[:len(lines)//3]):
+        stripped = line.strip()
+        if stripped.startswith('* ') and len(stripped) > 2:
+            head_star_count += 1
+            if head_star_count >= 5:  # 开头有 5 个以上的 * 列表项，视为导航块
+                head_nav_end = i + 1
+                break
+        elif stripped and not stripped.startswith('*'):
+            if head_star_count < 5:
+                head_star_count = 0  # 重置，因为被非星号行打断了
+
+    if head_nav_end:
+        lines = lines[head_nav_end:]
+
+    # 再检查末尾的导航块（后 2/3 部分）
+    start_idx = len(lines) // 3
+    for i, line in enumerate(lines[start_idx:], start_idx):
+        stripped = line.strip()
+        if stripped.startswith('* ') and len(stripped) > 2:
+            star_lines.append((i, stripped))
+            if len(star_lines) >= 3:
+                nav_block_start = star_lines[0][0]
+                break
+        else:
+            if len(star_lines) < 3:
+                star_lines = []
+
+    if nav_block_start is not None:
+        content = '\n'.join(lines[:nav_block_start])
+        lines = content.split('\n')
+
+    # 31. 清理 CAS 特有导航项
+    cas_nav_items = [
+        '成果转化', '知识产权', '工作动态', '人才教育', '教育简介',
+        '主要职责', '办院方针', '院况简介', '机构设置',
+        '科技奖励', '科技期刊', '科技专项', '科研进展',
+    ]
+    for item in cas_nav_items:
+        content = re.sub(rf'^\*\s*{re.escape(item)}[^\n]*\n?', '', content, flags=re.MULTILINE)
+
+    # 32. 清理首页/机构介绍等残留（标题 + URL 模式）
+    # 匹配 "标题" + 换行 + "更多+" 模式
+    content = re.sub(r'^.*更多\+\s*$', '', content, flags=re.MULTILINE)
+    content = re.sub(r'^.*\. 更多\+\s*$', '', content, flags=re.MULTILINE)
+
+    # 清理"【首页】"、"首页 (https://..."这类行
+    content = re.sub(r'^【首页】.*$', '', content, flags=re.MULTILINE)
+    content = re.sub(r'^首页\s*\(https?://[^\)]*\)\s*$', '', content, flags=re.MULTILINE)
+
+    # 清理机构介绍块：**简介**：内容...
+    content = re.sub(r'^\*{0,2}简介\*{0,2}：.*$', '', content, flags=re.MULTILINE)
+
+    # 33. 清理残留的符号行和单字符行
+    content = re.sub(r'^\s*\(\s*\;\s*\)\s*$', '', content, flags=re.MULTILINE)  # (;)
+    content = re.sub(r'^\s*\(\s*\)\s*$', '', content, flags=re.MULTILINE)  # ()
+    content = re.sub(r'^\s*\*\s*$', '', content, flags=re.MULTILINE)  # 单独的 *
+
+    # 33. 最终清理：去除空行
+    lines = [line.strip() for line in content.split('\n')]
+    content = '\n'.join(line for line in lines if line)
+
+    # 34. 检测是否为纯导航页：如果清理后内容仍然很少且包含大量导航项，返回空
+    final_lines = [l for l in content.split('\n') if l.strip()]
+    if len(final_lines) > 5:
+        nav_only_lines = []
+        for line in final_lines:
+            if line.startswith('* ') or line.startswith('- '):
+                nav_only_lines.append(line)
+        # 如果超过 60% 的行是导航列表项，认为是纯导航页
+        if len(nav_only_lines) / len(final_lines) > 0.6:
+            logger.info(f"内容清理后仍为导航页，清空内容：{len(nav_only_lines)}/{len(final_lines)}")
+            return ""
+
     return content.strip()
 
 
@@ -414,12 +605,85 @@ def format_content_with_summary(content: str, summary: str) -> str:
     原文内容
     """
     if summary:
+        # 清理内容中的底部附件块
+        content = _strip_attachments(content)
         return f"""【摘要】
 {summary}
 
 【正文】
 {content}"""
     return content
+
+
+def _strip_attachments(content: str) -> str:
+    """
+    去掉文章底部的附件块
+
+    附件块通常是：
+    - ###### 附件：
+    - ![logo](url) 类型的图片链接
+    - [![](url1)](url2) 类型的 Logo 链接
+    """
+    if not content:
+        return content
+
+    lines = content.split('\n')
+    filtered = []
+
+    for line in lines:
+        stripped = line.strip()
+        # 跳过附件标题行
+        if re.match(r'^#{0,6}\s*附件[：:]?\s*$', stripped):
+            continue
+        # 跳过纯图片链接行（如 ![](url) 或 ![alt](url)）
+        if re.match(r'^\s*!\[?\s*\]\(https?://[^\)]+\)\s*$', stripped):
+            continue
+        # 跳过行内只有多个图片链接的行
+        if re.match(r'^(\s*!\[?\s*\]\(https?://[^\)]+\)\s*)+$', stripped):
+            continue
+        # 跳过无意义的分隔行
+        if re.match(r'^#+$', stripped) or re.match(r'^_+$', stripped):
+            continue
+        # 跳过只包含图片链接的行（包括 [![](url)](link) 格式）
+        # 这种行通常有 Logo + 链接
+        if re.match(r'^\[!?\s*\]\(https?://[^\)]+\)\s*(\s*\[!?\s*\]\(https?://[^\)]+\)\s*)*(\[?\s*\]\(https?://[^\)]+\)\s*)?$', stripped):
+            continue
+        # 跳过类似 "[ ![](url) ![](url) ](url)" 的多 Logo 行
+        if re.match(r'^\[\s*(!\[?\s*\]\([^)]+\)\s*)+\]\([^)]+\)\s*$', stripped):
+            continue
+        filtered.append(line)
+
+    # 从后往前清理残留的图片链接
+    while filtered:
+        last = filtered[-1].strip()
+        # 检查是否是附件相关的行
+        is_attachment = False
+        # 纯图片链接
+        if re.match(r'^\s*!?\s*\[\s*\]\([^\)]+\)', last):
+            # 匹配 ![](url) 或 [![](url)](link) 格式
+            is_attachment = True
+        elif re.match(r'^(\s*!?\s*\[\s*\]\([^\)]+\)\s*)+$', last):
+            is_attachment = True
+        elif last in ['###### 附件：', '#### 附件：', '### 附件：', '## 附件：', '# 附件：', '附件：', '附件']:
+            is_attachment = True
+        elif re.match(r'^!\[?\s*\[\s*\]\([^)]+\)\s*!\[?\s*\[\s*\]\([^)]+\)\s*$', last):
+            is_attachment = True
+
+        # 检查最后一行是否主要是图片链接（长度很短且包含多个图片URL）
+        if not is_attachment:
+            # 计算图片链接的数量
+            img_count = len(re.findall(r'!\[?\s*\[\s*\]\(', last))
+            link_count = len(re.findall(r'\]\([^)]+\)', last))
+            if img_count >= 2 or (img_count >= 1 and len(last) < 150):
+                # 如果有多个图片链接或只有一个但行很短，认为是附件
+                is_attachment = True
+
+        if is_attachment:
+            filtered.pop()
+        else:
+            break
+
+    return '\n'.join(filtered).strip()
 
 
 # ================================================
@@ -750,6 +1014,21 @@ class FirecrawlClient:
         import os
         return os.environ.get("FIRECRAWL_API_KEY", "")
 
+    def is_configured(self) -> bool:
+        """
+        检查客户端是否已正确配置可用。
+
+        用于调用方决定是否跳过 Firecrawl 直接走备用链：
+        - ``use_local=True`` → 本地服务不需要 key，视为已配置
+        - ``use_local=False`` → 必须有非空 ``api_key`` 才视为已配置
+
+        Returns:
+            True 如果 Firecrawl 客户端可用，否则 False
+        """
+        if self.use_local:
+            return True
+        return bool(self.api_key)
+
     def _load_config_from_settings(self) -> None:
         """从设置中加载配置"""
         try:
@@ -932,14 +1211,26 @@ class Crawl4AIWrapper:
             cookies: Cookie字符串，用于绕过反爬（如 "name=value; name2=value2"）
         """
         try:
-            from crawl4ai import AsyncWebCrawler, BrowserConfig
+            from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 
             # 构建浏览器配置
             browser_config = BrowserConfig()
 
+            # 构建爬取配置：等待页面加载完成后提取正文
+            run_config = CrawlerRunConfig(
+                # 等待页面加载
+                delay_before_return_html=1.5,  # 等待1.5秒让动态内容加载
+                # 滚动页面以加载更多内容
+                scroll_delay=0.3,
+                max_scroll_steps=5,
+                # 忽略 body 可见性检查，确保获取完整内容
+                ignore_body_visibility=True,
+                verbose=False,
+            )
+
             async with AsyncWebCrawler(config=browser_config, verbose=False) as crawler:
                 # 爬取参数
-                crawl_params = {"url": url}
+                crawl_params = {"url": url, "config": run_config}
 
                 # 如果有 Cookie，添加 cookies 参数
                 if cookies:
@@ -962,10 +1253,14 @@ class Crawl4AIWrapper:
                                 "domain": domain,
                             }
 
+                    # 提取正文内容（过滤导航）
+                    markdown = result.markdown or ""
+                    content = Crawl4AIWrapper._extract_main_content(markdown, url)
+
                     return {
                         "success": True,
-                        "content": result.markdown or "",
-                        "markdown": result.markdown or "",
+                        "content": content,
+                        "markdown": markdown,
                         "title": result.metadata.get("title", "") if result.metadata else "",
                         "links": result.links.get("internal", []) if result.links else [],
                         "html": result.html or "",
@@ -973,6 +1268,14 @@ class Crawl4AIWrapper:
                     }
                 else:
                     error_msg = getattr(result, 'error_message', None) or getattr(result, 'error', None) or "Crawl4AI爬取失败"
+                    # 记录真实错误（之前只回退不打印，导致 80ms 内"失败"无法诊断）
+                    logger.warning(
+                        f"Crawl4AI 爬取失败 url={url} "
+                        f"success={result.success} "
+                        f"error_message={getattr(result, 'error_message', None)!r} "
+                        f"html_len={len(result.html or '')} "
+                        f"markdown_len={len(result.markdown or '')}"
+                    )
                     # 检测反爬
                     if "403" in error_msg or "blocked" in error_msg.lower() or "forbidden" in error_msg.lower():
                         domain = urlparse(url).netloc
@@ -994,12 +1297,301 @@ class Crawl4AIWrapper:
                 }
             return {"success": False, "error": error_str}
 
+    @staticmethod
+    def _extract_main_content(markdown: str, url: str) -> str:
+        """
+        从 markdown 中提取正文内容，过滤导航和页头
+
+        很多网站的页面结构是：
+        - 顶部导航 (ENGLISH, 网站地图, 首页, ...)
+        - Logo 和菜单
+        - 中间导航
+        - 文章正文（通常包含标题、发布时间、正文段落）
+        - 底部导航
+
+        本函数从 markdown 中定位并提取正文，跳过顶部的导航内容
+        """
+        if not markdown:
+            return ""
+
+        lines = markdown.split('\n')
+        if len(lines) < 5:
+            return markdown
+
+        # 策略：从后往前或寻找正文特征来确定正文起始位置
+        # 正文特征：标题（#开头）、发布时间、作者信息、来源等
+
+        # 1. 寻找正文标记（多种格式）
+        publish_markers = [
+            # 时间相关
+            '发布时间', '发布日期', '发表时间', '更新于', '更新时间',
+            '发布时间：', '发布日期：', '发表时间：', '更新于：', '更新时间：',
+            # 来源相关（重要！中科院等网站使用）
+            '来源：', '来源:', '来自：', '作者：', '作者:', '责任编辑',
+            '来源：', '来源:', '文章来源于',
+            # 浏览量相关
+            '浏览量：', '浏览量:', '阅读次数', '阅读量',
+        ]
+        body_start_idx = -1
+
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            for marker in publish_markers:
+                if marker in stripped:
+                    # 找到正文标记，向前查找标题（通常是前几行）
+                    body_start_idx = max(0, i - 5)  # 正文开始位置（标记前5行）
+                    break
+            if body_start_idx >= 0:
+                break
+
+        # 2. 如果没找到，寻找 Markdown 标题（H1-H3）
+        if body_start_idx < 0:
+            for i, line in enumerate(lines[:50]):  # 只在前50行查找
+                stripped = line.strip()
+                if stripped.startswith('# ') and len(stripped) > 5:
+                    # 找到 H1 标题，检查接下来的行是否有正文特征
+                    body_start_idx = i
+                    break
+
+        # 3. 如果还是没找到，寻找正文关键词
+        if body_start_idx < 0:
+            # 注意：中科院的来源行格式是："## \n2026年07月03日 来源： 机关党委 ..."
+            # 需要处理这种格式
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                # 检查来源格式的特征
+                if '来源' in stripped and ('年' in stripped or '月' in stripped):
+                    body_start_idx = max(0, i - 2)
+                    break
+            if body_start_idx < 0:
+                body_keywords = ['正文', '内容如下', '各位', '大家好', '首先', '经过']
+                for i, line in enumerate(lines[:30]):
+                    stripped = line.strip()
+                    # 检查是否包含正文关键词且有一定长度（排除短导航项）
+                    for kw in body_keywords:
+                        if kw in stripped and len(stripped) > 20:
+                            body_start_idx = i
+                            break
+                    if body_start_idx >= 0:
+                        break
+
+        # 4. 过滤顶部导航行
+        if body_start_idx < 0:
+            # 没有找到正文标记，跳过前面的导航部分
+            skip_patterns = [
+                r'^\s*\d+\.\s*\[',  # 数字编号列表: "1. [ENGLISH](...)"
+                r'^\s*\*\s*\[.*\]\(http',  # Markdown 导航: "* [首页](...)"
+                r'^\s*\[!\[',  # Logo 图片: "[![](...)]"
+                r'^MENU\s*Toggle',  # 移动端菜单
+                r'^\s*#+\s*(?:ENGLISH|网站地图|首页|About|Contact)',  # 导航标题
+            ]
+
+            for i, line in enumerate(lines):
+                is_nav = False
+                for pattern in skip_patterns:
+                    if re.match(pattern, line.strip(), re.IGNORECASE):
+                        is_nav = True
+                        break
+                if not is_nav and len(line.strip()) > 30:
+                    # 找到第一个较长的非导航行
+                    body_start_idx = i
+                    break
+
+        # 5. 如果仍没找到，尝试找到导航和正文的分界点
+        if body_start_idx < 0:
+            # 统计连续短行的结束位置（导航通常是多行短列表）
+            nav_end = 0
+            short_line_count = 0
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if len(stripped) < 30 and stripped and not stripped.startswith('#'):
+                    short_line_count += 1
+                else:
+                    if short_line_count > 5:
+                        # 有超过5行短行，认为这是导航结束
+                        nav_end = i
+                        break
+                    short_line_count = 0
+
+            if nav_end > 0:
+                body_start_idx = nav_end
+
+        # 如果还是没有找到正文起始位置，使用整个内容
+        if body_start_idx < 0:
+            body_start_idx = 0
+
+        # 6. 从正文开始位置提取内容
+        content_lines = lines[body_start_idx:]
+
+        # 7. 过滤顶部、底部的导航和版权信息
+        filtered_lines = []
+        skip_patterns = [
+            # 底部导航和版权
+            r'^[^\n]*版权[^\n]*$',
+            r'^ICP备[^\n]*$',
+            r'^京公网安备[^\n]*$',
+            r'^[^\n]*版权所有[^\n]*$',
+            r'^[^\n]*网站地图[^\n]*$',
+            r'^[^\n]*联系我们[^\n]*$',
+            r'^[^\n]*邮箱登录[^\n]*$',
+            r'^[^\n]*English[^\n]*$',
+            r'^[^\n]*PC版[^\n]*$',
+            r'^[^\n]*手机版[^\n]*$',
+            # 顶部面包屑导航
+            r'^\[首页\]\(https?://[^\)]+\)\s*>',
+            r'^当前位置[：:]?\s*>>',
+            r'^>>.*\[首页\]',
+            r'^\s*>>',
+            r'^当前位置',
+            # 无障碍工具条残留（重要！）
+            r'^\s*声音开关',
+            r'^\s*显示屏',
+            r'^\s*帮助',
+            r'^\s*读屏专用',
+            r'^\s*关闭辅助工具',
+            r'^\s*退出',
+            r'^请按F11切换大界面模式',
+            r'^\s*提示：该链接属站外链接',
+            r'^\s*请注意，该操作',
+            r'^\s*该网站无法启动',
+            r'^\s*当前访问页面超出',
+            r'^\s*无障碍辅助工具',
+            r'^\s*ALT\+\d+',
+            r'^\s*语音播报',
+            r'^\s*【字体：大 中 小】',
+            r'^\s*浏览量[：:]\s*\d+',
+            r'^\s*javascript:void',
+            r'^\s*是否继续访问',
+            r'^\s*快捷方式',
+            r'^\s*视窗区',
+            r'^\s*交互区',
+            r'^\s*服务区',
+            r'^\s*列表区',
+            r'^\s*正文区',
+            r'^\s*导航区',
+            r'^\s*更多分享',
+            r'^\s*打印',
+            r'^\s*上一篇',
+            r'^\s*下一篇',
+            r'^\s*分享到',
+            # 栏目标题行（如 "## 工作动态"）
+            r'^#{1,3}\s*(?:工作动态|党群园地|首页|科普园地|新闻中心|通知公告)',
+            r'^#{1,3}\s*(?:新闻|动态|公告|简介)',
+            # 附件标题
+            r'^#{0,3}\s*附件[：:]?\s*$',
+            # 备案信息行
+            r'^备案序号[：:]',
+            r'^京ICP备\d+号',
+            r'^.*\. 更多\+',
+            # 图片链接行（只有图片没有正文）
+            r'^\s*!\[?\s*\]\(https?://[^\)]+\)\s*$',
+            r'^\s*!\[\]\(https?://[^\)]+\)\s*$',
+            # 空行或只有空白字符
+            r'^\s*$',
+        ]
+
+        for line in content_lines:
+            is_skip = False
+            stripped = line.strip()
+
+            # 如果行只包含图片链接，跳过
+            if re.match(r'^\s*!\[?\s*\]\(https?://[^\)]+\)\s*$', stripped):
+                is_skip = True
+            elif re.match(r'^\s*!\[\]\([^)]+\)\s*$', stripped):
+                is_skip = True
+            else:
+                for pattern in skip_patterns:
+                    if re.match(pattern, stripped, re.IGNORECASE):
+                        is_skip = True
+                        break
+
+            if not is_skip:
+                filtered_lines.append(line)
+
+        return '\n'.join(filtered_lines).strip()
+
+
+def _extract_json_from_llm_response(response: Optional[str]) -> Optional[Dict[str, Any]]:
+    """
+    从 LLM 响应文本中提取 JSON 对象。
+
+    LLM（特别是 thinking 模型如 minimax-m27）几乎总会先输出
+    ``<think>...</think>`` 思考块，并习惯用 markdown ```` ```json ```` 围栏
+    包裹 JSON。原来的贪婪正则 ``r'\{[\s\S]*\}'`` 会把 think 块里
+    任意 ``{}`` 也吃进去，导致 ``json.loads`` 必败。
+
+    提取顺序：
+    1. 剥掉所有 ``<think>...</think>`` 块（跨行、非贪婪）
+    2. 尝试从 ```` ```json ```` 围栏中提取（兼容 `````JSON``）
+    3. 围栏失败 → 在剩余文本中用栈匹配找最外层 ``{...}``（处理嵌套和字符串内的 ``{}``）
+    4. 解析失败或找不到 → 返回 ``None``（不抛异常）
+
+    Args:
+        response: LLM 原始响应文本
+
+    Returns:
+        解析出的 dict；失败返回 ``None``
+    """
+    if not response:
+        return None
+
+    text = response
+
+    # 1. 剥掉所有 <think>...</think> 块（跨行、非贪婪）
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+
+    # 2. 尝试从 ```json 围栏中提取（兼容 ```JSON 大写）
+    #    围栏内容里可能含换行，所以用 \s* 兼容
+    fence_match = re.search(r"```(?:json|JSON)\s*\n?([\s\S]*?)\n?```", text)
+    if fence_match:
+        candidate = fence_match.group(1).strip()
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass  # 围栏内容不是合法 JSON，继续往下找
+
+    # 3. 围栏失败 → 在剩余文本中用栈匹配找最外层 { ... }
+    #    简单做法：找到第一个 { ，再扫描到匹配的 }（考虑字符串和嵌套）
+    start = text.find("{")
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = text[start : i + 1]
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    return None
+
+    return None
+
 
 class WebScraper:
     """
     网页爬取引擎
     使用 Firecrawl + URL 日期提取 + LLM 摘要
     如 Firecrawl 不可用，自动回退到 Crawl4AI
+    如 Crawl4AI 也不可用，使用内置的备用爬取方案
     """
 
     def __init__(self, cancel_event: Optional[asyncio.Event] = None, progress_callback: Optional[callable] = None):
@@ -1008,6 +1600,7 @@ class WebScraper:
         self._firecrawl = get_firecrawl_client()
         self._progress_callback = progress_callback
         self._use_crawl4ai = False  # 是否使用 crawl4ai 作为回退
+        self._use_alternate = False  # 是否使用内置备用爬取方案
 
     def _is_cancelled(self) -> bool:
         """检查是否已取消"""
@@ -1060,9 +1653,11 @@ class WebScraper:
         """
         爬取单个网页
 
-        1. Firecrawl 爬取内容
-        2. URL 日期提取（最优先）
-        3. LLM 摘要提取（可选）
+        1. Firecrawl 爬取内容（优先）
+        2. Crawl4AI（回退）
+        3. 内置备用爬取方案（最后回退）
+        4. URL 日期提取（最优先）
+        5. LLM 摘要提取（可选）
         """
         if options is None:
             options = ScrapeOptions()
@@ -1074,19 +1669,40 @@ class WebScraper:
         cookies = getattr(options, 'cookies', None)
 
         try:
-            # 1. Firecrawl 爬取（优先）或 Crawl4AI（回退）
-            if self._use_crawl4ai:
+            # 1. 优先使用已成功的爬取方式
+            if self._use_alternate:
+                # 使用内置备用爬取方案
+                scrape_result = await self._scrape_with_alternate(url, options, cookies)
+            elif self._use_crawl4ai:
+                # 使用 Crawl4AI
                 scrape_result = await Crawl4AIWrapper.scrape(url, timeout=options.timeout, cookies=cookies)
             else:
-                scrape_result = await self._firecrawl.scrape_url(url, timeout=options.timeout)
+                # Firecrawl 未配置时直接短路（避免每次白等 1-2 秒拿 401）
+                if not self._firecrawl.is_configured():
+                    logger.info(f"Firecrawl 未配置（无 API key 也未启用本地服务），直接走 Crawl4AI: {url}")
+                    self._use_crawl4ai = True
+                    scrape_result = await Crawl4AIWrapper.scrape(url, timeout=options.timeout, cookies=cookies)
+                else:
+                    # 使用 Firecrawl
+                    scrape_result = await self._firecrawl.scrape_url(url, timeout=options.timeout)
 
-            # Firecrawl 失败时自动回退到 Crawl4AI
-            if not scrape_result.get("success") and not self._use_crawl4ai:
+            # 2. Firecrawl 失败时自动回退到 Crawl4AI
+            if not scrape_result.get("success") and not self._use_crawl4ai and not self._use_alternate:
                 logger.warning(f"Firecrawl 爬取失败，回退到 Crawl4AI: {url}")
                 scrape_result = await Crawl4AIWrapper.scrape(url, timeout=options.timeout, cookies=cookies)
                 if scrape_result.get("success"):
                     self._use_crawl4ai = True  # 后续继续使用 crawl4ai
+                    logger.info(f"切换到 Crawl4AI 爬取: {url}")
 
+            # 3. Crawl4AI 也失败时，回退到内置备用爬取方案
+            if not scrape_result.get("success") and not self._use_alternate:
+                logger.warning(f"Crawl4AI 爬取失败，回退到内置备用爬取方案: {url}")
+                scrape_result = await self._scrape_with_alternate(url, options, cookies)
+                if scrape_result.get("success"):
+                    self._use_alternate = True  # 后续继续使用备用方案
+                    logger.info(f"切换到内置备用爬取方案: {url}")
+
+            # 4. 所有爬取方式都失败
             if not scrape_result.get("success"):
                 # 检查是否是反爬错误
                 if scrape_result.get("error") == "anti_bot_detected":
@@ -1099,13 +1715,30 @@ class WebScraper:
                 logger.error(f"爬取失败: {url}, 错误: {result.error_message}")
                 return result
 
-            # 2. 提取内容
+            # 5. 提取内容
             raw_html = scrape_result.get("html", "")
+            # 优先使用已处理过的 content（经过 _extract_main_content）
+            # 如果为空才使用 markdown
+            processed_content = scrape_result.get("content", "")
             markdown = scrape_result.get("markdown", "")
-            raw_content = markdown.strip() if markdown else scrape_result.get("content", "")
+            raw_content = processed_content.strip() if processed_content else markdown.strip()
 
-            # 清理内容
-            result.content = clean_content(raw_content)
+            # 清理内容（如果 content 已经是处理过的，只做轻微清理）
+            if processed_content:
+                # 已经过正文提取，只需做轻度清理
+                result.content = clean_content_light(raw_content)
+            else:
+                # 需要完整清理
+                result.content = clean_content(raw_content)
+
+            # 5.5 语义尾部裁剪：剥离混入正文末尾的栏目串/版权/页脚/地址电话等
+            # 必须在 clean_content_light 之后做，因为它能处理已经被压成单段的混合文本。
+            # 对 length < 50 的极短结果不做处理，避免误伤。
+            if result.content and len(result.content) >= 50:
+                stripped = strip_semantic_noise_blocks(result.content)
+                if stripped and len(stripped) >= 20:
+                    result.content = stripped
+
             result.html = raw_html
 
             # 尝试获取标题：先从 metadata 获取，如果没有则从内容提取
@@ -1117,7 +1750,7 @@ class WebScraper:
             result.links = self._extract_links_from_html(raw_html, url, markdown)
             result.word_count = len(result.content.replace("\n", "").replace(" ", ""))
 
-            # 3. 检测是否为列表页（通过内容判断）
+            # 6. 检测是否为列表页（通过内容判断）
             if self._is_list_page(result.content, result.links):
                 logger.info(f"检测为列表页，跳过正文提取: {url}")
                 result.content = ""
@@ -1125,7 +1758,7 @@ class WebScraper:
                 result.status = "success"
                 return result
 
-            # 4. 日期提取（内容日期优先，URL 日期作为参考）
+            # 7. 日期提取（内容日期优先，URL 日期作为参考）
             url_date = DateExtractor.extract_from_url(url)
             content_date, content_author = extract_date_from_content(result.content, url)
 
@@ -1147,7 +1780,7 @@ class WebScraper:
                 result.author = content_author
                 logger.debug(f"内容作者: {content_author}")
 
-            # 5. 大模型提取元信息（如需要）
+            # 8. 大模型提取元信息（如需要）
             if options.extract_metadata and result.content and result.word_count >= 50:
                 metadata = await self._extract_metadata_with_llm(result.title, result.content, result.url)
                 logger.info(f"LLM 元信息提取结果: title={len(metadata.get('title', ''))}字, summary={len(metadata.get('summary', ''))}字, keywords={len(metadata.get('keywords', []))}个")
@@ -1165,7 +1798,7 @@ class WebScraper:
 
                 result.keywords = metadata.get("keywords", [])
 
-            # 6. 文体分析（可选，在摘要提取后进行）
+            # 9. 文体分析（可选，在摘要提取后进行）
             if options.extract_metadata and result.content and result.word_count >= 50 and not result.style:
                 result.style = await self._extract_style_with_llm(result.title, result.content)
                 if result.style:
@@ -1190,6 +1823,33 @@ class WebScraper:
             logger.error(f"爬取异常: {url}, 错误: {e}")
 
         return result
+
+    async def _scrape_with_alternate(self, url: str, options: ScrapeOptions, cookies: Optional[str] = None) -> Dict[str, Any]:
+        """
+        使用内置备用爬取方案
+        """
+        from app.services.alternate_scraper import get_alternate_scraper
+        
+        try:
+            scraper = get_alternate_scraper()
+            result = await scraper.scrape(url, cookies=cookies)
+            
+            if result.get("success"):
+                # 转换为统一格式
+                return {
+                    "success": True,
+                    "content": result.get("content", ""),
+                    "markdown": result.get("markdown", ""),
+                    "title": result.get("title", ""),
+                    "links": result.get("links", []),
+                    "html": result.get("html", ""),
+                    "metadata": {},
+                }
+            else:
+                return result
+        except Exception as e:
+            logger.error(f"备用爬取方案失败: {e}")
+            return {"success": False, "error": f"备用爬取方案失败: {str(e)}"}
 
     def save_to_database(
         self,
@@ -1353,20 +2013,271 @@ class WebScraper:
             return False, str(e)
 
     def _is_list_page(self, content: str, links: List[str]) -> bool:
-        """判断是否为列表页（只有内容真正很少时才认为是列表页）"""
-        # 只有内容非常少时才认为是列表页
-        if len(content) < 100:
+        """
+        判断是否为列表页/导航页
+        （优化版：更宽松的判断，避免误删有价值的内容）
+
+        导航页特征：
+        1. 内容主要是 "* 栏目名" 格式的列表
+        2. 内容是机构介绍/组织架构/栏目导航
+        3. 缺乏完整的文章句子结构
+        4. 包含大量栏目名称关键词
+        """
+        if not content:
             return True
 
-        # 如果有链接且内容有实质内容，认为是文章页
-        # 文章通常有足够的句子结构（英文用句号判断）
-        if len(content) > 300 and links:
-            # 检查是否有句子结构
-            sentence_markers = content.count('.') + content.count('。') + content.count('!') + content.count('?')
-            if sentence_markers >= 3:
-                return False
+        lines = [l.strip() for l in content.split('\n') if l.strip()]
 
+        # 如果内容长度超过 300 字符，优先认为是文章页（保守策略）
+        if len(content) >= 300:
+            logger.debug(f"内容足够长 ({len(content)} 字)，认为是文章页")
+            return False
+
+        # 内容很少时，才认为是导航页
+        if len(content) < 80 or len(lines) < 2:
+            return True
+
+        # 检测导航关键词密度
+        nav_keywords = [
+            '历史沿革', '园区概况', '组织机构', '科研部门', '管理部门', '支撑部门',
+            '学术委员会', '研究队伍', '院士专家', '研究员', '正高级', '成果展示',
+            '教育培养', '教育处', '招生管理', '培养与学位', '首页', '网站', '联系',
+            '工作动态', '综合新闻', '通知公告', '党建', '党政', '新闻', '更多',
+            '党群园地', '党群工作', '机构设置', '职能机构', '直属机构',
+            '成果转化', '知识产权', '人才教育', '教育简介', '主要职责', '办院方针',
+            '院况简介', '科技奖励', '科技期刊', '科技专项', '科研进展',
+            '地理位置', '交通路线', '邮箱登录', '网站地图', 'English', 'PC 版',
+            '当前位置', '您现在的位置', '首页', '设为首页', '加入收藏',
+        ]
+
+        nav_line_count = 0
+        list_item_count = 0
+        # 统计正文段落行（包含多个句子或较长内容的行）
+        paragraph_lines = 0
+
+        for line in lines:
+            # 统计列表项格式的行 (* 或 - 开头)
+            if line.startswith('* ') or line.startswith('- '):
+                # 只有短列表项（导航项）才算，长内容前的列表不算
+                if len(line) < 30:
+                    list_item_count += 1
+                continue
+
+            # 检测是否包含导航关键词
+            is_nav = False
+            for kw in nav_keywords:
+                if kw in line:
+                    nav_line_count += 1
+                    is_nav = True
+                    break
+
+            # 统计正文段落行（有句子结构的行）
+            if not is_nav:
+                sentence_count = line.count('。') + line.count('.') + line.count('！') + line.count('？')
+                if sentence_count >= 2 or len(line) > 100:
+                    paragraph_lines += 1
+
+        total_lines = len(lines)
+
+        # 条件 0: 如果有正文段落，认为是文章
+        if paragraph_lines >= 3:
+            logger.debug(f"检测为文章页 (正文段落): {paragraph_lines}/{total_lines}")
+            return False
+
+        # 条件 1: 如果有大量列表项格式的行，且占比超过 60%，才认为是导航页
+        if total_lines >= 8 and list_item_count / total_lines > 0.6:
+            logger.info(f"检测为导航页 (列表项): {list_item_count}/{total_lines}")
+            return True
+
+        # 条件 2: 如果导航关键词行占比超过 60%，才认为是导航页
+        if total_lines >= 8 and nav_line_count / total_lines > 0.6:
+            logger.info(f"检测为导航页 (关键词): {nav_line_count}/{total_lines}")
+            return True
+
+        # 条件 3: 内容没有完整的句子结构（句号少）
+        sentence_markers = content.count('。') + content.count('!') + content.count('？')
+        if len(content) > 200 and sentence_markers < 1:
+            logger.info(f"检测为导航页 (句子少): {sentence_markers} 个句子标记")
+            return True
+
+        # 条件 4: 如果内容都是短行（每行<30 字）且行数多，可能是列表
+        short_lines = [l for l in lines if len(l) < 30]
+        if len(lines) > 15 and len(short_lines) / len(lines) > 0.9:
+            logger.info(f"检测为导航页 (短行多): {len(short_lines)}/{len(lines)}")
+            return True
+
+        # 条件 5: 检测是否有"* xxx" 格式的导航列表块，且这些行包含大量机构栏目词
+        # 这种情况专门处理"【摘要】xxx\n【正文】\n* 栏目 1\n* 栏目 2\n..."的格式
+        star_nav_lines = []
+        for line in lines:
+            if line.startswith('* '):
+                # 检查是否是栏目名称格式（短，包含导航词）
+                stripped = line[2:].strip()  # 去掉 "* "
+                if len(stripped) < 20:  # 栏目名通常较短
+                    is_nav_item = False
+                    for kw in nav_keywords:
+                        if kw in stripped:
+                            is_nav_item = True
+                            break
+                    if is_nav_item:
+                        star_nav_lines.append(line)
+
+        # 如果有 8 个以上的导航列表项，才认为是导航页
+        if len(star_nav_lines) >= 8:
+            logger.info(f"检测为导航页 (栏目列表): {len(star_nav_lines)} 个栏目项")
+            return True
+
+        # 有足够多的句子标记，认为是文章页
+        if sentence_markers >= 2:
+            return False
+
+        # 默认：不轻易认为是列表页，保留内容
         return False
+
+    def extract_list_page_articles(self, content: str, links: List[str], base_url: str) -> List[Dict[str, str]]:
+        """
+        从列表页提取文章信息
+
+        Args:
+            content: 页面内容（markdown 格式）
+            links: 链接列表
+            base_url: 基础 URL
+
+        Returns:
+            List[Dict]: 文章列表，每项包含 {title, url, date}
+        """
+        articles = []
+        seen_urls = set()
+
+        # 从链接中提取文章
+        for link in links:
+            if link in seen_urls:
+                continue
+
+            # 过滤：只保留文章链接（排除首页、列表页、图片等）
+            if any(ext in link.lower() for ext in ['.jpg', '.png', '.gif', '.pdf']):
+                continue
+
+            # 检查是否是文章 URL（通常包含日期或特定模式）
+            is_article = False
+
+            # 模式 1: URL 包含日期格式
+            if re.search(r'/\d{4}[-/]\d{1,2}[-/]\d{1,2}/', link) or re.search(r'/\d{8}', link):
+                is_article = True
+
+            # 模式 2: URL 包含 /tYYYYMMDD_ 或 .shtml .htm 等
+            if '/t' in link and re.search(r't\d{8}', link):
+                is_article = True
+            if link.endswith(('.shtml', '.htm', '.html')):
+                is_article = True
+
+            # 模式 3: URL 是新闻/文章路径
+            if any(p in link for p in ['/yw/', '/news/', '/article/', '/content/', '/info/']):
+                is_article = True
+
+            # 模式 4: 从链接文本提取标题（如果有）
+            if is_article and link not in seen_urls:
+                seen_urls.add(link)
+
+                # 从 URL 提取日期
+                date_match = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', link)
+                if date_match:
+                    date_str = f"{date_match.group(1)}-{date_match.group(2).zfill(2)}-{date_match.group(3).zfill(2)}"
+                else:
+                    date_match = re.search(r'(\d{8})', link)
+                    if date_match:
+                        d = date_match.group(1)
+                        date_str = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+                    else:
+                        date_str = ""
+
+                articles.append({
+                    'url': link,
+                    'title': '',  # 需要进一步爬取才能获取
+                    'date': date_str
+                })
+
+        return articles[:20]  # 限制返回数量
+
+    async def scrape_list_page_and_articles(
+        self,
+        list_url: str,
+        max_articles: int = 10,
+        save_to_db: bool = True,
+        category_id: Optional[str] = None,
+        source_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        爬取列表页并自动抓取文章详细内容
+
+        Args:
+            list_url: 列表页 URL
+            max_articles: 最大爬取文章数
+            save_to_db: 是否保存到数据库
+            category_id: 分类 ID
+            source_id: 来源 ID
+
+        Returns:
+            Dict: {scraped_count, articles: [...]}
+        """
+        from app.core.database import get_session_local
+        from app.models.article import Article
+
+        # 1. 爬取列表页
+        list_result = await self.scrape(list_url)
+        if list_result.status != "success":
+            return {"status": "error", "message": f"列表页爬取失败：{list_result.error_message}"}
+
+        # 2. 提取文章链接
+        articles = self.extract_list_page_articles(list_result.content, list_result.links, list_url)
+        if not articles:
+            return {"status": "error", "message": "未找到文章链接"}
+
+        # 3. 限制数量
+        articles = articles[:max_articles]
+
+        scraped_count = 0
+        scraped_articles = []
+
+        # 4. 逐个爬取文章详情
+        for i, article_info in enumerate(articles):
+            if self._is_cancelled():
+                break
+
+            article_url = article_info.get("url", "")
+            if not article_url:
+                continue
+
+            # 爬取文章详情
+            article_result = await self.scrape(article_url)
+            if article_result.status == "success":
+                # 保存数据库
+                if save_to_db:
+                    saved, article_id = self.save_to_database(
+                        article_result,
+                        category_id=category_id,
+                        source_id=source_id
+                    )
+                    if saved:
+                        scraped_count += 1
+                        scraped_articles.append({
+                            "url": article_url,
+                            "title": article_result.title,
+                            "db_id": article_id
+                        })
+                else:
+                    scraped_count += 1
+                    scraped_articles.append({
+                        "url": article_url,
+                        "title": article_result.title,
+                        "content_length": len(article_result.content)
+                    })
+
+        return {
+            "status": "success",
+            "scraped_count": scraped_count,
+            "articles": scraped_articles
+        }
 
     async def _extract_metadata_with_llm(self, title: str, content: str, url: str = "") -> Dict[str, Any]:
         """使用大模型提取元信息，包括标题、摘要和文体"""
@@ -1404,36 +2315,32 @@ class WebScraper:
             logger.info(f"LLM 原始响应: {response[:500]}...")
 
             if response and not response.startswith("[错误]"):
-                # 提取 JSON
-                json_match = re.search(r'\{[\s\S]*\}', response)
-                if json_match:
-                    try:
-                        data = json.loads(json_match.group())
-                        # 确保 keywords 是列表（处理各种可能的格式）
-                        keywords_raw = data.get("keywords", [])
-                        keywords = []
-                        if isinstance(keywords_raw, str):
-                            # 如果是逗号分隔的字符串，转换为列表
-                            keywords = [k.strip() for k in keywords_raw.split(',') if k.strip()]
-                        elif isinstance(keywords_raw, list):
-                            for k in keywords_raw:
-                                if isinstance(k, str):
-                                    # 如果元素本身包含逗号，再分割
-                                    parts = [x.strip() for x in k.split(',') if x.strip()]
-                                    keywords.extend(parts)
-                                elif k:
-                                    keywords.append(str(k).strip())
-                        keywords = [k for k in keywords if k]  # 去重后去除空值
+                # 提取 JSON（处理 <think> 块 + ```json 围栏）
+                data = _extract_json_from_llm_response(response)
+                if data:
+                    # 确保 keywords 是列表（处理各种可能的格式）
+                    keywords_raw = data.get("keywords", [])
+                    keywords = []
+                    if isinstance(keywords_raw, str):
+                        # 如果是逗号分隔的字符串，转换为列表
+                        keywords = [k.strip() for k in keywords_raw.split(',') if k.strip()]
+                    elif isinstance(keywords_raw, list):
+                        for k in keywords_raw:
+                            if isinstance(k, str):
+                                # 如果元素本身包含逗号，再分割
+                                parts = [x.strip() for x in k.split(',') if x.strip()]
+                                keywords.extend(parts)
+                            elif k:
+                                keywords.append(str(k).strip())
+                    keywords = [k for k in keywords if k]  # 去重后去除空值
 
-                        return {
-                            "title": data.get("title", title) if title or not data.get("title") else data.get("title"),
-                            "published_at": data.get("published_at", ""),
-                            "author": data.get("author", ""),
-                            "summary": data.get("summary", "") or data.get("摘要", ""),
-                            "keywords": keywords,
-                        }
-                    except json.JSONDecodeError as je:
-                        logger.error(f"JSON解析失败: {je}, 原始响应: {response[:500]}")
+                    return {
+                        "title": data.get("title", title) if title or not data.get("title") else data.get("title"),
+                        "published_at": data.get("published_at", ""),
+                        "author": data.get("author", ""),
+                        "summary": data.get("summary", "") or data.get("摘要", ""),
+                        "keywords": keywords,
+                    }
         except Exception as e:
             logger.error(f"LLM 元信息提取失败: {e}")
 
@@ -1477,16 +2384,13 @@ class WebScraper:
             logger.info(f"LLM 文体分析响应: {response[:300]}...")
 
             if response and not response.startswith("[错误]"):
-                json_match = re.search(r'\{[\s\S]*\}', response)
-                if json_match:
-                    try:
-                        data = json.loads(json_match.group())
-                        style = data.get("style", "")
-                        if style:
-                            logger.info(f"文体分析结果: {style}")
-                            return style
-                    except json.JSONDecodeError:
-                        logger.error(f"文体分析 JSON 解析失败")
+                # 提取 JSON（处理 <think> 块 + ```json 围栏）
+                data = _extract_json_from_llm_response(response)
+                if data:
+                    style = data.get("style", "")
+                    if style:
+                        logger.info(f"文体分析结果: {style}")
+                        return style
 
         except Exception as e:
             logger.error(f"LLM 文体分析失败: {e}")
