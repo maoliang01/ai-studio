@@ -30,6 +30,7 @@ import {
   X,
 } from "lucide-react";
 import { toast } from "sonner";
+import EntitySourcePopover from "@/components/kg/EntitySourcePopover";
 
 interface GraphNode {
   id: string;
@@ -95,6 +96,7 @@ function KnowledgeGraphPageContent() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [highlightQuery, setHighlightQuery] = useState<string | null>(null);
   const [highlightedNodeIds, setHighlightedNodeIds] = useState<Set<string>>(new Set());
+  const [popoverEntity, setPopoverEntity] = useState<string | null>(null);
 
   const svgRef = useRef<SVGSVGElement>(null);
   const simulationRef = useRef<any>(null);
@@ -287,13 +289,20 @@ function KnowledgeGraphPageContent() {
   const handleNodeClick = async (node: GraphNode) => {
     setSelectedNode(node);
 
-    // 如果是实体节点，获取邻居
-    if (node.type === "Entity") {
+    // 实体节点:打开出处弹窗(显示来源文章 + 跳转回 articles 页)
+    if (node.type !== "Article") {
+      setPopoverEntity(node.label);
+      return;
+    }
+
+    // Article 节点:获取邻居实体信息
+    try {
       const details = await getEntityDetails(node.label);
       if (details) {
-        // 可以在这里扩展显示邻居信息
-        console.log("实体邻居:", details);
+        console.log("文章邻居实体:", details);
       }
+    } catch (e) {
+      console.error("获取文章详情失败:", e);
     }
   };
 
@@ -926,6 +935,19 @@ function KnowledgeGraphPageContent() {
           </div>
         </div>
       </div>
+
+      {/* 节点原文出处弹窗 */}
+      {popoverEntity && (
+        <EntitySourcePopover
+          entityName={popoverEntity}
+          onClose={() => setPopoverEntity(null)}
+          onJumpToArticle={(id) => {
+            const name = popoverEntity;
+            setPopoverEntity(null);
+            window.location.href = `/articles?highlight=${encodeURIComponent(name)}&article=${id}`;
+          }}
+        />
+      )}
     </div>
   );
 }
