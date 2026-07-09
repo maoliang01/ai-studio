@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import type { Article, ArticleStats } from "@/types";
+import HighlightOverlay from "@/components/articles/HighlightOverlay";
 import {
   Card,
   CardContent,
@@ -69,10 +70,29 @@ function formatDate(dateStr: string | undefined): string {
 
 export default function ArticlesPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const highlightName = searchParams.get("highlight");
+  const articleIdFromUrl = searchParams.get("article");
+  const [highlights, setHighlights] = useState<HTMLElement[]>([]);
+  const [currentIdx, setCurrentIdx] = useState(0);
   const [articles, setArticles] = useState<Article[]>([]);
   const [stats, setStats] = useState<ArticleStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
+
+  function clearHighlight() {
+    const body = document.querySelector("[data-article-body]");
+    if (body) {
+      body.querySelectorAll("mark.kg-highlight").forEach((m) => {
+        m.replaceWith(document.createTextNode(m.textContent || ""));
+      });
+    }
+    setHighlights([]);
+    setCurrentIdx(0);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("highlight");
+    router.replace(url.pathname + (url.search || ""));
+  }
   const [totalPages, setTotalPages] = useState(1);
   const [total, setTotal] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
@@ -80,6 +100,81 @@ export default function ArticlesPage() {
   const [selectedArticle, setSelectedArticle] = useState<Article | null>(null);
   const [dbConnected, setDbConnected] = useState(false);
   const [checkingDb, setCheckingDb] = useState(true);
+
+  // 来自 ?article=ID 自动打开文章
+  useEffect(() => {
+    if (!articleIdFromUrl) return;
+    if (selectedArticle?.id === articleIdFromUrl) return;
+    let cancelled = false;
+    fetch(`/api/articles/${articleIdFromUrl}`)
+      .then((r) => r.json())
+      .then((a) => {
+        if (!cancelled && a && a.id) setSelectedArticle(a);
+      })
+      .catch((e) => {
+        if (!cancelled) console.error("自动加载文章失败:", e);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [articleIdFromUrl, selectedArticle]);
+
+  // KG 实体高亮:监听 ?highlight=XXX (依赖 selectedArticle 以确保 DOM 已挂载)
+  useEffect(() => {
+    if (!highlightName || !selectedArticle) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setHighlights([]);
+      return;
+    }
+    // 等 DOM 准备好
+    const timer = setTimeout(() => {
+      const body = document.querySelector("[data-article-body]");
+      if (!body) return;
+      // 清除旧 mark
+      body.querySelectorAll("mark.kg-highlight").forEach((m) => {
+        m.replaceWith(document.createTextNode(m.textContent || ""));
+      });
+      const escaped = highlightName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`(${escaped})`, "g");
+      const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+      const nodes: Text[] = [];
+      let n: Node | null;
+      while ((n = walker.nextNode())) nodes.push(n as Text);
+      nodes.forEach((node) => {
+        const text = node.textContent || "";
+        re.lastIndex = 0;
+        if (!re.test(text)) return;
+        re.lastIndex = 0;
+        const frag = document.createDocumentFragment();
+        let last = 0;
+        let m: RegExpExecArray | null;
+        let i = 0;
+        while ((m = re.exec(text))) {
+          if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+          const mark = document.createElement("mark");
+          mark.className = "kg-highlight";
+          mark.dataset.idx = String(i++);
+          mark.textContent = m[0];
+          frag.appendChild(mark);
+          last = m.index + m[0].length;
+        }
+        if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+        node.parentNode?.replaceChild(frag, node);
+      });
+      const marks = Array.from(body.querySelectorAll<HTMLElement>("mark.kg-highlight"));
+      setHighlights(marks);
+      setCurrentIdx(0);
+      if (marks[0]) marks[0].scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [highlightName, selectedArticle]);
+
+  useEffect(() => {
+    highlights.forEach((m, i) => m.classList.toggle("active", i === currentIdx));
+    if (highlights[currentIdx]) {
+      highlights[currentIdx].scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [currentIdx, highlights]);
 
   // 筛选条件
   const [categoryFilter, setCategoryFilter] = useState<string>("");
@@ -922,10 +1017,21 @@ export default function ArticlesPage() {
                 <TabsTrigger value="content">内容</TabsTrigger>
                 <TabsTrigger value="meta">元信息</TabsTrigger>
                 <TabsTrigger value="keywords">关键词</TabsTrigger>
-              </TabsList>
+            </TabsList>
+
+            {highlightName && (
+              <HighlightOverlay
+                entityName={highlightName}
+                total={highlights.length}
+                current={highlights.length > 0 ? currentIdx + 1 : 0}
+                onPrev={() => setCurrentIdx((i) => Math.max(0, i - 1))}
+                onNext={() => setCurrentIdx((i) => Math.min(highlights.length - 1, i + 1))}
+                onClose={clearHighlight}
+              />
+            )}
 
               <TabsContent value="content" className="mt-4">
-                <div className="prose prose-sm dark:prose-invert max-w-none">
+                <div data-article-body className="prose prose-sm dark:prose-invert max-w-none">
                   {selectedArticle.summary && (
                     <div className="bg-muted p-4 rounded-lg mb-4">
                       <h4 className="font-semibold mb-2">摘要</h4>
