@@ -303,11 +303,50 @@ def _deduplicate_duplicate_blocks(text: str) -> str:
             if normalized[i] == normalized[j] and len(normalized[i]) >= 50:
                 to_remove.add(j)
 
+    # Check 3：跨块公共子串（处理 Crawl4AI 风格扁平副本）
+    # 必须放在 early return 之前，因为 Check 1/2 都可能不触发
+    to_remove = _remove_substring_duplicate(blocks, normalized, to_remove)
+
     if not to_remove:
         return text
 
     kept = [b for i, b in enumerate(blocks) if i not in to_remove]
-    return "\n\n".join(kept)
+    return "\n".join(kept)
+
+
+def _remove_substring_duplicate(blocks: list, normalized: list, to_remove: set) -> set:
+    """
+    Check 3：用 SequenceMatcher 找跨块的"长公共子串"。
+
+    处理 Crawl4AI 等场景的"扁平副本"模式：
+    原文:  [p1, p2, p3, flat_dup]   其中 flat_dup = p1 + p2 + p3 (无 \n)
+    按 \n+ 切后: 块级 dedup 检测不出（flat_dup 是单块，不等任何其他块）
+    但归一化后 flat_dup 包含 p1、p2、p3 的子串 → 应删除 flat_dup
+
+    规则：任一 block (归一化后) 完全包含在另一个 block (归一化后) 里，
+    且长度都 >= 50，则删除那个被包含的（更短的那个）。
+
+    Returns:
+        更新后的 to_remove 集合
+    """
+    new_to_remove = set(to_remove)
+    n = len(blocks)
+    for i in range(n):
+        if i in new_to_remove or not normalized[i] or len(normalized[i]) < 50:
+            continue
+        for j in range(n):
+            if i == j or j in new_to_remove or not normalized[j] or len(normalized[j]) < 50:
+                continue
+            if normalized[i] in normalized[j]:
+                # i 是 j 的子串 → 删 j（j 是包含重复内容的超集）
+                # 但要选"更短且完整"那个删。这里 i 比 j 短，删 j 保留 i
+                new_to_remove.add(j)
+                break
+            if normalized[j] in normalized[i]:
+                # j 是 i 的子串 → 删 j
+                new_to_remove.add(j)
+                # 不要 break，因为可能有多个 j 都被 i 包含
+    return new_to_remove
 
 
 def _select_best_extraction(

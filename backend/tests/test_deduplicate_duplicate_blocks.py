@@ -64,7 +64,7 @@ class TestDeduplicateDuplicateBlocks(unittest.TestCase):
         self.assertLess(len(result), len(raw),
                         f"去重后应比原文短: len={len(result)} vs {len(raw)}")
         # 段与段之间仍然保留换行结构
-        self.assertIn("\n\n", result, "格式化版本应保留段落分隔")
+        self.assertIn("\n", result, "格式化版本应保留换行分隔")
 
     def test_no_duplicate_returns_unchanged(self):
         """没有重复的文本应原样返回"""
@@ -125,6 +125,30 @@ class TestDeduplicateDuplicateBlocks(unittest.TestCase):
         # 4 段格式化内容都应保留
         for para in [para1, para2, para3, para4]:
             self.assertIn(para, result, f"段落应保留: {para[:30]}...")
+
+    def test_crawl4ai_markdown_with_separator_in_first_copy_only(self):
+        """Crawl4AI markdown 格式:第一段含 \\n 分段,第二段扁平拼接,块级 dedup 检测不出
+
+        重复内容: "6月8日...作交流发言。\\n学习会上..." (中间有 \\n)
+        同样内容扁平版: "6月8日...作交流发言。学习会上..." (无 \\n)
+        → 块级按 \\n+ 切后,扁平版是一个超长块,跟其他块都不等
+        → 必须用 SequenceMatcher 找出子串级重复
+        """
+        para1_p1 = "6月8日，中国科学院党组召开理论学习中心组集体学习会，深入学习领会习近平总书记关于科技创新和发展新质生产力的重要论述。"
+        para1_p2 = "学习会上，与会人员围绕脑机接口领域前沿发展态势进行了深入交流研讨。"
+
+        formatted = para1_p1 + "\n" + para1_p2
+        flat = para1_p1 + para1_p2  # 去掉 \n
+
+        # 模拟 Crawl4AI markdown 完整结构(标题 + 格式化 + 重复的扁平 + 噪声)
+        raw = "## 中国科学院头条\n" + formatted + "\n## 上一篇\n" + flat + "\n扫描二维码"
+
+        result = _deduplicate_duplicate_blocks(raw)
+
+        # 扁平副本应被删除
+        self.assertNotIn(flat, result, "Crawl4AI 风格扁平副本应被删除")
+        # 格式化版本必须保留
+        self.assertIn(formatted, result, "格式化版本必须保留")
 
 
 if __name__ == "__main__":

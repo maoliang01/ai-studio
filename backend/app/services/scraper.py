@@ -1723,6 +1723,12 @@ class WebScraper:
             markdown = scrape_result.get("markdown", "")
             raw_content = processed_content.strip() if processed_content else markdown.strip()
 
+            # 5.0 结构去重（Crawl4AI/Firecrawl 同样会触发 cas.cn TRS_UEDITOR 重复）
+            # 必须在 clean_content_light 之前做，避免被混进无意义短行后失效
+            if raw_content:
+                from app.services.alternate_scraper import _deduplicate_duplicate_blocks
+                raw_content = _deduplicate_duplicate_blocks(raw_content)
+
             # 清理内容（如果 content 已经是处理过的，只做轻微清理）
             if processed_content:
                 # 已经过正文提取，只需做轻度清理
