@@ -94,13 +94,19 @@ class EntityExtractor:
     def __init__(self, model_id: Optional[str] = None):
         self.model_id = model_id
 
-    async def extract(self, content: str, max_content_length: int = 8000) -> ExtractionResult:
+    async def extract(
+        self,
+        content: str,
+        max_content_length: int = 8000,
+        article_id: Optional[str] = None,
+    ) -> ExtractionResult:
         """
         从文章内容中抽取实体和关系
 
         Args:
             content: 文章内容
             max_content_length: 最大内容长度（超出部分截断）
+            article_id: 文章 id,非空时记录到 EntityNode.source_articles
 
         Returns:
             ExtractionResult: 抽取结果
@@ -132,14 +138,14 @@ class EntityExtractor:
             )
 
             # 解析 JSON
-            result = self._parse_llm_response(response)
+            result = self._parse_llm_response(response, article_id=article_id)
             return result
 
         except Exception as e:
             logger.error(f"实体抽取失败: {e}")
             return ExtractionResult(error=str(e))
 
-    def _parse_llm_response(self, response: str) -> ExtractionResult:
+    def _parse_llm_response(self, response: str, article_id: Optional[str] = None) -> ExtractionResult:
         """解析 LLM 返回的 JSON 响应"""
         # 提取 JSON 部分
         json_match = re.search(r'\{[\s\S]*\}', response)
@@ -183,7 +189,8 @@ class EntityExtractor:
                         name=e["name"].strip(),
                         entity_type=entity_type,
                         description=e.get("description", "").strip(),
-                        subtype=subtype
+                        subtype=subtype,
+                        source_articles=[article_id] if article_id else None,
                     ))
 
             # 解析关系

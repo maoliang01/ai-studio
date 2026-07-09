@@ -147,7 +147,7 @@ async def _extract_and_link_entities_inner(article_id: str) -> None:
             return
 
         extractor = EntityExtractor()
-        result = await extractor.extract(content)
+        result = await extractor.extract(content, article_id=str(article.id))
         if result.error:
             article.kg_status = "failed"
             article.kg_error_message = result.error
