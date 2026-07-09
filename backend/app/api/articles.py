@@ -64,6 +64,11 @@ class ArticleBase:
             "created_at": article.created_at.isoformat() if article.created_at else None,
             "updated_at": article.updated_at.isoformat() if article.updated_at else None,
             "keywords": keywords,
+            # 知识图谱同步状态
+            "kg_status": article.kg_status,
+            "kg_processed_at": article.kg_processed_at.isoformat() if article.kg_processed_at else None,
+            "kg_content_hash": article.kg_content_hash,
+            "kg_error_message": article.kg_error_message,
         }
 
 

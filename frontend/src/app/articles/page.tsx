@@ -697,8 +697,28 @@ export default function ArticlesPage() {
                           />
                         </TableCell>
                         <TableCell className="font-medium">
-                          <div className="line-clamp-2">
-                            {article.title || "无标题"}
+                          <div className="flex items-center gap-2 line-clamp-2">
+                            <span>{article.title || "无标题"}</span>
+                            {article.kgStatus === "success" && (
+                              <Badge variant="default" className="text-[10px] px-1.5 py-0 h-4" title="已入知识图谱">
+                                KG ✓
+                              </Badge>
+                            )}
+                            {article.kgStatus === "failed" && (
+                              <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4" title={article.kgErrorMessage || "抽取失败"}>
+                                KG ✗
+                              </Badge>
+                            )}
+                            {article.kgStatus === "pending" && (
+                              <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4">
+                                KG 待
+                              </Badge>
+                            )}
+                            {article.kgStatus === "processing" && (
+                              <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4">
+                                KG ⏳
+                              </Badge>
+                            )}
                           </div>
                         </TableCell>
                         <TableCell className="text-sm">
@@ -758,6 +778,27 @@ export default function ArticlesPage() {
                                 知识图谱
                                 {kgConnected && <Badge className="ml-2" variant="secondary">新</Badge>}
                               </DropdownMenuItem>
+                              {(article.kgStatus === "failed" || article.kgStatus === "pending" || article.kgStatus === "skipped") && (
+                                <DropdownMenuItem
+                                  onClick={async () => {
+                                    if (!confirm(`重抽文章 "${article.title}" 的知识图谱实体?`)) return;
+                                    try {
+                                      const res = await fetch(`/api/kg/reprocess/${article.id}`, { method: "POST" });
+                                      if (res.ok) {
+                                        alert("已加入重抽队列");
+                                        loadArticles(page);
+                                      } else {
+                                        alert("重抽失败");
+                                      }
+                                    } catch (e) {
+                                      alert("重抽失败: " + e);
+                                    }
+                                  }}
+                                >
+                                  <RefreshCw className="w-4 h-4 mr-2" />
+                                  重抽 KG 实体
+                                </DropdownMenuItem>
+                              )}
                               <DropdownMenuItem onClick={() => handleDownload(article)}>
                                 <Download className="w-4 h-4 mr-2" />
                                 下载 MD
