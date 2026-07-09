@@ -243,6 +243,48 @@ def start_scheduler() -> BackgroundScheduler:
     return scheduler
 
 
+# ============ KG 对账定时任务(可选,默认关闭) ============
+
+async def kg_reconcile_task():
+    """定时对账任务:每 N 分钟跑一次,apply=False(只报告不修)"""
+    from app.core.database import get_session_local
+    from app.services.kg_sync import reconcile
+    SessionLocal = get_session_local()
+    session = SessionLocal()
+    try:
+        result = await reconcile(apply=False, db=session)
+        logger.info(
+            f"KG 对账报告: sqlite={result['sqlite_count']} "
+            f"kg={result['kg_count']} "
+            f"missing={len(result['missing_in_kg'])} "
+            f"orphan={len(result['orphan_in_kg'])} "
+            f"dirty={len(result['dirty_in_kg'])}"
+        )
+        if result['missing_in_kg'] or result['orphan_in_kg'] or result['dirty_in_kg']:
+            logger.warning(f"KG 漂移检测: {result}")
+    finally:
+        session.close()
+
+
+def register_kg_reconcile_job(scheduler, interval_minutes: int = 30):
+    """注册定时对账任务(默认 30 分钟一次)
+
+    当 interval_minutes <= 0 时不注册,等价于关闭。
+    """
+    if interval_minutes <= 0:
+        logger.info("KG 定时对账未启用(interval_minutes <= 0)")
+        return
+    scheduler.add_job(
+        kg_reconcile_task,
+        "interval",
+        minutes=interval_minutes,
+        id="kg_reconcile",
+        replace_existing=True,
+        max_instances=1
+    )
+    logger.info(f"KG 定时对账任务已注册,间隔 {interval_minutes} 分钟")
+
+
 # 全局调度器实例
 _scheduler: BackgroundScheduler | None = None
 
