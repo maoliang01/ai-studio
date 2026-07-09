@@ -239,9 +239,15 @@ function KnowledgeGraphPageContent() {
       const data = await response.json();
       if (data.status === "success") {
         setSearchResults(data.entities);
-        // 将搜索结果作为高亮
-        const ids = new Set(data.entities.map((e: any) => `${e.entity_type}:${e.name}`));
-        setHighlightedNodeIds((prev) => new Set([...prev, ...ids]));
+        // 将搜索结果作为高亮(D3 节点 id 与 Neo4j Entity.name 一致)
+        const ids = new Set<string>(
+          (data.entities as Array<{ name: string }>).map((e) => e.name)
+        );
+        setHighlightedNodeIds((prev) => {
+          const next = new Set<string>(prev);
+          ids.forEach((id) => next.add(id));
+          return next;
+        });
       }
     } catch (error) {
       console.error("搜索失败:", error);
