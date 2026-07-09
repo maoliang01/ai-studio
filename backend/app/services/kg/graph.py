@@ -25,6 +25,7 @@ class EntityNode:
     description: Optional[str] = None
     subtype: Optional[str] = None
     properties: Optional[Dict[str, Any]] = None
+    source_articles: Optional[List[str]] = None
 
 
 @dataclass
@@ -138,28 +139,51 @@ class Neo4jService:
         name: str,
         entity_type: str,
         description: Optional[str] = None,
-        subtype: Optional[str] = None
+        subtype: Optional[str] = None,
+        source_articles: Optional[List[str]] = None,
     ) -> bool:
-        """创建实体节点(subtype 是 entity_type 之下的细分领域)"""
+        """创建实体节点(支持累积 source_articles)"""
         if not self._driver:
             await self.connect()
 
+        new_articles = source_articles or []
+
         async with self._driver.session() as session:
-            query = """
-            MERGE (e:Entity {name: $name})
-            SET e.entity_type = $entity_type,
-                e.description = $description,
-                e.subtype = $subtype,
-                e.updated_at = datetime()
-            RETURN e
-            """
             try:
-                await session.run(query, {
-                    "name": name,
-                    "entity_type": entity_type,
-                    "description": description or "",
-                    "subtype": subtype or ""
-                })
+                if new_articles:
+                    # MERGE 后合并 source_articles 列表(去重)
+                    query = """
+                    MERGE (e:Entity {name: $name})
+                    SET e.entity_type = $entity_type,
+                        e.description = $description,
+                        e.subtype = $subtype,
+                        e.source_articles = REDUCE(acc = coalesce(e.source_articles, []), item IN $new_articles |
+                            CASE WHEN item IN acc THEN acc ELSE acc + item END),
+                        e.updated_at = datetime()
+                    RETURN e
+                    """
+                    await session.run(query, {
+                        "name": name,
+                        "entity_type": entity_type,
+                        "description": description or "",
+                        "subtype": subtype or "",
+                        "new_articles": new_articles,
+                    })
+                else:
+                    query = """
+                    MERGE (e:Entity {name: $name})
+                    SET e.entity_type = $entity_type,
+                        e.description = $description,
+                        e.subtype = $subtype,
+                        e.updated_at = datetime()
+                    RETURN e
+                    """
+                    await session.run(query, {
+                        "name": name,
+                        "entity_type": entity_type,
+                        "description": description or "",
+                        "subtype": subtype or ""
+                    })
                 return True
             except Exception as e:
                 logger.error(f"创建实体节点失败: {e}")
@@ -247,7 +271,8 @@ class Neo4jService:
                     name=entity.name,
                     entity_type=entity.entity_type,
                     description=entity.description,
-                    subtype=entity.subtype
+                    subtype=entity.subtype,
+                    source_articles=entity.source_articles,
                 )
                 if success:
                     stats["entities_created"] += 1
