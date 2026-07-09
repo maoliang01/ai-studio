@@ -32,6 +32,7 @@ interface ChatStore {
   isLoading: boolean;
   error: string | null;
   abortController: AbortController | null;
+  kgEnhanced: boolean;
   isInitialized: boolean;
 
   // Actions
@@ -41,6 +42,7 @@ interface ChatStore {
   addMessage: (sessionId: string, message: Message) => void;
   updateLastMessage: (sessionId: string, content: string) => void;
   setStreaming: (streaming: boolean) => void;
+  setKgEnhanced: (v: boolean) => void;
   setModel: (modelId: string) => void;
   updateSessionTitle: (id: string, title: string) => void;
   toggleRag: (sessionId: string) => void;
@@ -64,6 +66,7 @@ export const useChatStore = create<ChatStore>()(
     isLoading: false,
     error: null,
     abortController: null,
+    kgEnhanced: false,
     isInitialized: false,
 
     setCurrentSession: (id) => set({ currentSessionId: id }),
@@ -130,6 +133,7 @@ export const useChatStore = create<ChatStore>()(
       })),
 
     setStreaming: (streaming) => set({ isStreaming: streaming }),
+    setKgEnhanced: (v) => set({ kgEnhanced: v }),
 
     setModel: (modelId) => set({ selectedModel: modelId }),
 
