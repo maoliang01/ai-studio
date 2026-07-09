@@ -10,12 +10,14 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
 
 from app.core.database import get_db
 from app.models.article import Article
 from app.services.kg import Neo4jService, EntityExtractor, EmbeddingService
 from app.services.kg.graph import EntityNode, Relationship
 from app.services.kg.embedding import VectorStore
+from app.services.kg.qa import answer_question
 from app.services import kg_sync
 
 logger = logging.getLogger("ai-studio")
@@ -723,3 +725,85 @@ async def get_article_kg_status(article_id: str, db: Session = Depends(get_db)):
         "entity_count": entity_count,
         "relation_count": relation_count
     }
+
+
+# ==================== 对话页 KG 问答 (M1) ====================
+
+class QARequest(BaseModel):
+    question: str
+    model_id: str = "default"
+    session_id: Optional[str] = None
+
+
+@router.post("/qa/answer")
+async def kg_qa_answer(req: QARequest):
+    """对话页 KG 问答入口"""
+    try:
+        result = await answer_question(
+            question=req.question,
+            model_id=req.model_id,
+            session_id=req.session_id,
+        )
+        return result
+    except Exception as e:
+        logger.error(f"qa/answer 失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/entity-context/{entity_name}")
+async def get_entity_context(
+    entity_name: str,
+    limit: int = Query(default=5, ge=1, le=20),
+    db: Session = Depends(get_db),
+):
+    """获取实体的原文出处(出现的文章 + 原文片段)"""
+    neo4j = Neo4jService()
+    await neo4j.connect()
+    try:
+        async with neo4j._driver.session() as session:
+            r = await session.run(
+                "MATCH (e:Entity {name:$n}) "
+                "RETURN e.name AS name, e.entity_type AS type, "
+                "e.subtype AS subtype, e.description AS description, "
+                "e.source_articles AS source_articles",
+                n=entity_name,
+            )
+            row = await r.single()
+        if not row:
+            return {"entity": {"name": entity_name, "type": None, "subtype": None, "description": None}, "articles": []}
+
+        article_ids = (row["source_articles"] or [])[:limit]
+        articles_out = []
+        if article_ids:
+            arts = db.query(Article).filter(Article.id.in_(article_ids)).all()
+            for a in arts:
+                text = (a.content or "") + " " + (a.summary or "")
+                positions = []
+                if entity_name and entity_name in text:
+                    start = 0
+                    while True:
+                        idx = text.find(entity_name, start)
+                        if idx < 0:
+                            break
+                        positions.append([idx, idx + len(entity_name)])
+                        start = idx + len(entity_name)
+                snippet = ""
+                if positions:
+                    s, e = positions[0]
+                    snippet = text[max(0, s - 60):min(len(text), e + 60)]
+                articles_out.append({
+                    "article_id": str(a.id),
+                    "title": a.title or "(无标题)",
+                    "snippet": snippet,
+                    "highlight_positions": positions[:5],
+                })
+
+        return {
+            "entity": {
+                "name": row["name"], "type": row["type"],
+                "subtype": row["subtype"], "description": row["description"],
+            },
+            "articles": articles_out,
+        }
+    finally:
+        await neo4j.close()
