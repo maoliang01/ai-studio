@@ -31,11 +31,15 @@ import {
   Star,
   AlertCircle,
   Square,
+  Brain,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 import type { Message } from "@/types";
+import { qaAnswer } from "@/lib/api-kg";
+import MiniGraph from "@/components/kg/MiniGraph";
+import EntitySourcePopover from "@/components/kg/EntitySourcePopover";
 
 export default function ChatPage() {
   const {
@@ -56,7 +60,11 @@ export default function ChatPage() {
     error,
     setError,
     stopStreaming,
+    kgEnhanced,
+    setKgEnhanced,
   } = useChatStore();
+
+  const [popoverEntity, setPopoverEntity] = useState<string | null>(null);
 
   // 初始化时加载模型列表，如果没有会话则自动创建
   useEffect(() => {
@@ -93,6 +101,48 @@ export default function ChatPage() {
     setError(null);
     const messageContent = input.trim();
     setInput("");
+
+    if (kgEnhanced) {
+      // 走 KG QA 增强分支
+      const now = new Date();
+      const userMsg: Message = {
+        id: crypto.randomUUID(),
+        role: "user",
+        content: messageContent,
+        createdAt: now,
+      };
+      const tmpMsg: Message = {
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: "",
+        createdAt: now,
+      };
+      addMessage(currentSessionId, userMsg);
+      addMessage(currentSessionId, tmpMsg);
+      try {
+        const data = await qaAnswer(messageContent, selectedModel);
+        useChatStore.setState((state) => ({
+          sessions: state.sessions.map((s) => {
+            if (s.id !== currentSessionId) return s;
+            const messages = s.messages.map((m) =>
+              m.id === tmpMsg.id ? { ...m, content: data.answer, kg: data } : m,
+            );
+            return { ...s, messages };
+          }),
+        }));
+      } catch (e: any) {
+        useChatStore.setState((state) => ({
+          sessions: state.sessions.map((s) => {
+            if (s.id !== currentSessionId) return s;
+            const messages = s.messages.map((m) =>
+              m.id === tmpMsg.id ? { ...m, content: `错误: ${e?.message || e}` } : m,
+            );
+            return { ...s, messages };
+          }),
+        }));
+      }
+      return;
+    }
 
     await sendMessage(currentSessionId, messageContent);
   };
@@ -253,44 +303,67 @@ export default function ChatPage() {
                       )}
                     >
                       {message.role === "assistant" ? (
-                        <div className="prose prose-sm dark:prose-invert max-w-none">
-                          <ReactMarkdown
-                            remarkPlugins={[remarkGfm]}
-                            components={{
-                              code: ({ node, className, children, ...props }) => {
-                                const match = /language-(\w+)/.exec(className || "");
-                                const isInline = !match;
-                                return isInline ? (
-                                  <code className={className} {...props}>
-                                    {children}
-                                  </code>
-                                ) : (
-                                  <div className="relative group">
-                                    <pre className="!mt-0 !mb-0">
-                                      <code className={className} {...props}>
-                                        {children}
-                                      </code>
-                                    </pre>
-                                    <Button
-                                      size="sm"
-                                      variant="ghost"
-                                      className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 h-8"
-                                      onClick={() => {
-                                        navigator.clipboard.writeText(
-                                          String(children)
-                                        );
-                                      }}
-                                    >
-                                      <Copy className="h-4 w-4" />
-                                    </Button>
-                                  </div>
-                                );
-                              },
-                            }}
-                          >
-                            {message.content}
-                          </ReactMarkdown>
-                        </div>
+                        <>
+                          <div className="prose prose-sm dark:prose-invert max-w-none">
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              components={{
+                                code: ({ node, className, children, ...props }) => {
+                                  const match = /language-(\w+)/.exec(className || "");
+                                  const isInline = !match;
+                                  return isInline ? (
+                                    <code className={className} {...props}>
+                                      {children}
+                                    </code>
+                                  ) : (
+                                    <div className="relative group">
+                                      <pre className="!mt-0 !mb-0">
+                                        <code className={className} {...props}>
+                                          {children}
+                                        </code>
+                                      </pre>
+                                      <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 h-8"
+                                        onClick={() => {
+                                          navigator.clipboard.writeText(
+                                            String(children)
+                                          );
+                                        }}
+                                      >
+                                        <Copy className="h-4 w-4" />
+                                      </Button>
+                                    </div>
+                                  );
+                                },
+                              }}
+                            >
+                              {message.content}
+                            </ReactMarkdown>
+                          </div>
+
+                          {/* KG 增强:子图 + 来源 */}
+                          {message.kg?.subgraph && message.kg.subgraph.nodes.length > 0 && (
+                            <div className="mt-3 border border-slate-200 rounded-md bg-slate-50 overflow-hidden">
+                              <div className="text-xs text-slate-500 px-3 py-1.5 border-b bg-white flex items-center gap-1.5">
+                                <Brain className="h-3.5 w-3.5 text-violet-600" />
+                                图谱子图 ({message.kg.subgraph.nodes.length} 节点 / {message.kg.subgraph.edges.length} 关系)
+                              </div>
+                              <MiniGraph
+                                nodes={message.kg.subgraph.nodes}
+                                edges={message.kg.subgraph.edges}
+                                onNodeClick={(n) => setPopoverEntity(n.name)}
+                              />
+                            </div>
+                          )}
+
+                          {message.kg?.cited_entities && message.kg.cited_entities.length > 0 && (
+                            <div className="mt-2 text-xs text-slate-500">
+                              引用实体: {message.kg.cited_entities.join("、")}
+                            </div>
+                          )}
+                        </>
                       ) : (
                         <p className="whitespace-pre-wrap">{message.content}</p>
                       )}
@@ -406,6 +479,19 @@ export default function ChatPage() {
                   className="scale-90"
                 />
               </div>
+
+              <div className="flex items-center gap-2">
+                <Brain className="h-4 w-4 text-violet-600" />
+                <Label htmlFor="kg-mode" className="text-sm cursor-pointer">
+                  知识图谱
+                </Label>
+                <Switch
+                  id="kg-mode"
+                  checked={kgEnhanced}
+                  onCheckedChange={setKgEnhanced}
+                  className="scale-90"
+                />
+              </div>
             </div>
 
             {/* 输入框 */}
@@ -447,6 +533,19 @@ export default function ChatPage() {
           </div>
         </div>
       </div>
+
+      {/* 节点原文出处弹窗 */}
+      {popoverEntity && (
+        <EntitySourcePopover
+          entityName={popoverEntity}
+          onClose={() => setPopoverEntity(null)}
+          onJumpToArticle={(id) => {
+            const name = popoverEntity;
+            setPopoverEntity(null);
+            window.location.href = `/articles?highlight=${encodeURIComponent(name)}&article=${id}`;
+          }}
+        />
+      )}
     </div>
   );
 }

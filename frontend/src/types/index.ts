@@ -3,6 +3,8 @@
  * 内部使用 camelCase，与后端 API 交互时自动转换
  */
 
+import type { AnswerResponse } from "@/lib/api-kg";
+
 // ================================================
 // 对话相关类型
 // ================================================
@@ -13,6 +15,8 @@ export interface Message {
   role: "user" | "assistant" | "system";
   content: string;
   createdAt: Date;
+  /** KG 增强回答(开启知识图谱开关时填充) */
+  kg?: AnswerResponse;
   model?: string;
   attachments?: Attachment[];
   references?: Reference[];
