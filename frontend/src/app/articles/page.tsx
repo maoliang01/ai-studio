@@ -674,13 +674,14 @@ export default function ArticlesPage() {
                     <TableHead>文体</TableHead>
                     <TableHead className="w-[120px]">发布时间</TableHead>
                     <TableHead className="w-[200px]">原文信息</TableHead>
+                    <TableHead className="w-[130px]">KG 状态</TableHead>
                     <TableHead className="text-right">操作</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {articles.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={9} className="text-center text-muted-foreground">
+                      <TableCell colSpan={10} className="text-center text-muted-foreground">
                         暂无文章
                       </TableCell>
                     </TableRow>
@@ -761,6 +762,51 @@ export default function ArticlesPage() {
                         <TableCell className="text-sm text-muted-foreground" title={article.summary || ""}>
                           <div className="truncate max-w-[180px]">
                             {article.summary || article.content?.slice(0, 50) + "..." || "-"}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-1.5">
+                            {!article.kgStatus || article.kgStatus === "pending" ? (
+                              <Badge variant="outline" className="text-xs">待抽</Badge>
+                            ) : article.kgStatus === "processing" ? (
+                              <Badge variant="secondary" className="text-xs">
+                                <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                                抽取中
+                              </Badge>
+                            ) : article.kgStatus === "success" ? (
+                              <Badge variant="default" className="text-xs">已入图</Badge>
+                            ) : article.kgStatus === "failed" ? (
+                              <Badge variant="destructive" className="text-xs" title={article.kgErrorMessage || "抽取失败"}>
+                                失败
+                              </Badge>
+                            ) : (
+                              <Badge variant="outline" className="text-xs">跳过</Badge>
+                            )}
+                            {(article.kgStatus === "failed" || article.kgStatus === "pending" || article.kgStatus === "skipped") && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-6 px-2 text-xs"
+                                onClick={async (e) => {
+                                  e.stopPropagation();
+                                  try {
+                                    const res = await fetch(`/api/kg/reprocess/${article.id}`, { method: "POST" });
+                                    if (res.ok) {
+                                      toast.success("已加入重抽队列");
+                                      loadArticles(page);
+                                    } else {
+                                      const data = await res.json().catch(() => ({}));
+                                      toast.error(data.detail || "重抽失败");
+                                    }
+                                  } catch (err) {
+                                    toast.error("重抽失败,请检查后端");
+                                  }
+                                }}
+                                title="重新抽取知识图谱实体"
+                              >
+                                <RefreshCw className="w-3 h-3" />
+                              </Button>
+                            )}
                           </div>
                         </TableCell>
                         <TableCell className="text-right">

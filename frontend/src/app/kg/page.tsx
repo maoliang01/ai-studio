@@ -29,6 +29,7 @@ import {
   Star,
   X,
 } from "lucide-react";
+import { toast } from "sonner";
 
 interface GraphNode {
   id: string;
@@ -56,11 +57,35 @@ interface Stats {
   entities: number;
   article_entity_links: number;
   entity_relations: number;
+  entities_by_type?: Record<string, number>;
+  entities_by_subtype?: Record<string, number>;
+}
+
+interface SyncStatus {
+  by_status: {
+    pending: number;
+    processing: number;
+    success: number;
+    failed: number;
+    skipped: number;
+  };
+  total_in_db: number;
+  total_in_kg: number;
+  drift_detected: boolean;
+  sync_state: {
+    in_progress: boolean;
+    active_count: number;
+    total_processed: number;
+    total_failed: number;
+    started_at: string | null;
+    last_finished_at: string | null;
+  };
 }
 
 function KnowledgeGraphPageContent() {
   const [graphData, setGraphData] = useState<GraphData>({ nodes: [], edges: [] });
   const [stats, setStats] = useState<Stats | null>(null);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [health, setHealth] = useState<{ status: string; neo4j: { connected: boolean } } | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -107,6 +132,19 @@ function KnowledgeGraphPageContent() {
     }
   }, []);
 
+  // 加载同步状态(各 kg_status 计数 + 后台任务进度)
+  const loadSyncStatus = useCallback(async () => {
+    try {
+      const response = await fetch("/api/kg/sync-status");
+      const data = await response.json();
+      if (data.status === "success") {
+        setSyncStatus(data);
+      }
+    } catch (error) {
+      console.error("加载同步状态失败:", error);
+    }
+  }, []);
+
   // 加载健康状态
   const checkHealth = useCallback(async () => {
     try {
@@ -149,8 +187,31 @@ function KnowledgeGraphPageContent() {
   useEffect(() => {
     checkHealth();
     loadStats();
+    loadSyncStatus();
     loadGraphData();
-  }, [checkHealth, loadStats, loadGraphData]);
+  }, [checkHealth, loadStats, loadSyncStatus, loadGraphData]);
+
+  // 同步状态轮询:每 5s 拉一次,后台抽取进度 + stats 同步显示
+  // 后台有抽取任务时 → 抽取完毕(in_progress: true → false)自动刷新图谱
+  const prevInProgressRef = useRef(false);
+  useEffect(() => {
+    const id = setInterval(() => {
+      loadSyncStatus();
+      loadStats();
+    }, 5000);
+    return () => clearInterval(id);
+  }, [loadSyncStatus, loadStats]);
+
+  // 抽取完成时自动刷新图谱(从 in_progress=true → false)
+  useEffect(() => {
+    if (!syncStatus) return;
+    const wasInProgress = prevInProgressRef.current;
+    const isInProgress = syncStatus.sync_state.in_progress;
+    if (wasInProgress && !isInProgress) {
+      loadGraphData();
+    }
+    prevInProgressRef.current = isInProgress;
+  }, [syncStatus, loadGraphData]);
 
   // 处理 URL 参数中的 highlight
   useEffect(() => {
@@ -199,6 +260,7 @@ function KnowledgeGraphPageContent() {
         );
         loadGraphData();
         loadStats();
+        loadSyncStatus();
       }
     } catch (error) {
       console.error("批量处理失败:", error);
@@ -271,6 +333,8 @@ function KnowledgeGraphPageContent() {
     }
 
     // 节点颜色映射
+    // - 顶层用 entity_type 区分(PERSON/TECHNOLOGY 等)
+    // - 同一 type 下的不同 subtype 用同色系深浅区分(SCIENTIST 深,ENGINEER 浅)
     const colorMap: Record<string, string> = {
       Article: "#4f46e5",
       Entity: "#10b981",
@@ -280,6 +344,39 @@ function KnowledgeGraphPageContent() {
       TECHNOLOGY: "#ec4899",
       EVENT: "#ef4444",
       CONCEPT: "#06b6d4",
+      DATE: "#64748b",
+    };
+
+    // subtype 颜色变体(在主色基础上做深浅)
+    const subtypeShade = (baseColor: string, idx: number): string => {
+      // idx 0 = 主色; 1 = 浅; 2 = 深; 3 = 更浅
+      const shades: Record<number, string> = {
+        0: baseColor,
+        1: baseColor + "cc",
+        2: baseColor + "88",
+        3: baseColor + "55",
+      };
+      return shades[idx % 4] || baseColor;
+    };
+
+    // 节点填色:有 subtype 时按 subtype 哈希到 shade,无 subtype 用主色
+    const subtypeIndex: Record<string, number> = {};
+    let subtypeCounter = 0;
+    for (const n of nodes) {
+      if (n.type !== "Article") {
+        const st = (n.data as any)?.subtype;
+        if (st && !(st in subtypeIndex)) {
+          subtypeIndex[st] = subtypeCounter++ % 4;
+        }
+      }
+    }
+    const nodeFill = (d: GraphNode): string => {
+      const base = colorMap[d.type] || "#64748b";
+      const st = (d.data as any)?.subtype;
+      if (st && subtypeIndex[st] !== undefined) {
+        return subtypeShade(base, subtypeIndex[st]);
+      }
+      return base;
     };
 
     // 力导向模拟
@@ -310,7 +407,7 @@ function KnowledgeGraphPageContent() {
       .enter()
       .append("circle")
       .attr("r", (d: GraphNode) => d.type === "Article" ? 12 : 8)
-      .attr("fill", (d: GraphNode) => colorMap[d.type] || "#64748b")
+      .attr("fill", (d: GraphNode) => nodeFill(d))
       .attr("stroke", "#fff")
       .attr("stroke-width", (d: GraphNode) => highlightedNodeIds.has(d.id) ? 4 : 2)
       .attr("stroke-opacity", (d: GraphNode) => highlightedNodeIds.has(d.id) ? 1 : 0.6)
@@ -321,14 +418,20 @@ function KnowledgeGraphPageContent() {
         handleNodeClick(d);
       });
 
-    // 添加标签
+    // 添加标签(实体节点带 subtype 时,后面括号标注)
     const label = g
       .append("g")
       .selectAll("text")
       .data(nodes)
       .enter()
       .append("text")
-      .text((d: GraphNode) => d.label.substring(0, 20))
+      .text((d: GraphNode) => {
+        const st = (d.data as any)?.subtype;
+        if (st && d.type !== "Article") {
+          return `${d.label.substring(0, 12)}[${st}]`;
+        }
+        return d.label.substring(0, 20);
+      })
       .attr("font-size", 10)
       .attr("fill", "#475569")
       .attr("text-anchor", "middle")
@@ -463,6 +566,126 @@ function KnowledgeGraphPageContent() {
                 <div className="text-xs text-gray-500">实体关系</div>
               </div>
             </div>
+
+            {/* 实体按类型细分 */}
+            {stats.entities_by_type && Object.keys(stats.entities_by_type).length > 0 && (
+              <div className="mt-3">
+                <div className="text-[10px] text-gray-500 mb-1">实体类型分布</div>
+                <div className="space-y-1">
+                  {Object.entries(stats.entities_by_type)
+                    .sort(([, a], [, b]) => b - a)
+                    .map(([t, c]) => {
+                      const pct = stats.entities ? (c / stats.entities) * 100 : 0;
+                      const color =
+                        t === "PERSON" ? "#f59e0b" :
+                        t === "ORGANIZATION" ? "#3b82f6" :
+                        t === "LOCATION" ? "#8b5cf6" :
+                        t === "TECHNOLOGY" ? "#ec4899" :
+                        t === "EVENT" ? "#ef4444" :
+                        t === "CONCEPT" ? "#06b6d4" :
+                        t === "DATE" ? "#64748b" : "#10b981";
+                      return (
+                        <div key={t} className="flex items-center gap-2 text-xs">
+                          <div className="w-2 h-2 rounded-full shrink-0" style={{ background: color }} />
+                          <span className="text-gray-700 w-20 truncate">{t}</span>
+                          <div className="flex-1 h-1.5 bg-gray-100 rounded overflow-hidden">
+                            <div className="h-full" style={{ width: `${pct}%`, background: color }} />
+                          </div>
+                          <span className="text-gray-500 w-8 text-right">{c}</span>
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 同步状态面板(各 kg_status 计数 + 后台任务进度) */}
+        {syncStatus && (
+          <div className="p-4 border-b">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-medium">同步状态</span>
+              {syncStatus.sync_state.in_progress ? (
+                <span className="flex items-center gap-1 text-xs bg-amber-50 text-amber-700 px-2 py-0.5 rounded border border-amber-200">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  抽取中 ({syncStatus.sync_state.active_count})
+                </span>
+              ) : (
+                <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded">
+                  空闲
+                </span>
+              )}
+            </div>
+            <div className="grid grid-cols-5 gap-1 text-center text-xs">
+              <div className="bg-white p-2 rounded">
+                <div className="text-base font-semibold text-emerald-600">
+                  {syncStatus.by_status.success}
+                </div>
+                <div className="text-gray-500">已入图</div>
+              </div>
+              <div className="bg-white p-2 rounded">
+                <div className="text-base font-semibold text-amber-600">
+                  {syncStatus.by_status.pending}
+                </div>
+                <div className="text-gray-500">待抽</div>
+              </div>
+              <div className="bg-white p-2 rounded">
+                <div className="text-base font-semibold text-blue-600">
+                  {syncStatus.by_status.processing}
+                </div>
+                <div className="text-gray-500">抽中</div>
+              </div>
+              <div className="bg-white p-2 rounded">
+                <div className="text-base font-semibold text-red-600">
+                  {syncStatus.by_status.failed}
+                </div>
+                <div className="text-gray-500">失败</div>
+              </div>
+              <div className="bg-white p-2 rounded">
+                <div className="text-base font-semibold text-gray-500">
+                  {syncStatus.by_status.skipped}
+                </div>
+                <div className="text-gray-500">跳过</div>
+              </div>
+            </div>
+            {syncStatus.sync_state.total_processed > 0 && (
+              <div className="mt-2 text-[10px] text-gray-500 leading-tight">
+                本会话已处理 {syncStatus.sync_state.total_processed} 篇
+                {syncStatus.sync_state.total_failed > 0 &&
+                  `,失败 ${syncStatus.sync_state.total_failed} 篇`}
+                {syncStatus.sync_state.last_finished_at &&
+                  ` · 上次完成 ${new Date(syncStatus.sync_state.last_finished_at).toLocaleTimeString("zh-CN")}`}
+              </div>
+            )}
+            {(syncStatus.by_status.pending > 0 || syncStatus.by_status.skipped > 0) && (
+              <Button
+                size="sm"
+                className="w-full mt-2 h-7 text-xs bg-indigo-600 hover:bg-indigo-700"
+                disabled={syncStatus.sync_state.in_progress}
+                onClick={async () => {
+                  if (!confirm(`立即抽取 ${syncStatus.by_status.pending + syncStatus.by_status.skipped} 篇待抽文章?后台并发 3 个任务,每篇 0.5s 间隔。`)) return;
+                  try {
+                    const res = await fetch("/api/kg/process-pending?limit=200", { method: "POST" });
+                    const data = await res.json();
+                    if (data.status === "success") {
+                      toast.success(`已排入 ${data.scheduled} 个抽取任务(扫描 ${data.scanned} 篇)`);
+                      setTimeout(() => loadSyncStatus(), 500);
+                    } else {
+                      toast.error(data.detail || data.error || "启动失败");
+                    }
+                  } catch (e) {
+                    toast.error("启动失败: " + (e instanceof Error ? e.message : String(e)));
+                  }
+                }}
+              >
+                {syncStatus.sync_state.in_progress ? (
+                  <><Loader2 className="w-3 h-3 mr-1 animate-spin" />抽取中</>
+                ) : (
+                  <><Play className="w-3 h-3 mr-1" />立即抽取 ({syncStatus.by_status.pending + syncStatus.by_status.skipped})</>
+                )}
+              </Button>
+            )}
           </div>
         )}
 
@@ -650,30 +873,56 @@ function KnowledgeGraphPageContent() {
           )}
         </div>
 
-        {/* 图例 */}
-        <div className="h-10 border-t bg-white flex items-center px-4 gap-4">
-          <span className="text-xs text-gray-500">图例：</span>
+        {/* 图例 - 包含所有 entity_type 细分领域 */}
+        <div className="h-10 border-t bg-white flex items-center px-4 gap-4 overflow-x-auto">
+          <span className="text-xs text-gray-500 shrink-0">图例：</span>
           <div className="flex items-center gap-4">
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1 shrink-0">
               <div className="w-3 h-3 rounded-full bg-indigo-600" />
               <span className="text-xs">文章</span>
             </div>
-            <div className="flex items-center gap-1">
-              <div className="w-3 h-3 rounded-full bg-emerald-500" />
-              <span className="text-xs">实体</span>
-            </div>
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1 shrink-0">
               <div className="w-3 h-3 rounded-full bg-amber-500" />
               <span className="text-xs">人物</span>
             </div>
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1 shrink-0">
               <div className="w-3 h-3 rounded-full bg-blue-500" />
               <span className="text-xs">组织</span>
             </div>
-            <div className="flex items-center gap-1">
+            <div className="flex items-center gap-1 shrink-0">
+              <div className="w-3 h-3 rounded-full bg-violet-500" />
+              <span className="text-xs">地点</span>
+            </div>
+            <div className="flex items-center gap-1 shrink-0">
               <div className="w-3 h-3 rounded-full bg-pink-500" />
               <span className="text-xs">技术</span>
             </div>
+            <div className="flex items-center gap-1 shrink-0">
+              <div className="w-3 h-3 rounded-full bg-red-500" />
+              <span className="text-xs">事件</span>
+            </div>
+            <div className="flex items-center gap-1 shrink-0">
+              <div className="w-3 h-3 rounded-full bg-cyan-500" />
+              <span className="text-xs">概念</span>
+            </div>
+            <div className="flex items-center gap-1 shrink-0">
+              <div className="w-3 h-3 rounded-full bg-slate-500" />
+              <span className="text-xs">时间</span>
+            </div>
+            {stats?.entities_by_subtype && Object.keys(stats.entities_by_subtype).length > 0 && (
+              <>
+                <Separator orientation="vertical" className="h-4" />
+                <span className="text-xs text-gray-400 shrink-0">细分:</span>
+                {Object.entries(stats.entities_by_subtype)
+                  .sort(([, a], [, b]) => b - a)
+                  .slice(0, 8)
+                  .map(([sub, count]) => (
+                    <div key={sub} className="flex items-center gap-1 shrink-0">
+                      <span className="text-[10px] text-gray-500">{sub}({count})</span>
+                    </div>
+                  ))}
+              </>
+            )}
           </div>
         </div>
       </div>

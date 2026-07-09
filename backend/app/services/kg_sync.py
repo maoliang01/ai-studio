@@ -9,6 +9,7 @@
 """
 import asyncio
 import logging
+import threading
 from datetime import datetime
 
 from fastapi import BackgroundTasks
@@ -19,6 +20,39 @@ from app.models.article import Article
 from app.services.kg import Neo4jService, EntityExtractor
 
 logger = logging.getLogger("ai-studio")
+
+# 同步状态(供前端轮询)
+_sync_state = {
+    "in_progress": False,         # 是否有后台抽取任务正在跑
+    "active_count": 0,            # 当前并发任务数
+    "total_processed": 0,         # 本次启动以来已处理数
+    "total_failed": 0,            # 本次启动以来失败数
+    "started_at": None,           # 本次启动时间
+    "last_finished_at": None,     # 上次完成时间
+}
+_sync_state_lock = threading.Lock()
+
+
+def _set_in_progress(delta: int, success: bool = True) -> None:
+    """增减活跃任务计数;供前端 /api/kg/sync-status 读取"""
+    with _sync_state_lock:
+        _sync_state["active_count"] = max(0, _sync_state["active_count"] + delta)
+        if _sync_state["active_count"] > 0:
+            _sync_state["in_progress"] = True
+        else:
+            _sync_state["in_progress"] = False
+        if delta < 0:
+            if success:
+                _sync_state["total_processed"] += 1
+            else:
+                _sync_state["total_failed"] += 1
+            _sync_state["last_finished_at"] = datetime.utcnow().isoformat()
+
+
+def get_sync_state() -> dict:
+    """供前端轮询:取同步进度快照"""
+    with _sync_state_lock:
+        return dict(_sync_state)
 
 
 def build_neo4j() -> Neo4jService:
@@ -84,6 +118,17 @@ async def extract_and_link_entities(article_id: str) -> None:
     - 成功 → kg_status='success', kg_content_hash=current hash
     - 失败 → kg_status='failed', kg_error_message=错误
     """
+    _set_in_progress(1)
+    success = False
+    try:
+        await _extract_and_link_entities_inner(article_id)
+        success = True
+    finally:
+        _set_in_progress(-1, success=success)
+
+
+async def _extract_and_link_entities_inner(article_id: str) -> None:
+    """实际抽实体逻辑(被 extract_and_link_entities 包一层做状态计数)"""
     session = get_session_local()()
     try:
         article = session.query(Article).filter(Article.id == article_id).first()
@@ -185,6 +230,11 @@ async def process_pending_articles(
             await asyncio.sleep(rate_limit_seconds)
 
     tasks = [asyncio.create_task(_run_one(a)) for a in pending]
+
+    # 标记本次启动时间,供前端显示
+    with _sync_state_lock:
+        _sync_state["started_at"] = datetime.utcnow().isoformat()
+
     logger.info(f"process_pending_articles: 扫描 {len(pending)} 篇,启动 {len(tasks)} 个抽取任务")
 
     # 不 await tasks,让它们在后台跑

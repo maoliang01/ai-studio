@@ -555,6 +555,57 @@ async def delete_article_kg(article_id: str):
 
 # ============ KG ↔ 文档管理 一致性同步(新增) ============
 
+@router.get("/sync-status")
+async def get_sync_status(db: Session = Depends(get_db)):
+    """
+    同步状态总览(供前端轮询,建议每 5~10s 拉一次)
+    - by_status: 各 kg_status 的文章计数
+    - sync_state: 后台任务进度(in_progress、active_count、本次已处理 / 失败)
+    - drift: 数量对比(SQLite vs Neo4j)
+    """
+    try:
+        from sqlalchemy import func
+        from app.services.kg_sync import get_sync_state
+
+        # 1. 按 kg_status 统计(SQLite)
+        rows = db.query(Article.kg_status, func.count(Article.id)) \
+            .filter(Article.status == "success") \
+            .group_by(Article.kg_status).all()
+        by_status = {
+            (r[0] or "pending"): r[1] for r in rows
+        }
+        # 缺位补 0,统一六个 key
+        normalized = {
+            "pending": by_status.get("pending", 0) + by_status.get(None, 0),
+            "processing": by_status.get("processing", 0),
+            "success": by_status.get("success", 0),
+            "failed": by_status.get("failed", 0),
+            "skipped": by_status.get("skipped", 0),
+        }
+        total_in_db = sum(normalized.values())
+
+        # 2. Neo4j Article 数 + 漂移检测
+        neo4j = Neo4jService()
+        await neo4j.connect()
+        async with neo4j._driver.session() as s:
+            r = await s.run("MATCH (a:Article) RETURN count(a) AS c")
+            rec = await r.single()
+            total_in_kg = rec["c"] if rec else 0
+        await neo4j.close()
+
+        return {
+            "status": "success",
+            "by_status": normalized,
+            "total_in_db": total_in_db,
+            "total_in_kg": total_in_kg,
+            "drift_detected": total_in_db != total_in_kg,
+            "sync_state": get_sync_state(),
+        }
+    except Exception as e:
+        logger.error(f"获取同步状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/reconcile")
 async def reconcile_knowledge_graph(
     apply: bool = Query(default=False, description="是否自动修复"),
@@ -570,6 +621,29 @@ async def reconcile_knowledge_graph(
         return {"status": "success", **result}
     except Exception as e:
         logger.error(f"对账失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/process-pending")
+async def process_pending_articles_now(
+    limit: int = Query(default=200, ge=1, le=1000, description="最多处理多少篇"),
+    max_concurrency: int = Query(default=3, ge=1, le=10, description="并发数"),
+    db: Session = Depends(get_db)
+):
+    """
+    立即触发:把 kg_status in (NULL, 'pending', 'skipped') 的文章批量抽实体。
+    复用启动时的 process_pending_articles,带并发和限流,不会打爆 LLM。
+    """
+    try:
+        result = await kg_sync.process_pending_articles(
+            db=db,
+            max_concurrency=max_concurrency,
+            rate_limit_seconds=0.5,
+            limit=limit,
+        )
+        return {"status": "success", **result}
+    except Exception as e:
+        logger.error(f"立即抽取失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

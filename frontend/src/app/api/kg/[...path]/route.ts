@@ -45,16 +45,32 @@ export async function POST(
 ) {
   try {
     const { path } = await params;
-    const body = await request.json();
+    const { searchParams } = new URL(request.url);
+    const queryString = searchParams.toString();
+
+    // body 容错:前端调 reconcile/batch-process 时往往没有 body
+    let body: string | undefined;
+    const raw = await request.text();
+    if (raw) {
+      try {
+        JSON.parse(raw); // 校验 JSON 合法
+        body = raw;
+      } catch {
+        body = undefined; // 非 JSON 一律当空 body
+      }
+    }
 
     const backendPath = path.join("/");
-    const url = `${BACKEND_URL}/api/kg/${backendPath}`;
+    const baseUrl = `${BACKEND_URL}/api/kg/${backendPath}`;
+    const url = queryString ? `${baseUrl}?${queryString}` : baseUrl;
 
-    const res = await fetch(url, {
+    const fetchOpts: RequestInit = {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+      headers: body ? { "Content-Type": "application/json" } : {},
+    };
+    if (body) fetchOpts.body = body;
+
+    const res = await fetch(url, fetchOpts);
     const data = await res.json();
     return NextResponse.json(data);
   } catch (error) {

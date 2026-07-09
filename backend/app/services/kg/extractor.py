@@ -39,22 +39,35 @@ RELATION_TYPES = [
     "succeeds",     # 后于
 ]
 
+# 细分领域建议(LLM 可自由发挥,这里只做引导)
+SUBTYPE_GUIDE = {
+    "PERSON":      "SCIENTIST|ENGINEER|ACADEMIC|POLITICIAN|ENTREPRENEUR|WRITER|ARTIST|HISTORICAL|OTHER",
+    "ORGANIZATION": "COMPANY|RESEARCH_INST|UNIVERSITY|GOVERNMENT|INTERNATIONAL|NGO|OTHER",
+    "LOCATION":    "CITY|COUNTRY|REGION|BUILDING|ASTRONOMICAL|NATURAL|OTHER",
+    "TECHNOLOGY":  "AI_MODEL|ALGORITHM|PRODUCT|LANGUAGE|FRAMEWORK|TOOL|MATERIAL|BIOTECH|ENERGY|DEVICE|OTHER",
+    "EVENT":       "DISCOVERY|CONFERENCE|PUBLICATION|AWARD|AGREEMENT|DISASTER|CONFLICT|OTHER",
+    "CONCEPT":     "THEORY|LAW|METHOD|MODEL|SYSTEM|IDEA|DISCIPLINE|FIELD|OTHER",
+    "DATE":        "YEAR|MONTH|DAY|ERA|PERIOD|OTHER",
+}
+
 # 抽取提示词
 EXTRACTION_PROMPT = """你是一个知识图谱专家。请从以下文章中提取实体和关系。
 
 要求：
-1. 实体类型：{entity_types}
-2. 关系类型：{relation_types}
-3. 每个实体需要有：name（名称）、type（类型）、description（简要描述）
-4. 每个关系需要有：source（源实体）、target（目标实体）、rel_type（关系类型）
-5. 只提取文章中明确提到的实体和关系
-6. 实体名称要标准化（如"OpenAI"不写成"open ai"）
-7. 输出合法的 JSON 格式
+1. 实体类型(必填)：{entity_types}
+2. 细分类型 subtype(强烈建议,除非实在无法判断,可空字符串)：
+   {subtype_guide}
+3. 关系类型(必填)：{relation_types}
+4. 每个实体输出:name(名称)、type(类型)、subtype(细分类型)、description(简要描述)
+5. 每个关系输出:source(源实体)、target(目标实体)、rel_type(关系类型)
+6. 只提取文章中明确提到的实体和关系
+7. 实体名称要标准化(如 "OpenAI" 不写成 "open ai")
+8. subtype 用英文大写单词,不要用空格/中文
 
-输出格式：
+输出格式(JSON,严格遵守):
 {{
     "entities": [
-        {{"name": "实体名称", "type": "实体类型", "description": "简要描述"}}
+        {{"name": "实体名称", "type": "实体类型", "subtype": "细分类型", "description": "简要描述"}}
     ],
     "relations": [
         {{"source": "源实体", "target": "目标实体", "rel_type": "关系类型"}}
@@ -98,8 +111,12 @@ class EntityExtractor:
             logger.debug(f"内容过长，已截断至 {max_content_length} 字符")
 
         # 构建提示词
+        subtype_guide_str = "\n   ".join(
+            f"- {k}: {v}" for k, v in SUBTYPE_GUIDE.items()
+        )
         prompt = EXTRACTION_PROMPT.format(
             entity_types=", ".join(ENTITY_TYPES),
+            subtype_guide=subtype_guide_str,
             relation_types=", ".join(RELATION_TYPES),
             content=content
         )
@@ -156,10 +173,17 @@ class EntityExtractor:
                         }
                         entity_type = type_mapping.get(entity_type, "CONCEPT")
 
+                    # 标准化 subtype:大写、去空格、限长
+                    raw_subtype = (e.get("subtype") or "").strip()
+                    subtype = ""
+                    if raw_subtype:
+                        subtype = raw_subtype.upper().replace(" ", "_").replace("-", "_")[:32]
+
                     entities.append(EntityNode(
                         name=e["name"].strip(),
                         entity_type=entity_type,
-                        description=e.get("description", "").strip()
+                        description=e.get("description", "").strip(),
+                        subtype=subtype
                     ))
 
             # 解析关系

@@ -23,6 +23,7 @@ class EntityNode:
     name: str
     entity_type: str
     description: Optional[str] = None
+    subtype: Optional[str] = None
     properties: Optional[Dict[str, Any]] = None
 
 
@@ -136,9 +137,10 @@ class Neo4jService:
         self,
         name: str,
         entity_type: str,
-        description: Optional[str] = None
+        description: Optional[str] = None,
+        subtype: Optional[str] = None
     ) -> bool:
-        """创建实体节点"""
+        """创建实体节点(subtype 是 entity_type 之下的细分领域)"""
         if not self._driver:
             await self.connect()
 
@@ -147,6 +149,7 @@ class Neo4jService:
             MERGE (e:Entity {name: $name})
             SET e.entity_type = $entity_type,
                 e.description = $description,
+                e.subtype = $subtype,
                 e.updated_at = datetime()
             RETURN e
             """
@@ -154,7 +157,8 @@ class Neo4jService:
                 await session.run(query, {
                     "name": name,
                     "entity_type": entity_type,
-                    "description": description
+                    "description": description or "",
+                    "subtype": subtype or ""
                 })
                 return True
             except Exception as e:
@@ -242,7 +246,8 @@ class Neo4jService:
                 success = await self.create_entity_node(
                     name=entity.name,
                     entity_type=entity.entity_type,
-                    description=entity.description
+                    description=entity.description,
+                    subtype=entity.subtype
                 )
                 if success:
                     stats["entities_created"] += 1
@@ -346,7 +351,7 @@ class Neo4jService:
                 return {"nodes": [], "relations": []}
 
     async def get_graph_stats(self) -> Dict[str, int]:
-        """获取图谱统计信息"""
+        """获取图谱统计信息(含按 entity_type / subtype 分类)"""
         if not self._driver:
             await self.connect()
 
@@ -367,6 +372,34 @@ class Neo4jService:
                 except Exception as e:
                     logger.debug(f"统计查询 {key} 失败: {e}")
                     stats[key] = 0
+
+            # 按 entity_type 分组
+            try:
+                r = await session.run("""
+                    MATCH (e:Entity)
+                    WHERE e.entity_type IS NOT NULL AND e.entity_type <> ''
+                    RETURN e.entity_type AS t, count(e) AS c
+                    ORDER BY c DESC
+                """)
+                rows = await r.data()
+                stats["entities_by_type"] = {row["t"]: row["c"] for row in rows}
+            except Exception as e:
+                logger.debug(f"entities_by_type 统计失败: {e}")
+                stats["entities_by_type"] = {}
+
+            # 按 subtype 分组(细分领域)
+            try:
+                r = await session.run("""
+                    MATCH (e:Entity)
+                    WHERE e.subtype IS NOT NULL AND e.subtype <> ''
+                    RETURN e.subtype AS s, count(e) AS c
+                    ORDER BY c DESC
+                """)
+                rows = await r.data()
+                stats["entities_by_subtype"] = {row["s"]: row["c"] for row in rows}
+            except Exception as e:
+                logger.debug(f"entities_by_subtype 统计失败: {e}")
+                stats["entities_by_subtype"] = {}
 
             return stats
 
@@ -503,12 +536,16 @@ class Neo4jService:
                 return []
 
     async def export_graph_data(self, limit: int = 1000) -> Dict[str, Any]:
-        """导出图谱数据（用于可视化）"""
+        """导出图谱数据(用于可视化)
+        - 节点的 type 字段:Article 节点 → "Article";Entity 节点 → entity_type 属性
+          (这样前端 D3 的 colorMap 才会按 PERSON/TECHNOLOGY 等细分领域上色)
+        - subtype 作为细分领域,放进 data 里供前端展示
+        """
         if not self._driver:
             await self.connect()
 
         async with self._driver.session() as session:
-            # 导出节点
+            # 导出节点(同时取 entity_type 和 subtype)
             nodes_query = """
             MATCH (n) WHERE 'Article' IN labels(n) OR 'Entity' IN labels(n)
             RETURN n, labels(n) as labels
@@ -529,16 +566,25 @@ class Neo4jService:
                 edges_result = await session.run(edges_query, {"limit": limit})
                 edges_records = await edges_result.data()
 
-                # Neo4j 5.x 返回 dict 格式，需要手动处理
                 nodes = []
                 for record in nodes_records:
                     node_dict = record["n"]
                     labels = record["labels"]
+                    is_article = "Article" in labels
                     node_id = str(node_dict.get("id", "")) or node_dict.get("name", "")
+                    if is_article:
+                        # 文章节点:type 固定为 Article
+                        node_type = "Article"
+                    else:
+                        # 实体节点:用 entity_type 属性(细分到 PERSON/TECHNOLOGY 等)
+                        # 缺省回退到 label
+                        node_type = node_dict.get("entity_type") or (
+                            labels[0] if labels else "Entity"
+                        )
                     nodes.append({
                         "id": node_id,
                         "label": node_dict.get("title", "") or node_dict.get("name", ""),
-                        "type": labels[0] if labels else "Unknown",
+                        "type": node_type,
                         "data": node_dict
                     })
 
