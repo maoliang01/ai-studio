@@ -8,6 +8,7 @@ from app.services.kg import Neo4jService
 from app.services.kg.prompts import (
     EXTRACT_ENTITIES_FROM_QUESTION_PROMPT,
     SUBTYPE_GUIDE,
+    ANSWER_WITH_GRAPH_PROMPT,
 )
 
 logger = logging.getLogger("ai-studio")
@@ -108,3 +109,54 @@ async def fetch_subgraph(
         return {"nodes": list(nodes_set.values()), "edges": edges}
     finally:
         await neo4j.close()
+
+
+def _format_subgraph_as_context(subgraph: Dict[str, List]) -> str:
+    """把子图序列化成 LLM 可读的 context 文本"""
+    if not subgraph["nodes"]:
+        return "(无相关图谱事实)"
+    lines = [f"- {e['source']} --[{e['type']}]--> {e['target']}" for e in subgraph["edges"]]
+    return "\n".join(lines) if lines else "(实体存在,但无相关关系)"
+
+
+async def answer_question(
+    question: str,
+    model_id: str,
+    session_id: Optional[str] = None,
+    llm_caller: Optional[LlmCaller] = None,
+) -> Dict[str, Any]:
+    """完整问答流程"""
+    caller = llm_caller or _default_llm_caller
+
+    entities = await extract_entities_from_question(question, model_id, llm_caller=caller)
+    if not entities:
+        # 降级:走普通 LLM 回答
+        try:
+            fallback = await caller(question, model_id=model_id)
+        except Exception:
+            fallback = "抱歉,暂时无法回答。"
+        return {
+            "status": "degraded",
+            "answer": fallback,
+            "subgraph": None,
+            "sources": [],
+            "cited_entities": [],
+        }
+
+    entity_names = list({e["name"] for e in entities})
+    subgraph = await fetch_subgraph(entity_names, depth=2)
+    context = _format_subgraph_as_context(subgraph)
+    answer_prompt = ANSWER_WITH_GRAPH_PROMPT.format(context=context, question=question)
+    try:
+        answer = await caller(answer_prompt, model_id=model_id)
+    except Exception as e:
+        logger.error(f"qa: 答案生成失败: {e}")
+        answer = f"图谱检索成功,但生成回答时出错: {e}"
+
+    return {
+        "status": "ok",
+        "answer": answer,
+        "subgraph": subgraph,
+        "sources": [],
+        "cited_entities": entity_names,
+    }
