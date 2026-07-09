@@ -80,6 +80,17 @@ def run_migration():
         except (OperationalError, ProgrammingError) as e:
             logger.warning(f"回填 kg_content_hash 失败: {e}")
 
+        # 老文章的 kg_status 默认为 NULL,标为 pending 让启动钩子自动抽
+        try:
+            result = conn.execute(text("""
+                UPDATE articles
+                SET kg_status = 'pending'
+                WHERE kg_status IS NULL AND status = 'success'
+            """))
+            logger.info(f"回填 kg_status='pending' 完成,影响 {result.rowcount} 行")
+        except (OperationalError, ProgrammingError) as e:
+            logger.warning(f"回填 kg_status='pending' 失败: {e}")
+
     logger.info("迁移完成")
 
 

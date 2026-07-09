@@ -29,6 +29,22 @@ async def lifespan(app: FastAPI):
         import os
         interval = int(os.getenv("KG_RECONCILE_INTERVAL_MINUTES", "0"))
         register_kg_reconcile_job(_scheduler, interval_minutes=interval)
+
+        # 启动时自动处理 kg_status in (NULL, 'pending') 的老文章
+        from app.core.database import get_session_local
+        from app.services.kg_sync import process_pending_articles
+        SessionLocal = get_session_local()
+        session = SessionLocal()
+        try:
+            result = await process_pending_articles(session)
+            if result["scanned"] > 0:
+                logger.warning(
+                    f"⚠️  启动时发现 {result['scanned']} 篇待抽取文章,已排入后台队列({result['scheduled']} 个并发任务)"
+                )
+        except Exception as e:
+            logger.error(f"启动时 process_pending_articles 失败: {e}")
+        finally:
+            session.close()
     except Exception as e:
         logger.error(f"启动调度器失败: {e}")
 

@@ -153,6 +153,44 @@ async def extract_and_link_entities(article_id: str) -> None:
         session.close()
 
 
+async def process_pending_articles(
+    db: Session,
+    max_concurrency: int = 3,
+    rate_limit_seconds: float = 0.5,
+    limit: int = 200
+) -> dict:
+    """
+    启动时把 kg_status in (NULL, 'pending') 的文章批量抽实体。
+    限流: 同时最多 max_concurrency 个抽取,每篇间隔 rate_limit_seconds 秒。
+    防止 LLM 被瞬间打爆。
+    """
+    from app.models.article import Article
+
+    pending = db.query(Article).filter(
+        Article.status == "success",
+        (Article.kg_status.is_(None)) | (Article.kg_status.in_(["pending", "skipped"]))
+    ).limit(limit).all()
+
+    if not pending:
+        return {"scanned": 0, "scheduled": 0}
+
+    sem = asyncio.Semaphore(max_concurrency)
+
+    async def _run_one(a: Article):
+        async with sem:
+            try:
+                await extract_and_link_entities(a.id)
+            except Exception as e:
+                logger.error(f"process_pending_articles 抽 {a.id} 失败: {e}")
+            await asyncio.sleep(rate_limit_seconds)
+
+    tasks = [asyncio.create_task(_run_one(a)) for a in pending]
+    logger.info(f"process_pending_articles: 扫描 {len(pending)} 篇,启动 {len(tasks)} 个抽取任务")
+
+    # 不 await tasks,让它们在后台跑
+    return {"scanned": len(pending), "scheduled": len(tasks)}
+
+
 async def reconcile(apply: bool, db: Session) -> dict:
     """
     对账:对比 SQLite 与 Neo4j,发现漂移
