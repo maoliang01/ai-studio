@@ -50,7 +50,9 @@ interface GraphData {
 }
 
 interface Stats {
-  articles: number;
+  articles: number;          // Neo4j 中 Article 数
+  articles_in_db?: number;   // SQLite 中 success 文章数
+  drift_detected?: boolean;  // 数量不一致
   entities: number;
   article_entity_links: number;
   entity_relations: number;
@@ -398,6 +400,43 @@ function KnowledgeGraphPageContent() {
         {/* 统计信息 */}
         {stats && (
           <div className="p-4 border-b">
+            {/* 一致性同步(对账) */}
+            <div className="mb-3 flex items-center gap-2 text-sm">
+              <span className="text-gray-500">文档管理</span>
+              <span className="font-semibold">{stats.articles_in_db ?? "-"}</span>
+              <span className="text-gray-400">/</span>
+              <span className="text-gray-500">图谱</span>
+              <span className="font-semibold">{stats.articles}</span>
+              <span className="text-gray-400">篇</span>
+              {stats.drift_detected && (
+                <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded">漂移</span>
+              )}
+              <button
+                onClick={async () => {
+                  if (!confirm("是否自动修复漂移?点确定将自动补抽缺失文章、删除孤儿。")) return;
+                  try {
+                    const res = await fetch("/api/kg/reconcile?apply=true", { method: "POST" });
+                    const data = await res.json();
+                    alert(
+                      `对账结果:\n` +
+                      `  文档管理: ${data.sqlite_count}\n` +
+                      `  图谱: ${data.kg_count}\n` +
+                      `  缺失: ${data.missing_in_kg.length}\n` +
+                      `  孤儿: ${data.orphan_in_kg.length}\n` +
+                      `  脏数据: ${data.dirty_in_kg.length}` +
+                      (data.fixed ? `\n已修复: ${JSON.stringify(data.fixed)}` : "")
+                    );
+                    loadStats();
+                    loadGraphData();
+                  } catch (e) {
+                    alert("对账失败: " + e);
+                  }
+                }}
+                className="ml-auto text-xs bg-indigo-50 text-indigo-700 hover:bg-indigo-100 px-2 py-1 rounded border border-indigo-200"
+              >
+                对账
+              </button>
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="bg-white p-3 rounded-lg">
                 <div className="text-2xl font-bold text-indigo-600">

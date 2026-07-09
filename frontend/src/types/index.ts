@@ -138,6 +138,11 @@ export interface Article {
   keywords: string[];
   createdAt?: string;
   updatedAt?: string;
+  // 知识图谱同步状态
+  kgStatus?: "pending" | "processing" | "success" | "failed" | "skipped";
+  kgProcessedAt?: string;
+  kgContentHash?: string;
+  kgErrorMessage?: string;
 }
 
 /** 文章列表响应 */

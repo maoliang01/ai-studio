@@ -8,7 +8,7 @@ from datetime import datetime, date
 from typing import Optional, List
 from math import ceil
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from fastapi import APIRouter, Depends, HTTPException, Query, Body, BackgroundTasks
 from sqlalchemy import or_, func, text
 from sqlalchemy.orm import Session
 
@@ -18,6 +18,7 @@ from app.models.article import (
     Keyword, ArticleKeyword, ArticleLink
 )
 from app.services.scraper import ScrapedResult
+from app.services import kg_sync
 
 logger = logging.getLogger("ai-studio")
 
@@ -63,6 +64,11 @@ class ArticleBase:
             "created_at": article.created_at.isoformat() if article.created_at else None,
             "updated_at": article.updated_at.isoformat() if article.updated_at else None,
             "keywords": keywords,
+            # 知识图谱同步状态
+            "kg_status": article.kg_status,
+            "kg_processed_at": article.kg_processed_at.isoformat() if article.kg_processed_at else None,
+            "kg_content_hash": article.kg_content_hash,
+            "kg_error_message": article.kg_error_message,
         }
 
 
@@ -318,7 +324,11 @@ async def get_article(article_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("")
-async def create_article(request: dict, db: Session = Depends(get_db)):
+async def create_article(
+    request: dict,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
     """创建文章"""
     data = ArticleCreate.from_dict(request)
 
@@ -373,6 +383,9 @@ async def create_article(request: dict, db: Session = Depends(get_db)):
 
     logger.info(f"创建文章: id={article.id}, title={article.title[:50]}")
 
+    # 同步 KG(metadata + 后台抽实体)
+    await kg_sync.on_article_created(article, background_tasks)
+
     return ArticleBase.from_orm_with_keywords(article)
 
 
@@ -380,6 +393,7 @@ async def create_article(request: dict, db: Session = Depends(get_db)):
 async def update_article(
     article_id: str,
     request: dict,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
     """更新文章"""
@@ -431,6 +445,9 @@ async def update_article(
 
     logger.info(f"更新文章: id={article.id}")
 
+    # 同步 KG(metadata;若内容变了,kg_status 自动变 pending)
+    await kg_sync.on_article_updated(article, background_tasks)
+
     return ArticleBase.from_orm_with_keywords(article)
 
 
@@ -440,6 +457,12 @@ async def delete_article(article_id: str, db: Session = Depends(get_db)):
     article = db.query(Article).filter(Article.id == article_id).first()
     if not article:
         raise HTTPException(status_code=404, detail="文章不存在")
+
+    # 先删 KG(SQLite 删除后找不到 id)
+    try:
+        await kg_sync.on_article_deleted(article_id)
+    except Exception as e:
+        logger.warning(f"删除文章 {article_id} 的 KG 数据失败(继续删 SQLite): {e}")
 
     db.delete(article)
     db.commit()
@@ -465,7 +488,12 @@ async def batch_delete_articles(
         try:
             article = db.query(Article).filter(Article.id == article_id).first()
             if article:
-                # 先删除关联的关键词
+                # 先删 KG
+                try:
+                    await kg_sync.on_article_deleted(article_id)
+                except Exception as e:
+                    logger.warning(f"批量删除 {article_id} 的 KG 数据失败(继续): {e}")
+                # 再删除关联的关键词
                 db.query(ArticleKeyword).filter(
                     ArticleKeyword.article_id == article_id
                 ).delete()
@@ -491,6 +519,7 @@ async def batch_delete_articles(
 @router.post("/scrape-result")
 async def save_scrape_result(
     result: ScrapedResult,
+    background_tasks: BackgroundTasks,
     category_id: Optional[str] = Query(None, description="分类 ID"),
     source_id: Optional[str] = Query(None, description="来源 ID"),
     db: Session = Depends(get_db)
@@ -534,6 +563,12 @@ async def save_scrape_result(
         db.refresh(existing)
         logger.info(f"更新爬取结果: id={existing.id}, url={existing.url[:50]}")
 
+        # 同步 KG(metadata)
+        try:
+            await kg_sync.on_article_updated(existing, background_tasks)
+        except Exception as e:
+            logger.warning(f"更新爬取结果后 KG 同步失败(继续): {e}")
+
         return {"id": existing.id, "action": "updated"}
 
     # 创建新文章
@@ -556,12 +591,19 @@ async def save_scrape_result(
 
     logger.info(f"保存爬取结果: id={article.id}, url={article.url[:50]}")
 
+    # 同步 KG(metadata + 后台抽实体)
+    try:
+        await kg_sync.on_article_created(article, background_tasks)
+    except Exception as e:
+        logger.warning(f"保存爬取结果后 KG 同步失败(继续): {e}")
+
     return {"id": article.id, "action": "created"}
 
 
 @router.post("/batch")
 async def batch_save_articles(
     results: List[ScrapedResult],
+    background_tasks: BackgroundTasks,
     category_ids: Optional[List[str]] = Query(None, description="对应每个结果的分类 ID"),
     source_ids: Optional[List[str]] = Query(None, description="对应每个结果的来源 ID"),
     db: Session = Depends(get_db)
@@ -597,6 +639,21 @@ async def batch_save_articles(
             errors.append({"url": result.url, "error": str(e)})
 
     db.commit()
+
+    # 批量同步 KG(对刚创建/更新的文章)
+    try:
+        # 找刚才处理过的文章(按 url 列表)
+        url_list = [r.url for r in results]
+        if url_list:
+            processed = db.query(Article).filter(Article.url.in_(url_list)).all()
+            for art in processed:
+                if art.status == "success":
+                    try:
+                        await kg_sync.on_article_created(art, background_tasks)
+                    except Exception as e:
+                        logger.warning(f"批量保存 {art.id} 的 KG 同步失败(继续): {e}")
+    except Exception as e:
+        logger.warning(f"批量保存 KG 同步阶段失败(继续): {e}")
 
     logger.info(f"批量保存完成: 创建={created}, 更新={updated}, 错误={len(errors)}")
 

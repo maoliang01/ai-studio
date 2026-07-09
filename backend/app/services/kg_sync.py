@@ -1,0 +1,241 @@
+"""
+知识图谱同步服务
+
+把"文档管理 → 知识图谱"的所有动作集中编排,确保:
+- Article 节点 metadata 实时同步
+- 实体抽取异步,失败不阻塞 CRUD
+- 删除文章级联删 KG
+- 提供对账工具
+"""
+import asyncio
+import logging
+from datetime import datetime
+
+from fastapi import BackgroundTasks
+from sqlalchemy.orm import Session
+
+from app.core.database import get_session_local
+from app.models.article import Article
+from app.services.kg import Neo4jService, EntityExtractor
+
+logger = logging.getLogger("ai-studio")
+
+
+def build_neo4j() -> Neo4jService:
+    """构建 Neo4jService(可被 patch 注入)"""
+    return Neo4jService()
+
+
+async def on_article_created(article: Article, background_tasks: BackgroundTasks) -> None:
+    """文档管理新建文章后调用:同步 metadata + 排后台抽实体"""
+    neo4j = build_neo4j()
+    ok = await neo4j.upsert_article_metadata(
+        article_id=article.id,
+        title=article.title or "",
+        url=article.url or "",
+        summary=article.summary,
+        content_hash=article.content_hash,
+        kg_status=article.kg_status or "pending"
+    )
+    if not ok:
+        logger.warning(f"新建文章 {article.id} 时 Neo4j metadata 同步失败,后续 reconcile 兜底")
+    # 后台抽实体(失败由 kg_status='failed' 标记)
+    background_tasks.add_task(extract_and_link_entities, article.id)
+
+
+async def on_article_updated(article: Article, background_tasks: BackgroundTasks) -> None:
+    """
+    文档管理更新文章后调用:
+    - 始终同步 metadata
+    - 若 content_hash 变了(意味着内容改了),把 kg_status 改回 'pending',但不自动重抽
+    """
+    new_status = article.kg_status or "pending"
+    if (article.kg_content_hash
+            and article.content_hash
+            and article.kg_content_hash != article.content_hash):
+        new_status = "pending"
+
+    neo4j = build_neo4j()
+    ok = await neo4j.upsert_article_metadata(
+        article_id=article.id,
+        title=article.title or "",
+        url=article.url or "",
+        summary=article.summary,
+        content_hash=article.content_hash,
+        kg_status=new_status
+    )
+    if not ok:
+        logger.warning(f"更新文章 {article.id} 时 Neo4j metadata 同步失败")
+
+
+async def on_article_deleted(article_id: str) -> None:
+    """文档管理删除文章后调用:彻底删 KG Article 节点 + 边 + 孤儿实体"""
+    neo4j = build_neo4j()
+    ok = await neo4j.delete_article_full(article_id)
+    if not ok:
+        logger.error(f"删除文章 {article_id} 的 KG 数据失败,reconcile 会兜底")
+
+
+async def extract_and_link_entities(article_id: str) -> None:
+    """
+    抽取文章实体并写入 Neo4j
+    - 设置 kg_status='processing'
+    - 调用 EntityExtractor
+    - 成功 → kg_status='success', kg_content_hash=current hash
+    - 失败 → kg_status='failed', kg_error_message=错误
+    """
+    session = get_session_local()()
+    try:
+        article = session.query(Article).filter(Article.id == article_id).first()
+        if not article:
+            logger.warning(f"extract_and_link_entities: 文章 {article_id} 不存在")
+            return
+
+        article.kg_status = "processing"
+        session.commit()
+
+        content = article.content or article.summary or ""
+        if not content:
+            article.kg_status = "skipped"
+            article.kg_error_message = "内容为空,跳过抽取"
+            session.commit()
+            return
+
+        extractor = EntityExtractor()
+        result = await extractor.extract(content)
+        if result.error:
+            article.kg_status = "failed"
+            article.kg_error_message = result.error
+            session.commit()
+            logger.error(f"文章 {article_id} 实体抽取失败: {result.error}")
+            return
+
+        entities = extractor.deduplicate_entities(result.entities)
+        relations = result.relations
+
+        # 同步 metadata
+        neo4j = build_neo4j()
+        await neo4j.upsert_article_metadata(
+            article_id=article.id,
+            title=article.title or "",
+            url=article.url or "",
+            summary=article.summary,
+            content_hash=article.content_hash,
+            kg_status="success"
+        )
+
+        # 批量建实体 + 边
+        await neo4j.batch_create_entities_and_relations(
+            article_id=article.id,
+            entities=entities,
+            relations=relations
+        )
+
+        # SQLite 标 success
+        article.kg_status = "success"
+        article.kg_processed_at = datetime.utcnow()
+        article.kg_content_hash = article.content_hash
+        article.kg_error_message = None
+        session.commit()
+        logger.info(f"文章 {article_id} 实体抽取成功,entities={len(entities)}")
+
+    except Exception as e:
+        logger.exception(f"extract_and_link_entities 异常 {article_id}: {e}")
+        try:
+            article = session.query(Article).filter(Article.id == article_id).first()
+            if article:
+                article.kg_status = "failed"
+                article.kg_error_message = str(e)[:500]
+                session.commit()
+        except Exception:
+            session.rollback()
+    finally:
+        session.close()
+
+
+async def reconcile(apply: bool, db: Session) -> dict:
+    """
+    对账:对比 SQLite 与 Neo4j,发现漂移
+    apply=False: 仅返回统计,不修改
+    apply=True:  修复(missing → 异步抽; orphan → 删节点; dirty → 标 pending)
+    """
+    # 1. 取 SQLite 所有 success 文章
+    sqlite_articles = db.query(Article).filter(Article.status == "success").all()
+    sqlite_ids = {a.id for a in sqlite_articles}
+
+    neo4j = build_neo4j()
+
+    # 2. 找 Neo4j 中所有 Article.id
+    kg_ids = await _get_kg_article_ids(neo4j)
+
+    # 3. 计算三类漂移
+    missing_in_kg = list(sqlite_ids - kg_ids)  # SQLite 有,KG 无
+    orphan_in_kg = list(kg_ids - sqlite_ids)   # KG 有,SQLite 无
+
+    # 4. 找脏数据
+    kg_pairs = []
+    for art in sqlite_articles:
+        if art.id in missing_in_kg:
+            continue
+        kg_hash = await _get_kg_content_hash(neo4j, art.id)
+        kg_pairs.append((art.id, art.content_hash or "", kg_hash or ""))
+    dirty_in_kg = await neo4j.find_dirty_articles(kg_pairs)
+
+    result = {
+        "sqlite_count": len(sqlite_articles),
+        "kg_count": len(kg_ids - set(orphan_in_kg)),
+        "missing_in_kg": missing_in_kg,
+        "orphan_in_kg": orphan_in_kg,
+        "dirty_in_kg": dirty_in_kg,
+    }
+
+    if apply:
+        fixed = {
+            "missing_synced": 0,
+            "orphans_deleted": 0,
+            "dirty_marked": 0
+        }
+        # 1) 删孤儿
+        for aid in orphan_in_kg:
+            ok = await neo4j.delete_article_full(aid)
+            if ok:
+                fixed["orphans_deleted"] += 1
+        # 2) 标脏数据为 pending(等用户重抽)
+        for aid in dirty_in_kg:
+            art = db.query(Article).filter(Article.id == aid).first()
+            if art:
+                art.kg_status = "pending"
+                db.commit()
+                fixed["dirty_marked"] += 1
+        # 3) 异步补抽 missing
+        for aid in missing_in_kg:
+            art = db.query(Article).filter(Article.id == aid).first()
+            if art:
+                art.kg_status = "pending"
+                db.commit()
+                asyncio.create_task(extract_and_link_entities(aid))
+                fixed["missing_synced"] += 1
+        result["fixed"] = fixed
+
+    return result
+
+
+async def _get_kg_article_ids(neo4j: Neo4jService) -> set:
+    """取 Neo4j 中所有 Article.id"""
+    await neo4j.connect()
+    async with neo4j._driver.session() as session:
+        result = await session.run("MATCH (a:Article) RETURN a.id AS id")
+        records = await result.data()
+    return {r["id"] for r in records}
+
+
+async def _get_kg_content_hash(neo4j: Neo4jService, article_id: str) -> str:
+    """取 Neo4j 中某 Article 的 content_hash"""
+    await neo4j.connect()
+    async with neo4j._driver.session() as session:
+        r = await session.run(
+            "MATCH (a:Article {id: $id}) RETURN a.content_hash AS h",
+            id=article_id
+        )
+        rec = await r.single()
+        return rec["h"] if rec else ""

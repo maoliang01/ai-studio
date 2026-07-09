@@ -16,6 +16,7 @@ from app.models.article import Article
 from app.services.kg import Neo4jService, EntityExtractor, EmbeddingService
 from app.services.kg.graph import EntityNode, Relationship
 from app.services.kg.embedding import VectorStore
+from app.services import kg_sync
 
 logger = logging.getLogger("ai-studio")
 
@@ -76,12 +77,25 @@ async def init_knowledge_graph():
 
 @router.get("/stats")
 async def get_graph_stats():
-    """获取图谱统计信息"""
+    """获取图谱统计信息(含与 SQLite 的对账)"""
     try:
         neo4j = Neo4jService()
         await neo4j.connect()
         stats = await neo4j.get_graph_stats()
         await neo4j.close()
+
+        # 加上 SQLite 计数与漂移检测(以文档管理为最终口径)
+        from app.core.database import get_session_local
+        SessionLocal = get_session_local()
+        session = SessionLocal()
+        try:
+            db_count = session.query(Article).filter(Article.status == "success").count()
+        finally:
+            session.close()
+
+        stats["articles_in_db"] = db_count
+        kg_articles = stats.get("articles", 0)
+        stats["drift_detected"] = kg_articles != db_count
 
         return {
             "status": "success",
@@ -520,7 +534,7 @@ async def generate_vectors(
 
 @router.delete("/article/{article_id}")
 async def delete_article_kg(article_id: str):
-    """删除文章的图谱数据"""
+    """删除文章的图谱数据(保留 Article 节点,清实体关联)"""
     try:
         neo4j = Neo4jService()
         await neo4j.connect()
@@ -537,3 +551,101 @@ async def delete_article_kg(article_id: str):
     except Exception as e:
         logger.error(f"删除文章的图谱数据失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============ KG ↔ 文档管理 一致性同步(新增) ============
+
+@router.post("/reconcile")
+async def reconcile_knowledge_graph(
+    apply: bool = Query(default=False, description="是否自动修复"),
+    db: Session = Depends(get_db)
+):
+    """
+    对账:对比 SQLite 与 Neo4j
+    - apply=false: 仅返回漂移报告
+    - apply=true:  自动修复(missing → 异步抽; orphan → 删; dirty → 标 pending)
+    """
+    try:
+        result = await kg_sync.reconcile(apply=apply, db=db)
+        return {"status": "success", **result}
+    except Exception as e:
+        logger.error(f"对账失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/reprocess/{article_id}")
+async def reprocess_article(article_id: str):
+    """重抽单篇文章:清旧实体+关系,重新走 extract_and_link_entities"""
+    from app.core.database import get_session_local
+    SessionLocal = get_session_local()
+    session = SessionLocal()
+    try:
+        article = session.query(Article).filter(Article.id == article_id).first()
+        if not article:
+            raise HTTPException(status_code=404, detail="文章不存在")
+    finally:
+        session.close()
+
+    try:
+        # 清旧实体(彻底删 Article 节点 + 边 + 孤儿实体)
+        neo4j = Neo4jService()
+        await neo4j.connect()
+        await neo4j.delete_article_full(article_id)
+        await neo4j.close()
+
+        # 重置 SQLite 状态,让 extract_and_link_entities 重新走
+        article.kg_status = "pending"
+        article.kg_error_message = None
+        session.commit()
+        session.close()
+
+        # 重新抽取
+        await kg_sync.extract_and_link_entities(article_id)
+        return {"status": "success", "article_id": article_id, "message": "重抽完成"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"重抽失败 {article_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/article/{article_id}/status")
+async def get_article_kg_status(article_id: str, db: Session = Depends(get_db)):
+    """获取文章在 KG 中的状态(用于前端轮询)"""
+    article = db.query(Article).filter(Article.id == article_id).first()
+    if not article:
+        raise HTTPException(status_code=404, detail="文章不存在")
+
+    # 查询 Neo4j 实体 / 关系数
+    entity_count = 0
+    relation_count = 0
+    try:
+        neo4j = Neo4jService()
+        await neo4j.connect()
+        async with neo4j._driver.session() as session:
+            r1 = await session.run("""
+                MATCH (a:Article {id: $id})-[:CONTAINS_ENTITY]->(e:Entity)
+                RETURN count(e) AS c
+            """, id=article_id)
+            rec1 = await r1.single()
+            entity_count = rec1["c"] if rec1 else 0
+            r2 = await session.run("""
+                MATCH (a:Article {id: $id})-[:CONTAINS_ENTITY]->(e1:Entity)
+                      (e1)-[r:RELATES_TO]->(e2:Entity)
+                RETURN count(r) AS c
+            """, id=article_id)
+            rec2 = await r2.single()
+            relation_count = rec2["c"] if rec2 else 0
+        await neo4j.close()
+    except Exception as e:
+        logger.warning(f"查询 KG 实体/关系数失败 {article_id}: {e}")
+
+    return {
+        "status": "success",
+        "article_id": article_id,
+        "kg_status": article.kg_status,
+        "kg_processed_at": article.kg_processed_at.isoformat() if article.kg_processed_at else None,
+        "kg_error_message": article.kg_error_message,
+        "entity_count": entity_count,
+        "relation_count": relation_count
+    }

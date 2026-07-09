@@ -21,9 +21,14 @@ async def lifespan(app: FastAPI):
     # 启动时
     logger.info("应用启动中...")
     try:
-        from app.core.scheduler import init_scheduler
+        from app.core.scheduler import init_scheduler, register_kg_reconcile_job
         _scheduler = init_scheduler()
         logger.info("定时任务调度器已启动")
+
+        # 注册 KG 定时对账(默认关闭,从环境变量 KG_RECONCILE_INTERVAL_MINUTES 读取)
+        import os
+        interval = int(os.getenv("KG_RECONCILE_INTERVAL_MINUTES", "0"))
+        register_kg_reconcile_job(_scheduler, interval_minutes=interval)
     except Exception as e:
         logger.error(f"启动调度器失败: {e}")
 

@@ -390,6 +390,118 @@ class Neo4jService:
                 logger.error(f"删除文章知识图谱失败: {e}")
                 return False
 
+    async def upsert_article_metadata(
+        self,
+        article_id: str,
+        title: str,
+        url: str,
+        summary: Optional[str],
+        content_hash: Optional[str],
+        kg_status: str
+    ) -> bool:
+        """同步 Article 节点 metadata,不触发实体抽取"""
+        if not self._driver:
+            await self.connect()
+
+        async with self._driver.session() as session:
+            query = """
+            MERGE (a:Article {id: $article_id})
+            SET a.title = $title,
+                a.url = $url,
+                a.summary = $summary,
+                a.content_hash = $content_hash,
+                a.kg_status = $kg_status,
+                a.updated_at = datetime()
+            RETURN a
+            """
+            try:
+                await session.run(query, {
+                    "article_id": article_id,
+                    "title": title,
+                    "url": url,
+                    "summary": summary or "",
+                    "content_hash": content_hash or "",
+                    "kg_status": kg_status
+                })
+                return True
+            except Exception as e:
+                logger.error(f"upsert_article_metadata 失败 {article_id}: {e}")
+                return False
+
+    async def delete_article_full(self, article_id: str) -> bool:
+        """彻底删除:Article 节点 + CONTAINS_ENTITY 边 + 不再被引用的 Entity"""
+        if not self._driver:
+            await self.connect()
+
+        async with self._driver.session() as session:
+            # 1) 拿到这篇文章关联的实体列表
+            # 2) 删 Article 节点及其 CONTAINS_ENTITY 边
+            # 3) 对每个曾被引用的 Entity,若不再被任何 Article 引用 → 删 Entity
+            query = """
+            MATCH (a:Article {id: $article_id})
+            OPTIONAL MATCH (a)-[r:CONTAINS_ENTITY]->(e:Entity)
+            WITH a, collect(DISTINCT e) AS entities
+            DETACH DELETE a
+            WITH entities
+            UNWIND entities AS e
+            WITH e
+            WHERE e IS NOT NULL AND NOT (e)<-[:CONTAINS_ENTITY]-()
+            DETACH DELETE e
+            """
+            try:
+                await session.run(query, {"article_id": article_id})
+                return True
+            except Exception as e:
+                logger.error(f"delete_article_full 失败 {article_id}: {e}")
+                return False
+
+    async def find_orphan_articles(self, sqlite_ids: set) -> list:
+        """返回 Neo4j 中存在但不在 sqlite_ids 集合的 Article.id"""
+        if not self._driver:
+            await self.connect()
+
+        if not sqlite_ids:
+            sqlite_ids = {"__empty__"}  # 避免空集合 Cypher 报错
+
+        async with self._driver.session() as session:
+            query = """
+            MATCH (a:Article)
+            WHERE NOT a.id IN $sqlite_ids
+            RETURN a.id AS id
+            """
+            try:
+                result = await session.run(query, {"sqlite_ids": list(sqlite_ids)})
+                records = await result.data()
+                return [r["id"] for r in records]
+            except Exception as e:
+                logger.error(f"find_orphan_articles 失败: {e}")
+                return []
+
+    async def find_dirty_articles(self, article_pairs: list) -> list:
+        """
+        入参: [(article_id, sqlite_hash, kg_hash), ...]
+        返回: sqlite_hash != kg_hash 的 article_id 列表
+        """
+        if not self._driver:
+            await self.connect()
+
+        async with self._driver.session() as session:
+            query = """
+            UNWIND $pairs AS p
+            MATCH (a:Article {id: p[0]})
+            WHERE a.content_hash IS NULL OR a.content_hash <> p[1]
+            RETURN a.id AS id
+            """
+            try:
+                result = await session.run(query, {
+                    "pairs": [[aid, sh, kh] for aid, sh, kh in article_pairs]
+                })
+                records = await result.data()
+                return [r["id"] for r in records]
+            except Exception as e:
+                logger.error(f"find_dirty_articles 失败: {e}")
+                return []
+
     async def export_graph_data(self, limit: int = 1000) -> Dict[str, Any]:
         """导出图谱数据（用于可视化）"""
         if not self._driver:

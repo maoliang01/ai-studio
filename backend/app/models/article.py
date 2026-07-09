@@ -151,6 +151,14 @@ class Article(Base):
     )
     error_message: Mapped[Optional[str]] = mapped_column(Text)
 
+    # 知识图谱同步状态(kg_status: pending / processing / success / failed / skipped)
+    kg_status: Mapped[str] = mapped_column(
+        String(20), default="pending", index=True
+    )
+    kg_processed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    kg_content_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    kg_error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     # 版本控制
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -181,6 +189,7 @@ class Article(Base):
         Index("idx_articles_category", "category_id"),
         Index("idx_articles_source", "source_id"),
         Index("idx_articles_scraped_at", "scraped_at"),
+        Index("idx_articles_kg_status", "kg_status"),
     )
 
     def calculate_content_hash(self) -> str:
