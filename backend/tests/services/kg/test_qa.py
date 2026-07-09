@@ -51,3 +51,40 @@ async def test_extract_entities_handles_failure():
         raise RuntimeError("boom")
     result = await extract_entities_from_question("?", model_id="x", llm_caller=mock_llm)
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_extract_entities_handles_markdown_code_fence():
+    """LLM 把 JSON 包在 ```json ... ``` 里,解析器应能识别"""
+    async def mock_llm(prompt, **kwargs):
+        return (
+            "<think>用户在问 OpenAI</think>\n\n"
+            "```json\n"
+            '[{"name": "OpenAI", "type": "ORGANIZATION", "subtype": "COMPANY"}]\n'
+            "```"
+        )
+    result = await extract_entities_from_question(
+        "OpenAI 啥时候成立?", model_id="x", llm_caller=mock_llm
+    )
+    assert len(result) == 1
+    assert result[0]["name"] == "OpenAI"
+    assert result[0]["type"] == "ORGANIZATION"
+
+
+@pytest.mark.asyncio
+async def test_extract_entities_handles_think_tags_and_markdown():
+    """带 <think> 标签和 markdown code fence 的真实 LLM 输出"""
+    async def mock_llm(prompt, **kwargs):
+        return (
+            "用户问题包含" + "习近平" + "。\n"
+            "<think>这是一个人名</think>\n\n"
+            "```json\n"
+            '[{"name": "' + "习近平" + '", "type": "PERSON", "subtype": "POLITICIAN"}]\n'
+            "```"
+        )
+    result = await extract_entities_from_question(
+        "习近平", model_id="x", llm_caller=mock_llm
+    )
+    assert len(result) == 1
+    assert result[0]["name"] == "习近平"
+    assert result[0]["type"] == "PERSON"

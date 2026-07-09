@@ -31,16 +31,32 @@ async def _default_llm_caller(prompt: str, model_id: str, **kwargs) -> str:
 
 
 def _parse_json_array(text: str) -> List[Dict[str, Any]]:
-    """从 LLM 输出中抠出 JSON 数组(允许前后有杂字)"""
-    m = re.search(r"\[\s*[\s\S]*?\]\s*$", text.strip())
+    """从 LLM 输出中抠出 JSON 数组。
+
+    LLM 实际输出形态多样:
+    - 裸 JSON: `[{"name": "X", ...}]`
+    - 包在 markdown code fence: ```json\n[...]\n```
+    - 带 <think>...</think> 推理标签
+    - 前后有零散解释文字
+    """
+    if not text:
+        return []
+    cleaned = text.strip()
+    # 去掉 <think>...</think> 推理段
+    cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL)
+    # 去掉 markdown code fence 标记(```json 或 ```)
+    cleaned = re.sub(r"```(?:json|JSON)?\s*", "", cleaned)
+    cleaned = cleaned.replace("```", "")
+    # 找第一个 `[` 到最后一个 `]` 之间的内容(允许多行,允许内部有空格)
+    m = re.search(r"\[\s*[\s\S]*\]", cleaned)
     if not m:
         return []
     try:
         data = json.loads(m.group(0))
-        return [d for d in data if isinstance(d, dict) and d.get("name")]
     except (json.JSONDecodeError, ValueError):
         logger.warning(f"qa: 无法解析 LLM 输出: {text[:200]}")
         return []
+    return [d for d in data if isinstance(d, dict) and d.get("name")]
 
 
 async def extract_entities_from_question(
