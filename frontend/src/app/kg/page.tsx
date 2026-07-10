@@ -433,7 +433,7 @@ function KnowledgeGraphPageContent() {
         handleNodeClick(d);
       });
 
-    // 添加标签(实体节点带 subtype 时,后面括号标注)
+    // 添加标签(实体节点带 subtype 时,后面括号标注中文)
     const label = g
       .append("g")
       .selectAll("text")
@@ -443,7 +443,8 @@ function KnowledgeGraphPageContent() {
       .text((d: GraphNode) => {
         const st = (d.data as any)?.subtype;
         if (st && d.type !== "Article") {
-          return `${d.label.substring(0, 12)}[${st}]`;
+          const stLabel = SUBTYPE_LABELS[st] || st;
+          return `${d.label.substring(0, 12)}[${stLabel}]`;
         }
         return d.label.substring(0, 20);
       })
@@ -488,7 +489,73 @@ function KnowledgeGraphPageContent() {
     };
   }, [graphData, entityTypeFilter, highlightedNodeIds]);
 
-  // 获取唯一实体类型
+  // 实体类型中英文映射
+  const ENTITY_TYPE_LABELS: Record<string, string> = {
+    Article: "文章",
+    PERSON: "人物",
+    ORGANIZATION: "组织",
+    LOCATION: "地点",
+    TECHNOLOGY: "技术",
+    EVENT: "事件",
+    CONCEPT: "概念",
+    DATE: "时间",
+  };
+
+  const SUBTYPE_LABELS: Record<string, string> = {
+    SCIENTIST: "科学家",
+    ENGINEER: "工程师",
+    ACADEMIC: "学者",
+    POLITICIAN: "政治家",
+    ENTREPRENEUR: "企业家",
+    WRITER: "作家",
+    ARTIST: "艺术家",
+    HISTORICAL: "历史人物",
+    COMPANY: "公司",
+    RESEARCH_INST: "研究机构",
+    UNIVERSITY: "大学",
+    GOVERNMENT: "政府",
+    INTERNATIONAL: "国际组织",
+    NGO: "NGO",
+    CITY: "城市",
+    COUNTRY: "国家",
+    REGION: "地区",
+    BUILDING: "建筑",
+    ASTRONOMICAL: "天文",
+    NATURAL: "自然",
+    AI_MODEL: "AI 模型",
+    ALGORITHM: "算法",
+    PRODUCT: "产品",
+    LANGUAGE: "编程语言",
+    FRAMEWORK: "框架",
+    TOOL: "工具",
+    MATERIAL: "材料",
+    BIOTECH: "生物技术",
+    ENERGY: "能源",
+    DEVICE: "设备",
+    DISCOVERY: "发现",
+    CONFERENCE: "会议",
+    PUBLICATION: "出版物",
+    AWARD: "奖项",
+    AGREEMENT: "协议",
+    DISASTER: "灾害",
+    CONFLICT: "冲突",
+    THEORY: "理论",
+    LAW: "定律",
+    METHOD: "方法",
+    MODEL: "模型",
+    SYSTEM: "系统",
+    IDEA: "思想",
+    DISCIPLINE: "学科",
+    FIELD: "领域",
+    YEAR: "年",
+    MONTH: "月",
+    DAY: "日",
+    ERA: "时代",
+    PERIOD: "时期",
+    OTHER: "其他",
+  };
+
+  // 获取唯一实体类型(带中文显示)
   const entityTypes = [...new Set(graphData.nodes.map((n) => n.type))];
 
   return (
@@ -735,7 +802,7 @@ function KnowledgeGraphPageContent() {
                 >
                   <div className="font-medium text-sm">{entity.name}</div>
                   <Badge variant="secondary" className="text-xs mt-1">
-                    {entity.entity_type}
+                    {ENTITY_TYPE_LABELS[entity.entity_type] || entity.entity_type}
                   </Badge>
                 </div>
               ))}
@@ -764,7 +831,7 @@ function KnowledgeGraphPageContent() {
                 variant={entityTypeFilter === type ? "default" : "outline"}
                 onClick={() => setEntityTypeFilter(type)}
               >
-                {type}
+                {ENTITY_TYPE_LABELS[type] || type}
               </Button>
             ))}
           </div>
@@ -821,7 +888,7 @@ function KnowledgeGraphPageContent() {
                 </div>
                 <div>
                   <div className="text-xs text-gray-500">类型</div>
-                  <Badge>{selectedNode.type}</Badge>
+                  <Badge>{ENTITY_TYPE_LABELS[selectedNode.type] || selectedNode.type}</Badge>
                 </div>
                 {selectedNode.data?.description && (
                   <div>
@@ -933,7 +1000,7 @@ function KnowledgeGraphPageContent() {
                   .slice(0, 8)
                   .map(([sub, count]) => (
                     <div key={sub} className="flex items-center gap-1 shrink-0">
-                      <span className="text-[10px] text-gray-500">{sub}({count})</span>
+                      <span className="text-[10px] text-gray-500">{SUBTYPE_LABELS[sub] || sub}({count})</span>
                     </div>
                   ))}
               </>

@@ -11,6 +11,70 @@ interface Props {
   onJumpToArticle?: (articleId: string) => void;
 }
 
+const ENTITY_TYPE_LABELS: Record<string, string> = {
+  PERSON: "人物",
+  ORGANIZATION: "组织",
+  LOCATION: "地点",
+  TECHNOLOGY: "技术",
+  EVENT: "事件",
+  CONCEPT: "概念",
+  DATE: "时间",
+};
+
+const SUBTYPE_LABELS: Record<string, string> = {
+  SCIENTIST: "科学家",
+  ENGINEER: "工程师",
+  ACADEMIC: "学者",
+  POLITICIAN: "政治家",
+  ENTREPRENEUR: "企业家",
+  WRITER: "作家",
+  ARTIST: "艺术家",
+  HISTORICAL: "历史人物",
+  COMPANY: "公司",
+  RESEARCH_INST: "研究机构",
+  UNIVERSITY: "大学",
+  GOVERNMENT: "政府",
+  INTERNATIONAL: "国际组织",
+  NGO: "NGO",
+  CITY: "城市",
+  COUNTRY: "国家",
+  REGION: "地区",
+  BUILDING: "建筑",
+  ASTRONOMICAL: "天文",
+  NATURAL: "自然",
+  AI_MODEL: "AI 模型",
+  ALGORITHM: "算法",
+  PRODUCT: "产品",
+  LANGUAGE: "编程语言",
+  FRAMEWORK: "框架",
+  TOOL: "工具",
+  MATERIAL: "材料",
+  BIOTECH: "生物技术",
+  ENERGY: "能源",
+  DEVICE: "设备",
+  DISCOVERY: "发现",
+  CONFERENCE: "会议",
+  PUBLICATION: "出版物",
+  AWARD: "奖项",
+  AGREEMENT: "协议",
+  DISASTER: "灾害",
+  CONFLICT: "冲突",
+  THEORY: "理论",
+  LAW: "定律",
+  METHOD: "方法",
+  MODEL: "模型",
+  SYSTEM: "系统",
+  IDEA: "思想",
+  DISCIPLINE: "学科",
+  FIELD: "领域",
+  YEAR: "年",
+  MONTH: "月",
+  DAY: "日",
+  ERA: "时代",
+  PERIOD: "时期",
+  OTHER: "其他",
+};
+
 const colorMap: Record<string, string> = {
   PERSON: "bg-emerald-100 text-emerald-700",
   ORGANIZATION: "bg-blue-100 text-blue-700",
@@ -55,7 +119,8 @@ export default function EntitySourcePopover({ entityName, onClose, onJumpToArtic
             <h3 className="font-semibold text-slate-800">{entityName}</h3>
             {data?.entity?.type && (
               <Badge className={colorMap[data.entity.type] || "bg-slate-100 text-slate-700"}>
-                {data.entity.type}{data.entity.subtype ? ` · ${data.entity.subtype}` : ""}
+                {ENTITY_TYPE_LABELS[data.entity.type] || data.entity.type}
+                {data.entity.subtype ? ` · ${SUBTYPE_LABELS[data.entity.subtype] || data.entity.subtype}` : ""}
               </Badge>
             )}
           </div>
