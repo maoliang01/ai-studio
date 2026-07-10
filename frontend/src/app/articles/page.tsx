@@ -102,9 +102,11 @@ export default function ArticlesPage() {
   const [checkingDb, setCheckingDb] = useState(true);
 
   // 来自 ?article=ID 自动打开文章
+  // 注意:不把 selectedArticle 放进依赖,否则关闭弹窗 (selectedArticle→null) 会触发
+  // effect 重新执行 → 再 fetch 一次 → 弹窗立刻又弹开。
+  // URL 是"加载哪篇文章"的唯一真相,articleIdFromUrl 变化时才重新拉取。
   useEffect(() => {
     if (!articleIdFromUrl) return;
-    if (selectedArticle?.id === articleIdFromUrl) return;
     let cancelled = false;
     fetch(`/api/articles/${articleIdFromUrl}`)
       .then((r) => r.json())
@@ -117,7 +119,7 @@ export default function ArticlesPage() {
     return () => {
       cancelled = true;
     };
-  }, [articleIdFromUrl, selectedArticle]);
+  }, [articleIdFromUrl]);
 
   // KG 实体高亮:监听 ?highlight=XXX (依赖 selectedArticle 以确保 DOM 已挂载)
   useEffect(() => {
