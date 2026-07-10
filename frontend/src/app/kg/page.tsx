@@ -666,10 +666,11 @@ function KnowledgeGraphPageContent() {
                         t === "EVENT" ? "#ef4444" :
                         t === "CONCEPT" ? "#06b6d4" :
                         t === "DATE" ? "#64748b" : "#10b981";
+                      const label = ENTITY_TYPE_LABELS[t] || t;
                       return (
                         <div key={t} className="flex items-center gap-2 text-xs">
                           <div className="w-2 h-2 rounded-full shrink-0" style={{ background: color }} />
-                          <span className="text-gray-700 w-20 truncate">{t}</span>
+                          <span className="text-gray-700 w-20 truncate">{label}</span>
                           <div className="flex-1 h-1.5 bg-gray-100 rounded overflow-hidden">
                             <div className="h-full" style={{ width: `${pct}%`, background: color }} />
                           </div>
