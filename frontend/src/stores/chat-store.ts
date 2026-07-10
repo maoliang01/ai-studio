@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { subscribeWithSelector } from "zustand/middleware";
+import { createJSONStorage, persist, subscribeWithSelector } from "zustand/middleware";
 import type { ChatSession, Message, ModelConfigAPI } from "@/types";
 import { sendChat, streamChat } from "@/lib/api";
 import { useSettingsStore } from "./settings-store";
@@ -57,7 +57,8 @@ interface ChatStore {
 }
 
 export const useChatStore = create<ChatStore>()(
-  subscribeWithSelector((set, get) => ({
+  persist(
+    subscribeWithSelector((set, get) => ({
     sessions: [],
     currentSessionId: null,
     models: [],
@@ -371,7 +372,20 @@ export const useChatStore = create<ChatStore>()(
         isInitialized: true,
       });
     },
-  }))
+  })),
+    {
+      name: "chat-store",
+      storage: createJSONStorage(() => localStorage),
+      // 只持久化用户可见的状态,排除瞬态字段(isStreaming/isLoading/error/abortController/models 等)
+      partialize: (state) =>
+        ({
+          sessions: state.sessions,
+          currentSessionId: state.currentSessionId,
+          selectedModel: state.selectedModel,
+          kgEnhanced: state.kgEnhanced,
+        }) as Partial<ChatStore>,
+    }
+  )
 );
 
 // 监听 settingsStore.models 的变化，自动更新 chatStore
