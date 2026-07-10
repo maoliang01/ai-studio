@@ -18,6 +18,7 @@ export interface SourceArticle {
   title: string;
   snippet: string;
   highlight_positions: [number, number][];
+  entity_name?: string;
 }
 
 export interface EntityInfo {

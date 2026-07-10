@@ -81,6 +81,21 @@ export default function ChatPage() {
 
   const currentSession = sessions.find((s) => s.id === currentSessionId);
 
+  // 在文章片段中内联高亮实体名
+  function highlightSnippet(snippet: string, entityName: string) {
+    if (!snippet || !entityName) return snippet;
+    const parts = snippet.split(new RegExp(`(${entityName})`, "gi"));
+    return parts.map((p, i) =>
+      p.toLowerCase() === entityName.toLowerCase() ? (
+        <mark key={i} className="bg-yellow-200 px-0.5 rounded">
+          {p}
+        </mark>
+      ) : (
+        <span key={i}>{p}</span>
+      ),
+    );
+  }
+
   // 自动滚动到底部
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -361,6 +376,48 @@ export default function ChatPage() {
                           {message.kg?.cited_entities && message.kg.cited_entities.length > 0 && (
                             <div className="mt-2 text-xs text-slate-500">
                               引用实体: {message.kg.cited_entities.join("、")}
+                            </div>
+                          )}
+
+                          {/* KG 增强:引用文章列表(点击跳转高亮) */}
+                          {message.kg?.sources && message.kg.sources.length > 0 && (
+                            <div className="mt-3 border border-slate-200 rounded-md bg-white overflow-hidden">
+                              <div className="text-xs text-slate-500 px-3 py-1.5 border-b bg-slate-50 flex items-center gap-1.5">
+                                <BookOpen className="h-3.5 w-3.5 text-blue-600" />
+                                引用文章 ({message.kg.sources.length})
+                              </div>
+                              <div className="divide-y divide-slate-100">
+                                {message.kg.sources.map((s, i) => (
+                                  <a
+                                    key={s.article_id}
+                                    href={`/articles?highlight=${encodeURIComponent(
+                                      s.entity_name || message.kg!.cited_entities[0] || "",
+                                    )}&article=${s.article_id}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="block px-3 py-2 hover:bg-blue-50 transition group"
+                                  >
+                                    <div className="flex items-start justify-between gap-2">
+                                      <span className="text-sm font-medium text-slate-800 group-hover:text-blue-700 line-clamp-1">
+                                        [{i + 1}] {s.title}
+                                      </span>
+                                      {s.entity_name && (
+                                        <Badge
+                                          variant="outline"
+                                          className="text-[10px] px-1.5 py-0 shrink-0 border-violet-200 text-violet-700 bg-violet-50"
+                                        >
+                                          via {s.entity_name}
+                                        </Badge>
+                                      )}
+                                    </div>
+                                    {s.snippet && (
+                                      <p className="mt-1 text-xs text-slate-500 leading-relaxed line-clamp-2">
+                                        …{highlightSnippet(s.snippet, s.entity_name || "")}…
+                                      </p>
+                                    )}
+                                  </a>
+                                ))}
+                              </div>
                             </div>
                           )}
                         </>

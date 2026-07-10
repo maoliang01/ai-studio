@@ -736,13 +736,14 @@ class QARequest(BaseModel):
 
 
 @router.post("/qa/answer")
-async def kg_qa_answer(req: QARequest):
+async def kg_qa_answer(req: QARequest, db: Session = Depends(get_db)):
     """对话页 KG 问答入口"""
     try:
         result = await answer_question(
             question=req.question,
             model_id=req.model_id,
             session_id=req.session_id,
+            db=db,
         )
         return result
     except Exception as e:

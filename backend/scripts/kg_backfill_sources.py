@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.services.kg import Neo4jService  # noqa: E402
-from app.core.database import SessionLocal  # noqa: E402
+from app.core.database import get_session_local  # noqa: E402
 from app.models.article import Article  # noqa: E402
 
 
@@ -21,7 +21,7 @@ async def backfill() -> dict:
             )
             rows = await r.data()
 
-        db = SessionLocal()
+        db = get_session_local()()
         try:
             arts = db.query(Article).all()
         finally:

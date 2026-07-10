@@ -135,13 +135,120 @@ def _format_subgraph_as_context(subgraph: Dict[str, List]) -> str:
     return "\n".join(lines) if lines else "(实体存在,但无相关关系)"
 
 
+async def fetch_entity_sources(
+    entity_name: str,
+    db: Any = None,
+    limit: int = 5,
+) -> List[Dict[str, Any]]:
+    """获取实体在哪些文章里出现过,以及带高亮位置的原文片段。
+
+    Args:
+        entity_name: 实体名(Neo4j Entity.name)
+        db: SQLAlchemy Session(查 Article 详情需要)
+        limit: 最多返回多少篇来源文章
+
+    Returns:
+        [{"article_id": str, "title": str, "snippet": str,
+          "highlight_positions": [[start, end], ...]}, ...]
+    """
+    if not entity_name:
+        return []
+
+    # 1) 从 Neo4j 查实体的 source_articles
+    neo4j = Neo4jService()
+    await neo4j.connect()
+    try:
+        async with neo4j._driver.session() as session:
+            r = await session.run(
+                "MATCH (e:Entity {name:$n}) "
+                "RETURN e.source_articles AS source_articles",
+                n=entity_name,
+            )
+            row = await r.single()
+        if not row or not row["source_articles"]:
+            return []
+        article_ids: List[str] = list(row["source_articles"])[:limit]
+    finally:
+        await neo4j.close()
+
+    if not article_ids or db is None:
+        return [{"article_id": aid, "title": "(未取详情)", "snippet": "",
+                 "highlight_positions": []} for aid in article_ids]
+
+    # 2) 从 SQLite 查文章详情,计算高亮位置
+    from app.models.article import Article
+    arts = db.query(Article).filter(Article.id.in_(article_ids)).all()
+    arts_by_id = {str(a.id): a for a in arts}
+
+    out: List[Dict[str, Any]] = []
+    for aid in article_ids:
+        a = arts_by_id.get(aid)
+        if not a:
+            out.append({"article_id": aid, "title": "(文章已删除)",
+                        "snippet": "", "highlight_positions": []})
+            continue
+        text = (a.content or "") + " " + (a.summary or "")
+        positions: List[List[int]] = []
+        if entity_name and entity_name in text:
+            start = 0
+            while True:
+                idx = text.find(entity_name, start)
+                if idx < 0:
+                    break
+                positions.append([idx, idx + len(entity_name)])
+                start = idx + len(entity_name)
+        snippet = ""
+        if positions:
+            s, e = positions[0]
+            snippet = text[max(0, s - 60):min(len(text), e + 60)]
+        out.append({
+            "article_id": str(a.id),
+            "title": a.title or "(无标题)",
+            "snippet": snippet,
+            "highlight_positions": positions[:5],
+        })
+    return out
+
+
+async def _aggregate_sources(
+    entity_names: List[str],
+    db: Any = None,
+    per_entity_limit: int = 3,
+    total_limit: int = 10,
+) -> List[Dict[str, Any]]:
+    """为多个实体汇总来源文章(去重、限总数)"""
+    seen: set = set()
+    out: List[Dict[str, Any]] = []
+    for name in entity_names:
+        try:
+            arts = await fetch_entity_sources(name, db=db, limit=per_entity_limit)
+        except Exception as e:
+            logger.warning(f"qa: 汇总来源失败 {name}: {e}")
+            continue
+        for art in arts:
+            aid = art.get("article_id")
+            if not aid or aid in seen:
+                continue
+            seen.add(aid)
+            art["entity_name"] = name  # 标注是哪实体引出的
+            out.append(art)
+            if len(out) >= total_limit:
+                return out
+    return out
+
+
 async def answer_question(
     question: str,
     model_id: str,
     session_id: Optional[str] = None,
+    db: Any = None,
     llm_caller: Optional[LlmCaller] = None,
 ) -> Dict[str, Any]:
-    """完整问答流程"""
+    """完整问答流程
+
+    Args:
+        db: SQLAlchemy Session(可选,传入后会查来源文章)
+    """
     caller = llm_caller or _default_llm_caller
 
     entities = await extract_entities_from_question(question, model_id, llm_caller=caller)
@@ -169,10 +276,13 @@ async def answer_question(
         logger.error(f"qa: 答案生成失败: {e}")
         answer = f"图谱检索成功,但生成回答时出错: {e}"
 
+    # 汇总来源文章(去重、按实体聚合,限 10 篇)
+    sources = await _aggregate_sources(entity_names, db=db)
+
     return {
         "status": "ok",
         "answer": answer,
         "subgraph": subgraph,
-        "sources": [],
+        "sources": sources,
         "cited_entities": entity_names,
     }
