@@ -93,6 +93,16 @@ export default function ArticlesPage() {
     url.searchParams.delete("highlight");
     router.replace(url.pathname + (url.search || ""));
   }
+
+  // 关闭整篇弹窗:清掉 article + highlight 两个 URL 参数,
+  // 否则刷新页面会重新拉文章又弹开。
+  function closeArticle() {
+    setSelectedArticle(null);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("article");
+    url.searchParams.delete("highlight");
+    router.replace(url.pathname + (url.search || ""));
+  }
   const [totalPages, setTotalPages] = useState(1);
   const [total, setTotal] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
@@ -997,7 +1007,7 @@ export default function ArticlesPage() {
       </Card>
 
       {/* 文章详情对话框 */}
-      <Dialog open={!!selectedArticle} onOpenChange={() => setSelectedArticle(null)}>
+      <Dialog open={!!selectedArticle} onOpenChange={(open) => { if (!open) closeArticle(); }}>
         <DialogContent className="max-w-4xl max-h-[80vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{selectedArticle?.title || "文章详情"}</DialogTitle>
