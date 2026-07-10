@@ -52,6 +52,9 @@ htmlcov/
 # Claude Code
 .claude/sessions/
 .claude/plans/used/
+.superpowers/
+.worktrees/
+data/
 # PID files
 .pids/
 
