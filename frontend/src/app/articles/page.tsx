@@ -957,7 +957,10 @@ export default function ArticlesPage() {
                                 下载 MD
                               </DropdownMenuItem>
                               <DropdownMenuItem
-                                onClick={() => handleDelete(article)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDelete(article);
+                                }}
                                 className="text-red-600"
                               >
                                 <Trash2 className="w-4 h-4 mr-2" />
@@ -1008,15 +1011,16 @@ export default function ArticlesPage() {
 
       {/* 文章详情对话框 */}
       <Dialog open={!!selectedArticle} onOpenChange={(open) => { if (!open) closeArticle(); }}>
-        <DialogContent className="max-w-4xl max-h-[80vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>{selectedArticle?.title || "文章详情"}</DialogTitle>
-            <DialogDescription>
+        <DialogContent className="max-w-7xl w-[95vw] max-h-[90vh] flex flex-col p-6 overflow-hidden">
+          <DialogHeader className="mb-4 shrink-0">
+            <DialogTitle className="text-xl">{selectedArticle?.title || "文章详情"}</DialogTitle>
+            <DialogDescription className="truncate">
               <a
                 href={selectedArticle?.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-blue-500 hover:underline"
+                className="text-blue-500 hover:underline truncate"
+                title={selectedArticle?.url}
               >
                 {selectedArticle?.url}
               </a>
@@ -1024,8 +1028,8 @@ export default function ArticlesPage() {
           </DialogHeader>
 
           {selectedArticle && (
-            <Tabs defaultValue="content">
-              <TabsList>
+            <Tabs defaultValue="content" className="flex flex-col flex-1 overflow-hidden">
+              <TabsList className="shrink-0 mb-4">
                 <TabsTrigger value="content">内容</TabsTrigger>
                 <TabsTrigger value="meta">元信息</TabsTrigger>
                 <TabsTrigger value="keywords">关键词</TabsTrigger>
@@ -1042,7 +1046,7 @@ export default function ArticlesPage() {
               />
             )}
 
-              <TabsContent value="content" className="mt-4">
+              <TabsContent value="content" className="mt-0 flex-1 overflow-y-auto pr-2">
                 <div data-article-body className="prose prose-sm dark:prose-invert max-w-none">
                   {selectedArticle.summary && (
                     <div className="bg-muted p-4 rounded-lg mb-4">
@@ -1050,13 +1054,13 @@ export default function ArticlesPage() {
                       <p className="text-sm">{selectedArticle.summary}</p>
                     </div>
                   )}
-                  <div className="whitespace-pre-wrap text-sm">
+                  <div className="whitespace-pre-wrap text-base leading-relaxed">
                     {selectedArticle.content}
                   </div>
                 </div>
               </TabsContent>
 
-              <TabsContent value="meta" className="mt-4">
+              <TabsContent value="meta" className="mt-0 flex-1 overflow-y-auto">
                 <dl className="grid grid-cols-2 gap-4">
                   <div>
                     <dt className="text-sm text-muted-foreground">作者</dt>
@@ -1095,7 +1099,7 @@ export default function ArticlesPage() {
                 </dl>
               </TabsContent>
 
-              <TabsContent value="keywords" className="mt-4">
+              <TabsContent value="keywords" className="mt-0">
                 {selectedArticle.keywords && selectedArticle.keywords.length > 0 ? (
                   <div className="flex flex-wrap gap-2">
                     {selectedArticle.keywords.map((kw, i) => (
@@ -1217,7 +1221,9 @@ export default function ArticlesPage() {
                         className="px-2 py-1"
                       >
                         {node.label}
-                        <span className="ml-1 text-[10px] opacity-60">({node.type})</span>
+                        <span className="ml-1 text-[10px] opacity-60">
+                          ({node.type})
+                        </span>
                       </Badge>
                     ))}
                   </div>
@@ -1228,13 +1234,22 @@ export default function ArticlesPage() {
                   <div>
                     <h4 className="text-sm font-medium mb-2">关系网络</h4>
                     <div className="bg-muted rounded-lg p-3 space-y-2 max-h-40 overflow-auto">
-                      {graphData.edges.map((edge, idx) => (
-                        <div key={idx} className="text-sm flex items-center gap-2">
-                          <Badge variant="secondary" className="shrink-0">{edge.source.split(":")[1] || edge.source}</Badge>
-                          <span className="text-muted-foreground">--{edge.type}--</span>
-                          <Badge variant="secondary" className="shrink-0">{edge.target.split(":")[1] || edge.target}</Badge>
-                        </div>
-                      ))}
+                      {graphData.edges.map((edge, idx) => {
+                        // 修复实体显示，去掉可能的 type 前缀
+                        const sourceLabel = edge.source.includes(":") 
+                          ? edge.source.split(":")[1] 
+                          : edge.source;
+                        const targetLabel = edge.target.includes(":") 
+                          ? edge.target.split(":")[1] 
+                          : edge.target;
+                        return (
+                          <div key={idx} className="text-sm flex items-center gap-2">
+                            <Badge variant="secondary" className="shrink-0">{sourceLabel}</Badge>
+                            <span className="text-muted-foreground">--{edge.type}--</span>
+                            <Badge variant="secondary" className="shrink-0">{targetLabel}</Badge>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 )}
