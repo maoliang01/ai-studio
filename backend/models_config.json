@@ -55,28 +55,6 @@
       "latency": null,
       "last_tested_at": null
     },
-    "llama-3.3-70b-(通用主力)": {
-      "id": "llama-3.3-70b-(通用主力)",
-      "name": "Llama 3.3 70B (通用主力)",
-      "type": "llm",
-      "base_url": "https://integrate.api.nvidia.com/v1",
-      "api_key": "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",
-      "model_name": "meta/llama-3.3-70b-instruct",
-      "is_connected": false,
-      "latency": null,
-      "last_tested_at": null
-    },
-    "qwen3-next-80b": {
-      "id": "qwen3-next-80b",
-      "name": "Qwen3 Next 80B",
-      "type": "llm",
-      "base_url": "https://integrate.api.nvidia.com/v1",
-      "api_key": "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",
-      "model_name": "qwen/qwen3-next-80b-a3b-instruct",
-      "is_connected": false,
-      "latency": null,
-      "last_tested_at": null
-    },
     "minimax-m3-(多模态)": {
       "id": "minimax-m3-(多模态)",
       "name": "MiniMax M3 (多模态)",

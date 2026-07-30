@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8500";
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8080";
 
 // 获取所有分类
 export async function GET() {

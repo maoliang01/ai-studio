@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8500";
+const BACKEND_URL = process.env.AI_STUDIO_SCRAPE_BACKEND_URL || process.env.BACKEND_URL || "http://localhost:8080";
 
 // 批量保存文章到数据库
 export async function POST(request: Request) {

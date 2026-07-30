@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8500";
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8080";
 
 // 导出文章为文件
 export async function POST(request: Request) {
