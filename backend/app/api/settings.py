@@ -205,6 +205,14 @@ class SettingsStore:
         except Exception as e:
             print(f"保存配置文件失败: {e}")
 
+    def _sync_to_database(self):
+        """同步关系型配置；数据库暂不可用时保留文件配置并记录错误。"""
+        try:
+            from app.core.database import sync_settings_to_database
+            sync_settings_to_database(self.categories, self.scrape_sources)
+        except Exception as e:
+            print(f"同步配置到数据库失败: {e}")
+
     def _get_category_source_count(self, category_id: str) -> int:
         """获取分类下的来源数量"""
         return sum(1 for s in self.scrape_sources.values() if s.get("category") == category_id)
@@ -283,6 +291,7 @@ class SettingsStore:
         }
         self.categories[category_id] = new_category
         self._save_to_file()
+        self._sync_to_database()
 
         # 创建对应的文件夹
         self._ensure_category_folder(category_id, folder_name)
@@ -308,6 +317,7 @@ class SettingsStore:
 
         category["updated_at"] = datetime.now().isoformat()
         self._save_to_file()
+        self._sync_to_database()
 
         # 如果文件夹名称改变，尝试重命名
         new_folder_name = category.get("folder_name", "")
@@ -421,6 +431,7 @@ class SettingsStore:
         }
         self.scrape_sources[source_id] = new_source
         self._save_to_file()
+        self._sync_to_database()
         return ScrapeSourceResponse(**new_source)
 
     def update_scrape_source(self, source_id: str, updates: dict) -> Optional[ScrapeSourceResponse]:
@@ -432,6 +443,7 @@ class SettingsStore:
                 source[key] = value
         source["updated_at"] = datetime.now().isoformat()
         self._save_to_file()
+        self._sync_to_database()
         return ScrapeSourceResponse(**source)
 
     def delete_scrape_source(self, source_id: str) -> bool:
@@ -448,6 +460,7 @@ class SettingsStore:
         source["is_enabled"] = not source["is_enabled"]
         source["updated_at"] = datetime.now().isoformat()
         self._save_to_file()
+        self._sync_to_database()
         return ScrapeSourceResponse(**source)
 
 

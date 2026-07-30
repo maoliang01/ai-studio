@@ -12,7 +12,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('/home/aircas/AI/AI Studio/backend/app.log'),
     ]
 )
 logger = logging.getLogger("ai-studio")
@@ -149,3 +148,64 @@ def set_default_model(model_id: str) -> bool:
         save_config_to_file(llm_config)
         return True
     return False
+
+
+def check_config_consistency() -> bool:
+    """
+    检测配置文件一致性
+    - 确认 models_config.json 存在且可读
+    - 确认模型列表非空
+    - 检查模型配置完整性
+    返回 True 表示检测通过，False 表示有问题
+    """
+    logger.info("========== 配置一致性检测 ==========")
+    issues = []
+
+    # 检查配置文件是否存在
+    if not CONFIG_FILE.exists():
+        issues.append(f"配置文件不存在: {CONFIG_FILE}")
+        logger.error(f"❌ {issues[-1]}")
+    else:
+        logger.info(f"✅ 配置文件存在: {CONFIG_FILE}")
+
+        # 检查文件是否可读
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            issues.append(f"配置文件读取失败: {e}")
+            logger.error(f"❌ {issues[-1]}")
+            data = {}
+
+        # 检查模型列表
+        if data.get("models"):
+            model_count = len(data["models"])
+            logger.info(f"✅ 模型配置数量: {model_count}")
+
+            # 检查每个模型的完整性
+            for model_id, model_data in data["models"].items():
+                required_fields = ["id", "name", "type", "base_url"]
+                missing = [f for f in required_fields if f not in model_data]
+                if missing:
+                    issues.append(f"模型 {model_id} 缺少字段: {missing}")
+                    logger.warning(f"⚠️ {issues[-1]}")
+        else:
+            issues.append("模型列表为空")
+            logger.warning(f"⚠️ {issues[-1]}")
+
+    # 检查默认模型
+    default_llm = data.get("default_llm") if data else None
+    if default_llm:
+        logger.info(f"✅ 默认模型: {default_llm}")
+    else:
+        logger.warning("⚠️ 未设置默认模型")
+
+    # 汇总结果
+    if issues:
+        logger.warning(f"========== 配置检测完成，发现 {len(issues)} 个问题 ==========")
+        for issue in issues:
+            logger.warning(f"  - {issue}")
+        return False
+    else:
+        logger.info("========== 配置检测通过 ==========")
+        return True

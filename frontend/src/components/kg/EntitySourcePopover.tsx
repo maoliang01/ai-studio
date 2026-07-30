@@ -25,7 +25,7 @@ const SUBTYPE_LABELS: Record<string, string> = {
   SCIENTIST: "科学家",
   ENGINEER: "工程师",
   ACADEMIC: "学者",
-  POLITICIAN: "政治家",
+  LEADER: "领导",
   ENTREPRENEUR: "企业家",
   WRITER: "作家",
   ARTIST: "艺术家",

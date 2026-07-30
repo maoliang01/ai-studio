@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Generator, Optional
 from urllib.parse import urlparse
 
+from dotenv import load_dotenv
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
 from sqlalchemy.pool import QueuePool
@@ -19,6 +20,10 @@ logger = logging.getLogger("ai-studio")
 # 配置数据文件路径
 CONFIG_DIR = Path(__file__).parent.parent.parent
 SETTINGS_FILE = CONFIG_DIR / "data" / "settings.json"
+
+# 无论从 Windows、Linux、Docker 还是 IDE 启动，都使用 backend/.env。
+# 已由部署平台注入的环境变量优先，不会被文件覆盖。
+load_dotenv(CONFIG_DIR / ".env", override=False)
 
 
 class DatabaseConfig:
@@ -170,6 +175,53 @@ def init_db():
     _create_fts_index(engine)
 
 
+def sync_settings_to_database(categories: dict, scrape_sources: dict) -> dict:
+    """将文件配置幂等同步到关系数据库，供启动和配置变更时调用。"""
+    from app.models.article import Category, ScrapeSource
+
+    SessionLocal = get_session_local()
+    db = SessionLocal()
+    synced_categories = 0
+    synced_sources = 0
+    try:
+        for category_id, data in categories.items():
+            category = db.query(Category).filter(Category.id == category_id).first()
+            if category is None:
+                category = Category(id=category_id)
+                db.add(category)
+                synced_categories += 1
+            category.name = data.get("name") or category_id
+            category.color = data.get("color") or "#6B7280"
+            category.description = data.get("description") or ""
+            category.folder_name = data.get("folder_name") or category_id
+
+        # 来源外键依赖分类，必须先 flush 分类。
+        db.flush()
+
+        for source_id, data in scrape_sources.items():
+            source = db.query(ScrapeSource).filter(ScrapeSource.id == source_id).first()
+            if source is None:
+                source = ScrapeSource(id=source_id)
+                db.add(source)
+                synced_sources += 1
+            source.name = data.get("name") or source_id
+            source.url = data.get("url") or ""
+            category_id = data.get("category")
+            source.category_id = category_id if category_id in categories else None
+            source.description = data.get("description")
+            source.is_enabled = data.get("is_enabled", True)
+
+        db.commit()
+        result = {"categories": synced_categories, "scrape_sources": synced_sources}
+        logger.info(f"配置同步数据库完成: {result}")
+        return result
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def _create_fts_index(engine):
     """创建全文搜索索引"""
     from sqlalchemy import text
@@ -183,6 +235,16 @@ def _create_fts_index(engine):
 
         if not result.fetchone():
             logger.info("正在创建全文搜索列和索引...")
+            # 新 PostgreSQL 实例通常没有项目自定义的 chinese 配置。
+            conn.execute(text("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM pg_ts_config WHERE cfgname = 'chinese') THEN
+                        CREATE TEXT SEARCH CONFIGURATION chinese (COPY = simple);
+                    END IF;
+                END
+                $$;
+            """))
             # 添加 search_vector 列
             conn.execute(text("""
                 ALTER TABLE articles

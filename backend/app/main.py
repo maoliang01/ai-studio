@@ -20,14 +20,30 @@ async def lifespan(app: FastAPI):
 
     # 启动时
     logger.info("应用启动中...")
+
+    # ============ 配置一致性检测 ============
+    from app.core.config import check_config_consistency
+    config_ok = check_config_consistency()
+    if not config_ok:
+        logger.warning("⚠️ 配置检测发现问题，请检查日志")
+
     try:
+        # 每次启动都幂等创建表并同步文件配置，避免新设备/容器漏跑迁移脚本。
+        from app.core.database import init_db, sync_settings_to_database
+        init_db()
+        sync_settings_to_database(
+            settings.settings_store.categories,
+            settings.settings_store.scrape_sources,
+        )
+
         from app.core.scheduler import init_scheduler, register_kg_reconcile_job
         _scheduler = init_scheduler()
         logger.info("定时任务调度器已启动")
 
         # 注册 KG 定时对账(默认关闭,从环境变量 KG_RECONCILE_INTERVAL_MINUTES 读取)
         import os
-        interval = int(os.getenv("KG_RECONCILE_INTERVAL_MINUTES", "0"))
+        # 默认每 10 分钟对账，迁移设备后 Neo4j 数据卷缺失也能自动补抽。
+        interval = int(os.getenv("KG_RECONCILE_INTERVAL_MINUTES", "10"))
         register_kg_reconcile_job(_scheduler, interval_minutes=interval)
 
         # 启动时自动处理 kg_status in (NULL, 'pending') 的老文章

@@ -41,7 +41,7 @@ RELATION_TYPES = [
 
 # 细分领域建议(LLM 可自由发挥,这里只做引导)
 SUBTYPE_GUIDE = {
-    "PERSON":      "SCIENTIST|ENGINEER|ACADEMIC|POLITICIAN|ENTREPRENEUR|WRITER|ARTIST|HISTORICAL|OTHER",
+    "PERSON":      "SCIENTIST|ENGINEER|ACADEMIC|LEADER|ENTREPRENEUR|WRITER|ARTIST|HISTORICAL|OTHER",
     "ORGANIZATION": "COMPANY|RESEARCH_INST|UNIVERSITY|GOVERNMENT|INTERNATIONAL|NGO|OTHER",
     "LOCATION":    "CITY|COUNTRY|REGION|BUILDING|ASTRONOMICAL|NATURAL|OTHER",
     "TECHNOLOGY":  "AI_MODEL|ALGORITHM|PRODUCT|LANGUAGE|FRAMEWORK|TOOL|MATERIAL|BIOTECH|ENERGY|DEVICE|OTHER",
@@ -63,6 +63,18 @@ EXTRACTION_PROMPT = """你是一个知识图谱专家。请从以下文章中提
 6. 只提取文章中明确提到的实体和关系
 7. 实体名称要标准化(如 "OpenAI" 不写成 "open ai")
 8. subtype 用英文大写单词,不要用空格/中文
+
+**重要:subtype 选择指南(严格遵守):**
+- PERSON 类型:
+  - SCIENTIST:科学家(从事科研工作)
+  - ENGINEER:工程师(从事技术开发)
+  - ACADEMIC:学者/教授(从事教学科研)
+  - LEADER:行政领导(如院长、校长、所长、企业CEO等企事业单位负责人)
+  - ENTREPRENEUR:企业家(创办企业)
+  - WRITER:作家/记者
+  - HISTORICAL:历史人物
+  - OTHER:其他
+- **注意:不要使用 POLITICIAN!只有真正的政府官员、政党领袖才用 LEADER,企事业单位领导也用 LEADER**
 
 输出格式(JSON,严格遵守):
 {{

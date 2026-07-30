@@ -951,6 +951,8 @@ class DateExtractor:
         meta_patterns = [
             r'<meta[^>]+property=["\']article:published_time["\'][^>]+content=["\']([^"\']+)',
             r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']article:published_time["\']',
+            r'<meta[^>]+(?:name|itemprop)=["\'](?:publishdate|pubdate|datepublished|date)["\'][^>]+content=["\']([^"\']+)',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:name|itemprop)=["\'](?:publishdate|pubdate|datepublished)["\']',
         ]
         for pattern in meta_patterns:
             match = re.search(pattern, html)
@@ -960,6 +962,55 @@ class DateExtractor:
                     return date_str
 
         return None
+
+    @classmethod
+    def extract_list_item_dates(cls, html: str, base_url: str) -> Dict[str, str]:
+        """提取列表页中与文章链接位于同一条目内的站点显示日期。"""
+        if not html:
+            return {}
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "lxml")
+        except Exception:
+            return {}
+
+        result: Dict[str, str] = {}
+        date_pattern = re.compile(
+            r'(20\d{2})\s*[-/年.]\s*(\d{1,2})\s*[-/月.]\s*(\d{1,2})\s*日?'
+        )
+        for anchor in soup.find_all("a", href=True):
+            url = urljoin(base_url, anchor.get("href", "")).split("#", 1)[0]
+            if not url:
+                continue
+            container = anchor.find_parent(["li", "tr", "article"])
+            if container is None:
+                container = anchor.parent
+            text = container.get_text(" ", strip=True) if container else ""
+            match = date_pattern.search(text)
+            if not match:
+                continue
+            date_str = f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
+            if cls._validate_date(date_str):
+                result[url] = date_str
+        return result
+
+    @classmethod
+    def extract_list_item_titles(cls, html: str, base_url: str) -> Dict[str, str]:
+        """提取栏目列表中网站展示的文章标题，供受限外链兜底。"""
+        if not html:
+            return {}
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "lxml")
+        except Exception:
+            return {}
+        result: Dict[str, str] = {}
+        for anchor in soup.find_all("a", href=True):
+            url = urljoin(base_url, anchor.get("href", "")).split("#", 1)[0]
+            title = anchor.get_text(" ", strip=True)
+            if url and title:
+                result[url] = title
+        return result
 
     @classmethod
     def _normalize_chinese_date(cls, date_str: str) -> Optional[str]:
@@ -1647,7 +1698,8 @@ class WebScraper:
                 if href and len(text) > 2:  # 标题太短跳过
                     links.append(href)
 
-        return list(set(links))
+        # 保持网站 DOM 顺序；后续会按候选上限截断，不能使用 set 打乱顺序。
+        return list(dict.fromkeys(links))
 
     async def scrape(self, url: str, options: Optional[ScrapeOptions] = None) -> ScrapedResult:
         """
@@ -1656,7 +1708,7 @@ class WebScraper:
         1. Firecrawl 爬取内容（优先）
         2. Crawl4AI（回退）
         3. 内置备用爬取方案（最后回退）
-        4. URL 日期提取（最优先）
+            4. 网站明确发布日期提取
         5. LLM 摘要提取（可选）
         """
         if options is None:
@@ -1764,22 +1816,14 @@ class WebScraper:
                 result.status = "success"
                 return result
 
-            # 7. 日期提取（内容日期优先，URL 日期作为参考）
-            url_date = DateExtractor.extract_from_url(url)
-            content_date, content_author = extract_date_from_content(result.content, url)
-
-            # 内容日期具有更高权威性，优先使用
-            if content_date:
-                result.published_at = content_date
-                logger.debug(f"内容日期: {content_date}")
-
-                # 如果有 URL 日期，记录日志以对比
-                if url_date:
-                    logger.debug(f"URL 日期: {url_date} -> 被内容日期覆盖")
-            elif url_date:
-                # 没有内容日期时，使用 URL 日期
-                result.published_at = url_date
-                logger.debug(f"URL 日期: {url_date}")
+            # 7. 发布日期只接受网站明确标注的字段。正文事件日期、URL
+            # 归档日期和 LLM 推断均不得作为 published_at。
+            result.published_at = DateExtractor.extract_from_html(raw_html)
+            _, content_author = extract_date_from_content(result.content, url)
+            if result.published_at:
+                logger.debug(f"网站发布日期: {result.published_at}")
+            else:
+                logger.info(f"详情页未找到明确发布日期: {url}")
 
             # 同时提取作者
             if content_author and not result.author:
@@ -1809,11 +1853,6 @@ class WebScraper:
                 result.style = await self._extract_style_with_llm(result.title, result.content)
                 if result.style:
                     logger.info(f"文体已识别: {result.style}")
-
-                # 如果没有 URL 日期也没有内容日期，用 LLM 日期（兜底）
-                if not result.published_at and metadata.get("published_at"):
-                    if DateExtractor._validate_date(metadata["published_at"]):
-                        result.published_at = metadata["published_at"]
 
                 # 将摘要组合到内容前面
                 if result.summary:
@@ -1878,12 +1917,44 @@ class WebScraper:
         """
         try:
             from app.core.database import get_session_local
-            from app.models.article import Article, Keyword, ArticleLink, ArticleKeyword
+            from app.models.article import (
+                Article, Category, ScrapeSource, Keyword, ArticleLink, ArticleKeyword
+            )
 
             SessionLocal = get_session_local()
             db = SessionLocal()
 
             try:
+                # 爬取源配置历史上只写入 settings.json，文章表却通过外键引用
+                # PostgreSQL 的 scrape_sources。保存前补齐数据库记录，避免请求
+                # 表面成功但事务因悬空 source_id 回滚。
+                if category_id and not db.query(Category).filter(Category.id == category_id).first():
+                    logger.warning(f"分类不存在，文章将不关联分类: {category_id}")
+                    category_id = None
+
+                if source_id and not db.query(ScrapeSource).filter(ScrapeSource.id == source_id).first():
+                    from app.api.settings import settings_store
+                    source_config = settings_store.scrape_sources.get(source_id)
+                    if source_config:
+                        source_category_id = source_config.get("category") or category_id
+                        if source_category_id and not db.query(Category).filter(
+                            Category.id == source_category_id
+                        ).first():
+                            source_category_id = None
+                        db.add(ScrapeSource(
+                            id=source_id,
+                            name=source_config.get("name") or source_id,
+                            url=source_config.get("url") or result.url,
+                            category_id=source_category_id,
+                            description=source_config.get("description"),
+                            is_enabled=source_config.get("is_enabled", True),
+                        ))
+                        db.flush()
+                        logger.info(f"已同步爬取源到数据库: {source_id}")
+                    else:
+                        logger.warning(f"爬取源不存在，文章将不关联来源: {source_id}")
+                        source_id = None
+
                 # 检查是否已存在
                 existing = db.query(Article).filter(Article.url == result.url).first()
 
@@ -2455,8 +2526,14 @@ class WebScraper:
         if list_page.status != "success":
             return list_page, []
 
+        # 列表页显示日期仅作为详情页明确发布日期缺失时的站点级兜底。
+        list_item_dates = DateExtractor.extract_list_item_dates(list_page.html, url)
+        list_item_titles = DateExtractor.extract_list_item_titles(list_page.html, url)
+
         # 2. 识别文章链接（基于 URL 模式）
-        article_links = self._filter_article_links(list_page.links, url)
+        article_links = self._filter_article_links(
+            list_page.links, url, trusted_list_urls=set(list_item_dates)
+        )
         # 使用回调更新进度
         cb = progress_callback or self._progress_callback
         if cb:
@@ -2470,15 +2547,18 @@ class WebScraper:
         # 限制数量
         article_links = article_links[:max_articles * 2]
 
-        # 3. 如果有日期范围，先根据URL日期预过滤（避免爬取不需要的文章）
+        # 3. 计算日期范围。URL 中的日期可能是建页/更新/归档时间，
+        # 不能据此提前丢弃文章；正文抓取后再按 published_at 最终过滤。
         if date_range or custom_date_range:
             today = date.today()
             if date_range == "today":
                 start_date, end_date = today, today
             elif date_range == "week":
-                start_date, end_date = today - timedelta(days=7), today
+                # 含今天在内共 7 个自然日。
+                start_date, end_date = today - timedelta(days=6), today
             elif date_range == "month":
-                start_date, end_date = today - timedelta(days=30), today
+                # 含今天在内共 30 个自然日。
+                start_date, end_date = today - timedelta(days=29), today
             elif custom_date_range:
                 start_date = custom_date_range.get("start_date") or date(2000, 1, 1)
                 end_date = custom_date_range.get("end_date") or today
@@ -2486,35 +2566,23 @@ class WebScraper:
                 start_date, end_date = None, None
 
             if start_date and end_date:
-                logger.info(f"URL日期预过滤: [{start_date} ~ {end_date}]")
-                # 从URL提取日期进行预过滤
-                filtered_links = []
-                no_date_count = 0
-                for link in article_links:
-                    url_date = DateExtractor.extract_from_url(link)
-                    if url_date:
-                        try:
-                            d = datetime.strptime(url_date, "%Y-%m-%d").date()
-                            if start_date <= d <= end_date:
-                                filtered_links.append(link)
-                            else:
-                                logger.debug(f"预过滤(日期不符): {link}")
-                        except Exception as e:
-                            logger.debug(f"预过滤(日期解析失败): {link}")
-                            # 解析失败的链接保留
-                            filtered_links.append(link)
-                    else:
-                        no_date_count += 1
-                        # 无日期的链接也保留（如热榜类页面）
-                        filtered_links.append(link)
-                        logger.debug(f"保留(无日期): {link}")
-
-                logger.info(f"URL日期预过滤: {len(article_links)} -> {len(filtered_links)} 篇 (无日期: {no_date_count})")
-                article_links = filtered_links
-
-                # 更新进度
-                if cb:
-                    cb(2, "正在爬取文章", f"识别到 {len(article_links)} 个符合日期的文章", total=len(article_links))
+                # 列表条目明确显示的日期属于网站发布信息，可用于安全预筛；
+                # 未显示日期的候选仍保留，交由详情页的发布字段最终判断。
+                before_count = len(article_links)
+                if list_item_dates:
+                    # 该栏目采用统一的“标题 + 发布日期”列表结构时，只抓取
+                    # 能与日期条目精确配对的链接，避免页脚/推荐链接混入候选。
+                    article_links = [
+                        link for link in article_links
+                        if list_item_dates.get(link.split("#", 1)[0])
+                        and self._date_in_range(
+                            list_item_dates[link.split("#", 1)[0]], start_date, end_date
+                        )
+                    ]
+                logger.info(
+                    f"网站列表发布日期预筛: {before_count} -> {len(article_links)} 篇 "
+                    f"[{start_date} ~ {end_date}]"
+                )
 
         # 3. 批量爬取文章（逐个爬取并更新进度）
         if not article_links:
@@ -2528,6 +2596,24 @@ class WebScraper:
                 logger.info("爬取已取消")
                 break
             result = await self.scrape(article_url, options)
+            if not result.published_at:
+                list_date = list_item_dates.get(article_url.split("#", 1)[0])
+                if list_date:
+                    result.published_at = list_date
+                    logger.info(f"使用列表页发布日期: {article_url} -> {list_date}")
+            # 微信等受限外链可能只能拿到拦截/列表页面。该链接已由来源网站
+            # 明确列出标题和发布日期时，保留这些可验证字段，但不伪造正文。
+            list_key = article_url.split("#", 1)[0]
+            list_title = list_item_titles.get(list_key)
+            if list_item_dates.get(list_key) and list_title and (
+                result.status != "success" or result.word_count <= 0
+            ):
+                result.status = "success"
+                result.title = list_title
+                result.content = f"{list_title}\n\n（详情页受访问限制；以上为来源网站栏目列表公开信息）"
+                result.word_count = len(list_title)
+                result.error_message = None
+                logger.info(f"使用栏目列表信息保留受限文章: {article_url}")
             article_results.append(result)
             # 每爬取一篇更新一次进度
             if cb:
@@ -2536,6 +2622,14 @@ class WebScraper:
         # 4. 处理结果
         valid_results = [r for r in article_results if r.status == "success" and r.word_count > 0]
         logger.info(f"有效文章: {len(valid_results)} 篇")
+
+        if (date_range or custom_date_range) and start_date and end_date:
+            before_count = len(valid_results)
+            valid_results = [
+                r for r in valid_results
+                if r.published_at and self._date_in_range(r.published_at, start_date, end_date)
+            ]
+            logger.info(f"正文发布日期过滤: {before_count} -> {len(valid_results)} 篇")
 
         # 5. 按日期排序（最新的在前）
         valid_results = self._sort_by_date(valid_results)
@@ -2546,7 +2640,12 @@ class WebScraper:
         logger.info(f"深度爬取完成: {len(valid_results)} 篇文章")
         return list_page, valid_results
 
-    def _filter_article_links(self, links: List[str], base_url: str) -> List[str]:
+    def _filter_article_links(
+        self,
+        links: List[str],
+        base_url: str,
+        trusted_list_urls: Optional[set] = None,
+    ) -> List[str]:
         """过滤出文章链接"""
         parsed_base = urlparse(base_url)
         domain = parsed_base.netloc
@@ -2564,6 +2663,7 @@ class WebScraper:
         is_aggregation_page = any(x in base_url.lower() for x in ['/n/', '/hot', '/trending', '/rank', 'tophub', 'weibo.com', 'zhihu.com/'])
 
         article_links = []
+        trusted_list_urls = trusted_list_urls or set()
 
         # 跳过模式（导航、地图、登录等无意义链接）
         skip_patterns = [
@@ -2603,6 +2703,10 @@ class WebScraper:
             parsed = urlparse(link)
             link_lower = link.lower()
 
+            # 栏目分页不是文章，不能占用候选文章配额。
+            if re.search(r'/index(?:_\d+)?\.(?:html?|shtml)$', parsed.path, re.IGNORECASE):
+                continue
+
             # 跳过模式
             if any(p in link_lower for p in skip_patterns):
                 continue
@@ -2611,6 +2715,12 @@ class WebScraper:
 
             # 外部链接检查
             if is_external:
+                # 栏目列表自身列出的文章（且同一条目明确显示发布日期）
+                # 可能跳转到微信公众号等外站，仍属于该栏目的有效文章。
+                if link.split("#", 1)[0] in trusted_list_urls:
+                    article_links.append(link)
+                    logger.debug(f"  接受(列表页已标日期的外链): {link}")
+                    continue
                 # 热榜/聚合类页面：允许特定外部链接
                 if is_aggregation_page:
                     # 检查是否是允许的外部域名
@@ -2648,18 +2758,19 @@ class WebScraper:
             # 例如求是网：列表页 /cpc/，文章 /20260705/...
             is_category_index_page = any(base_url.rstrip('/').endswith(x) for x in ['/index.htm', '/index.html', '/index.php', '/index'])
 
-            if has_date_in_url and has_file_ext and is_same_category:
+            if has_file_ext and is_same_category:
                 article_links.append(link)
                 logger.debug(f"  接受(栏目匹配): {link}")
-            elif has_date_in_url and has_file_ext and not is_same_category and is_category_index_page:
+            elif has_file_ext and not is_same_category and is_category_index_page:
                 # 栏目首页模式下，也接受根目录下按日期组织的文章
                 article_links.append(link)
                 logger.debug(f"  接受(栏目首页，根目录日期): {link}")
-            elif has_date_in_url and has_file_ext and not is_same_category:
+            elif has_file_ext and not is_same_category:
                 logger.debug(f"  过滤(不同栏目): {link}")
 
         logger.info(f"文章链接过滤完成: 识别到 {len(article_links)} 个文章链接")
-        return list(set(article_links))
+        # 有序去重，避免 set 打乱列表页顺序后再被 max_articles 截断。
+        return list(dict.fromkeys(article_links))
 
     def _date_in_range(self, date_str: str, start: date, end: date) -> bool:
         """检查日期是否在范围内"""
