@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
 
-from app.api import chat, models, settings, scrape, firecrawl, articles, scheduled, kg
+from app.api import chat, models, settings, scrape, firecrawl, articles, scheduled, kg, wechat
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -101,6 +101,7 @@ app.include_router(firecrawl.router)
 app.include_router(articles.router)
 app.include_router(scheduled.router)
 app.include_router(kg.router)
+app.include_router(wechat.router)
 
 
 @app.get("/")

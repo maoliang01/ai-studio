@@ -132,6 +132,7 @@ export interface Article {
   contentHash?: string;
   sourceId?: string;
   sourceName?: string;    // 来源名称
+  sourceType?: string;    // 信源类型: web/wechat
   categoryId?: string;
   categoryName?: string;  // 分类名称
   publishedAt?: string;

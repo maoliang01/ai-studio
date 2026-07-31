@@ -106,6 +106,11 @@ export default function ScrapePage() {
   });
   const [selectedSource, setSelectedSource] = useState<ScrapeSource | null>(null);
   const [showSourceSelector, setShowSourceSelector] = useState(false);
+  const [scheduleDialogOpen, setScheduleDialogOpen] = useState(false);
+  const [scheduleTime, setScheduleTime] = useState("08:00");
+  const [scheduleRange, setScheduleRange] = useState<"1d" | "7d" | "30d">("1d");
+  const [isSavingSchedule, setIsSavingSchedule] = useState(false);
+  const [scheduleMessage, setScheduleMessage] = useState<string | null>(null);
   // 用于批量导出的选中状态
   const [selectedForExport, setSelectedForExport] = useState<Set<string>>(new Set());
 
@@ -167,6 +172,46 @@ export default function ScrapePage() {
   // 跳转到设置页添加新来源
   const handleAddSource = () => {
     router.push("/settings/scrape");
+  };
+
+  const handleCreateSchedule = async () => {
+    if (!url.trim()) {
+      setScheduleMessage("请先输入网页地址或选择已配置的网站来源。");
+      return;
+    }
+    try {
+      const parsedUrl = new URL(url.trim());
+      if (!["http:", "https:"].includes(parsedUrl.protocol)) throw new Error("invalid protocol");
+    } catch {
+      setScheduleMessage("请输入有效的 http 或 https 网页地址。");
+      return;
+    }
+
+    setIsSavingSchedule(true);
+    setScheduleMessage(null);
+    try {
+      const hostname = new URL(url.trim()).hostname;
+      const response = await fetch("/api/scheduled", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: `${selectedSource?.name || hostname} 定时爬取`,
+          sourceIds: selectedSource ? [selectedSource.id] : [],
+          customUrl: selectedSource ? undefined : url.trim(),
+          scheduleTime,
+          scrapeRange: scheduleRange,
+          isEnabled: true,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || result.detail || "创建定时任务失败");
+      setScheduleDialogOpen(false);
+      setScheduleMessage(`定时任务已启用，将在每天 ${scheduleTime} 自动爬取并保存到文档管理。`);
+    } catch (error) {
+      setScheduleMessage(error instanceof Error ? error.message : "创建定时任务失败");
+    } finally {
+      setIsSavingSchedule(false);
+    }
   };
 
   // 来源选择器内容（用于 Dialog）
@@ -975,6 +1020,15 @@ export default function ScrapePage() {
                         </div>
                       </DialogContent>
                     </Dialog>
+                  <Button
+                    variant="outline"
+                    onClick={() => { setScheduleMessage(null); setScheduleDialogOpen(true); }}
+                    disabled={!url.trim() || isScraping}
+                    className="gap-2"
+                  >
+                    <Clock className="h-4 w-4" />
+                    定时爬取
+                  </Button>
                   {isScraping ? (
                     <Button
                       onClick={cancelScrape}
@@ -1005,6 +1059,52 @@ export default function ScrapePage() {
                     </Button>
                   )}
                 </div>
+
+                {scheduleMessage && !scheduleDialogOpen && (
+                  <div className="flex flex-col gap-2 rounded-md border border-emerald-500/25 bg-emerald-500/5 px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between">
+                    <span>{scheduleMessage}</span>
+                    <div className="flex shrink-0 gap-2">
+                      <Button variant="ghost" size="sm" onClick={() => router.push("/settings/scrape?tab=scheduled")}>管理定时任务</Button>
+                      <Button variant="ghost" size="sm" onClick={() => router.push("/articles")}>文档管理</Button>
+                    </div>
+                  </div>
+                )}
+
+                <Dialog open={scheduleDialogOpen} onOpenChange={setScheduleDialogOpen}>
+                  <DialogContent className="max-w-lg">
+                    <DialogHeader>
+                      <DialogTitle className="flex items-center gap-2"><Clock className="h-5 w-5" />设置网页定时爬取</DialogTitle>
+                    </DialogHeader>
+                    <div className="space-y-5 py-2">
+                      <div className="rounded-md bg-muted/60 px-3 py-2 text-sm">
+                        <p className="font-medium">{selectedSource?.name || "自定义网页"}</p>
+                        <p className="mt-1 break-all text-xs text-muted-foreground">{url}</p>
+                      </div>
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <div className="space-y-2">
+                          <Label htmlFor="webScheduleTime">每天执行时间</Label>
+                          <Input id="webScheduleTime" type="time" value={scheduleTime} onChange={(event) => setScheduleTime(event.target.value)} />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="webScheduleRange">每次回溯范围</Label>
+                          <select id="webScheduleRange" value={scheduleRange} onChange={(event) => setScheduleRange(event.target.value as "1d" | "7d" | "30d")} className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm">
+                            <option value="1d">最近 1 天</option>
+                            <option value="7d">最近 7 天</option>
+                            <option value="30d">最近 30 天</option>
+                          </select>
+                        </div>
+                      </div>
+                      <div className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-sm leading-6 text-muted-foreground">
+                        任务创建后立即启用。每次定时爬取会自动去重并保存到“文档管理”；已配置来源沿用其分类，自定义 URL 保存为未分类。
+                      </div>
+                      {scheduleMessage && <p className="text-sm text-destructive">{scheduleMessage}</p>}
+                      <div className="flex justify-end gap-2">
+                        <Button variant="outline" onClick={() => setScheduleDialogOpen(false)}>取消</Button>
+                        <Button onClick={handleCreateSchedule} disabled={isSavingSchedule || !scheduleTime}>{isSavingSchedule && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}创建并启用</Button>
+                      </div>
+                    </div>
+                  </DialogContent>
+                </Dialog>
 
                 {/* 已选来源提示 */}
                 {selectedSource && (

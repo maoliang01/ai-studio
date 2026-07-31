@@ -658,6 +658,7 @@ function normalizeArticle(data: Record<string, unknown>): Article {
     summary: data.summary as string | undefined,
     contentHash: data.content_hash as string | undefined,
     sourceId: data.source_id as string | undefined,
+    sourceType: data.source_type as string | undefined,
     categoryId: data.category_id as string | undefined,
     publishedAt: data.published_at as string | undefined,
     scrapedAt: data.scraped_at as string,
@@ -667,4 +668,466 @@ function normalizeArticle(data: Record<string, unknown>): Article {
     createdAt: data.created_at as string | undefined,
     updatedAt: data.updated_at as string | undefined,
   };
+}
+// ================================================
+// 微信公众号 API
+// ================================================
+
+/**
+ * 微信公众号 Cookie 类型
+ */
+export interface WechatCookie {
+  id: string;
+  name: string;
+  isActive: boolean;
+  expiresAt?: string;
+  lastUsedAt?: string;
+  lastDiscoveryAt?: string;
+  nextDiscoveryAt?: string;
+  lastDiscoveryStatus?: string;
+  rateLimitCount?: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/**
+ * 微信公众号账号类型
+ */
+export interface WechatAccount {
+  id: string;
+  name: string;
+  wechatId?: string;
+  fakeid?: string;
+  description?: string;
+  isEnabled: boolean;
+  lastCrawledAt?: string;
+  articleCount: number;
+  minCrawlIntervalMinutes?: number;
+  lastDiscoveryAt?: string;
+  nextDiscoveryAt?: string;
+  lastDiscoveryStatus?: string;
+  rateLimitCount?: number;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/**
+ * 微信公众号定时任务类型
+ */
+export interface WechatTask {
+  id: string;
+  accountId: string;
+  scheduleType: string;
+  scheduleTime?: string;
+  maxArticles: number;
+  isEnabled: boolean;
+  lastRunAt?: string;
+  nextRunAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/**
+ * 获取微信公众号 Cookie 列表
+ */
+export async function fetchWechatCookies(activeOnly: boolean = false): Promise<WechatCookie[]> {
+  const params = new URLSearchParams();
+  if (activeOnly) params.set("active_only", "true");
+
+  const response = await fetch(`${API_BASE}/wechat/cookies?${params}`);
+  if (!response.ok) {
+    throw new Error(`获取 Cookie 列表失败: ${response.status}`);
+  }
+  const data = await response.json();
+  return data.items || [];
+}
+
+/**
+ * 创建微信公众号 Cookie
+ */
+export async function createWechatCookie(data: {
+  name: string;
+  cookieData: string;
+  expiresAt?: string;
+}): Promise<{ success: boolean; item?: WechatCookie }> {
+  const response = await fetch(`${API_BASE}/wechat/cookies`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: data.name,
+      cookie_data: data.cookieData,
+      expires_at: data.expiresAt,
+    }),
+  });
+  return response.json();
+}
+
+/**
+ * 删除微信公众号 Cookie
+ */
+export async function deleteWechatCookie(id: string): Promise<{ success: boolean }> {
+  const response = await fetch(`${API_BASE}/wechat/cookies/${id}`, {
+    method: "DELETE",
+  });
+  return response.json();
+}
+
+/**
+ * 激活微信公众号 Cookie
+ */
+export async function activateWechatCookie(id: string): Promise<{ success: boolean; item?: WechatCookie }> {
+  const response = await fetch(`${API_BASE}/wechat/cookies/${id}/activate`, {
+    method: "POST",
+  });
+  return response.json();
+}
+
+/**
+ * 停用微信公众号 Cookie
+ */
+export async function deactivateWechatCookie(id: string): Promise<{ success: boolean; item?: WechatCookie }> {
+  const response = await fetch(`${API_BASE}/wechat/cookies/${id}/deactivate`, {
+    method: "POST",
+  });
+  return response.json();
+}
+
+/**
+ * 验证微信公众号 Cookie
+ */
+export async function validateWechatCookie(id: string): Promise<{
+  valid: boolean;
+  message: string;
+  expiresAt?: string;
+  hasRequiredKeys?: boolean;
+  foundKeys?: string[];
+}> {
+  const response = await fetch(`${API_BASE}/wechat/cookies/${id}/validate`, {
+    method: "POST",
+  });
+  return response.json();
+}
+
+/**
+ * 获取微信公众号列表
+ */
+export async function fetchWechatAccounts(enabledOnly: boolean = false): Promise<WechatAccount[]> {
+  const params = new URLSearchParams();
+  if (enabledOnly) params.set("enabled_only", "true");
+
+  const response = await fetch(`${API_BASE}/wechat/accounts?${params}`);
+  if (!response.ok) {
+    throw new Error(`获取公众号列表失败: ${response.status}`);
+  }
+  const data = await response.json();
+  return data.items || [];
+}
+
+/**
+ * 创建微信公众号
+ */
+export async function createWechatAccount(data: {
+  name: string;
+  wechatId?: string;
+  description?: string;
+}): Promise<{ success: boolean; item?: WechatAccount }> {
+  const response = await fetch(`${API_BASE}/wechat/accounts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: data.name,
+      wechat_id: data.wechatId,
+      description: data.description,
+    }),
+  });
+  return response.json();
+}
+
+/**
+ * 删除微信公众号
+ */
+export async function deleteWechatAccount(id: string): Promise<{ success: boolean }> {
+  const response = await fetch(`${API_BASE}/wechat/accounts/${id}`, {
+    method: "DELETE",
+  });
+  return response.json();
+}
+
+/**
+ * 立即爬取微信公众号
+ */
+export async function crawlWechatAccount(
+  id: string,
+  maxArticles: number = 10
+): Promise<{ success: boolean; message?: string }> {
+  const response = await fetch(`${API_BASE}/wechat/accounts/${id}/crawl`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ max_articles: maxArticles }),
+  });
+  return response.json();
+}
+
+/**
+ * 获取微信公众号定时任务列表
+ */
+export async function fetchWechatTasks(): Promise<WechatTask[]> {
+  const response = await fetch(`${API_BASE}/wechat/tasks`);
+  if (!response.ok) {
+    throw new Error(`获取定时任务列表失败: ${response.status}`);
+  }
+  const data = await response.json();
+  return data.items || [];
+}
+
+/**
+ * 解析定时任务接口响应，并避免 HTML 错误页触发 JSON 语法异常。
+ */
+async function readWechatTaskResponse<T>(response: Response, fallbackMessage: string): Promise<T> {
+  const body = await response.text();
+  if (!body) {
+    if (!response.ok) throw new Error(`${fallbackMessage}（HTTP ${response.status}）`);
+    return {} as T;
+  }
+
+  let result: T & { detail?: string; error?: string };
+  try {
+    result = JSON.parse(body);
+  } catch {
+    throw new Error(`${fallbackMessage}：服务返回了非 JSON 响应（HTTP ${response.status}）`);
+  }
+
+  if (!response.ok) {
+    throw new Error(result.detail || result.error || `${fallbackMessage}（HTTP ${response.status}）`);
+  }
+  return result;
+}
+
+/**
+ * 创建微信公众号定时任务
+ */
+export async function createWechatTask(data: {
+  accountId: string;
+  scheduleType: string;
+  scheduleTime?: string;
+  maxArticles?: number;
+  isEnabled?: boolean;
+}): Promise<{ success: boolean; item?: WechatTask }> {
+  const response = await fetch(`${API_BASE}/wechat/tasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      account_id: data.accountId,
+      schedule_type: data.scheduleType,
+      schedule_time: data.scheduleTime,
+      max_articles: data.maxArticles,
+      is_enabled: data.isEnabled,
+    }),
+  });
+  return readWechatTaskResponse(response, "创建定时任务失败");
+}
+
+/**
+ * 删除微信公众号定时任务
+ */
+export async function deleteWechatTask(id: string): Promise<{ success: boolean }> {
+  const response = await fetch(`${API_BASE}/wechat/tasks/${id}`, {
+    method: "DELETE",
+  });
+  return readWechatTaskResponse(response, "删除定时任务失败");
+}
+
+/**
+ * 启用/禁用微信公众号定时任务
+ */
+export async function toggleWechatTask(id: string): Promise<{ success: boolean; item?: WechatTask }> {
+  const response = await fetch(`${API_BASE}/wechat/tasks/${id}/toggle`, {
+    method: "POST",
+  });
+  return readWechatTaskResponse(response, "更新定时任务状态失败");
+}
+
+/**
+ * 立即执行微信公众号定时任务
+ */
+export async function runWechatTask(id: string): Promise<{ success: boolean; message?: string }> {
+  const response = await fetch(`${API_BASE}/wechat/tasks/${id}/run`, {
+    method: "POST",
+  });
+  return readWechatTaskResponse(response, "执行定时任务失败");
+}
+
+/**
+ * 爬取微信公众号文章
+ */
+export async function crawlWechatArticles(data: {
+  urls: string[];
+  categoryId?: string;
+}): Promise<{ success: boolean; message?: string; job_id?: string; jobId?: string; status?: string }> {
+  const response = await fetch(`${API_BASE}/wechat/crawl`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      urls: data.urls,
+      category_id: data.categoryId,
+    }),
+  });
+  return response.json();
+}
+
+export interface WechatAccountArticleProfile {
+  name: string;
+  wechatId?: string;
+  sampleArticleUrl: string;
+  sampleArticleTitle?: string;
+  sampleArticlePublishedAt?: string;
+}
+
+/** 从一篇典型文章自动识别并创建公众号档案。 */
+export async function createWechatAccountFromArticle(articleUrl: string): Promise<{
+  success: boolean;
+  created: boolean;
+  message: string;
+  item?: WechatAccount;
+  profile?: WechatAccountArticleProfile;
+}> {
+  const response = await fetch(`${API_BASE}/wechat/accounts/from-article`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ article_url: articleUrl }),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.detail || result.error || `识别公众号失败: ${response.status}`);
+  return result;
+}
+
+/**
+ * 更新微信公众号 Cookie。更新 Cookie JSON 后，后端会自动续期并重新启用。
+ */
+export async function updateWechatCookie(id: string, data: {
+  name?: string;
+  cookieData?: string;
+  expiresAt?: string;
+}): Promise<{ success: boolean; item?: WechatCookie }> {
+  const response = await fetch(`${API_BASE}/wechat/cookies/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: data.name,
+      cookie_data: data.cookieData,
+      expires_at: data.expiresAt,
+    }),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.detail || result.error || `更新 Cookie 失败: ${response.status}`);
+  return result;
+}
+
+export async function crawlWechatAccountRange(data: {
+  accountId: string;
+  startDate: string;
+  endDate: string;
+  maxArticles?: number;
+  categoryId?: string;
+  repeatIntervalMinutes?: number;
+}): Promise<{ success: boolean; message?: string; detail?: string; job_id?: string; discovered_count?: number; cached?: boolean; next_allowed_at?: string }> {
+  const response = await fetch(`${API_BASE}/wechat/accounts/${encodeURIComponent(data.accountId)}/crawl-range`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      start_date: data.startDate,
+      end_date: data.endDate,
+      max_articles: data.maxArticles ?? 50,
+      category_id: data.categoryId,
+      repeat_interval_minutes: data.repeatIntervalMinutes ?? 60,
+    }),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.detail || result.error || `提交失败: ${response.status}`);
+  return result;
+}
+
+export interface WechatCrawlJob {
+  job_id: string;
+  status: "pending" | "running" | "completed" | "failed";
+  total: number;
+  success_count: number;
+  failed_count: number;
+  message: string;
+  results: Array<{ success: boolean; article_id?: string; title?: string; url?: string; error?: string }>;
+}
+
+export async function fetchWechatCrawlJob(jobId: string): Promise<WechatCrawlJob> {
+  const response = await fetch(`${API_BASE}/wechat/crawl/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`获取爬取结果失败: ${response.status}`);
+  return response.json();
+}
+
+export interface WechatPublicDiscoveryJob {
+  job_id: string;
+  status: "pending" | "running" | "completed" | "ingesting" | "ingested" | "failed";
+  candidate_count: number;
+  eligible_count: number;
+  verified_count: number;
+  rejected_count: number;
+  success_count: number;
+  failed_count: number;
+  message: string;
+  sources: Record<string, number>;
+  candidates: Array<{
+    url: string;
+    title: string;
+    account_name: string;
+    published_at: string;
+    eligible: boolean;
+    reason: string;
+  }>;
+  results: Array<{ success: boolean; article_id?: string; title?: string; url?: string; published_at?: string }>;
+  rejected: Array<{ url: string; reason: string }>;
+}
+
+export async function startWechatPublicDiscovery(data: {
+  accountId: string;
+  startDate: string;
+  endDate: string;
+  seedUrls?: string[];
+  maxArticles?: number;
+  categoryId?: string;
+}): Promise<{ success: boolean; job_id: string; status: string; message: string }> {
+  const response = await fetch(`${API_BASE}/wechat/accounts/${encodeURIComponent(data.accountId)}/public-discovery`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      start_date: data.startDate,
+      end_date: data.endDate,
+      seed_urls: data.seedUrls || [],
+      max_articles: data.maxArticles ?? 30,
+      category_id: data.categoryId,
+    }),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.detail || result.error || `提交公开来源发现任务失败: ${response.status}`);
+  return result;
+}
+
+export async function fetchWechatPublicDiscoveryJob(jobId: string): Promise<WechatPublicDiscoveryJob> {
+  const response = await fetch(`${API_BASE}/wechat/public-discovery/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.detail || result.error || `获取公开来源发现结果失败: ${response.status}`);
+  return result;
+}
+
+export async function ingestWechatPublicDiscoveryCandidates(data: {
+  jobId: string;
+  urls: string[];
+  categoryId?: string;
+}): Promise<{ success: boolean; job_id: string; status: string; message: string }> {
+  const response = await fetch(`${API_BASE}/wechat/public-discovery/${encodeURIComponent(data.jobId)}/ingest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ urls: data.urls, category_id: data.categoryId }),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.detail || result.error || `候选文章入库失败: ${response.status}`);
+  return result;
 }

@@ -55,6 +55,7 @@ class ArticleBase:
             "content_hash": article.content_hash,
             "source_id": article.source_id,
             "source_name": source_name,
+            "source_type": article.source_type,  # 信源类型
             "category_id": article.category_id,
             "category_name": category_name,
             "published_at": article.published_at.isoformat() if article.published_at else None,
@@ -245,6 +246,7 @@ async def list_articles(
     q: Optional[str] = Query(None, description="搜索关键词（匹配标题、内容、摘要、关键词）"),
     category_id: Optional[str] = Query(None, description="按分类过滤 (government/business/academic)"),
     source_id: Optional[str] = Query(None, description="按来源过滤"),
+    source_type: Optional[str] = Query(None, description="按信源类型过滤 (web/wechat)"),
     style: Optional[str] = Query(None, description="按文体过滤 (新闻报道/通知公告/会议纪要等)"),
     status: Optional[str] = Query(None, description="按状态过滤"),
     start_date: Optional[str] = Query(None, description="开始日期 (YYYY-MM-DD)"),
@@ -276,6 +278,8 @@ async def list_articles(
         query = query.filter(Article.category_id == category_id)
     if source_id:
         query = query.filter(Article.source_id == source_id)
+    if source_type:
+        query = query.filter(Article.source_type == source_type)
     if style:
         # 文体筛选，使用模糊匹配
         query = query.filter(Article.style.ilike(f"%{style}%"))
@@ -669,6 +673,7 @@ async def search_articles(
     q: str = Query(..., min_length=1, description="搜索关键词（全文搜索 + 关键词匹配）"),
     category_id: Optional[str] = Query(None, description="按分类过滤 (government/business/academic)"),
     source_id: Optional[str] = Query(None, description="按来源过滤"),
+    source_type: Optional[str] = Query(None, description="按信源类型过滤 (web/wechat)"),
     style: Optional[str] = Query(None, description="按文体过滤 (新闻报道/通知公告/会议纪要等)"),
     status: str = Query("success", description="按状态过滤"),
     page: int = Query(1, ge=1, description="页码"),
@@ -695,6 +700,8 @@ async def search_articles(
         query = query.filter(Article.category_id == category_id)
     if source_id:
         query = query.filter(Article.source_id == source_id)
+    if source_type:
+        query = query.filter(Article.source_type == source_type)
     if style:
         # 文体筛选，使用模糊匹配
         query = query.filter(Article.style.ilike(f"%{style}%"))

@@ -133,6 +133,9 @@ class Article(Base):
     source_id: Mapped[Optional[str]] = mapped_column(
         String(50), ForeignKey("scrape_sources.id")
     )
+    source_type: Mapped[Optional[str]] = mapped_column(
+        String(50), default="web", index=True
+    )  # 信源类型: web/wechat
     category_id: Mapped[Optional[str]] = mapped_column(
         String(50), ForeignKey("categories.id")
     )
@@ -188,6 +191,7 @@ class Article(Base):
         Index("idx_articles_published_at", "published_at"),
         Index("idx_articles_category", "category_id"),
         Index("idx_articles_source", "source_id"),
+        Index("idx_articles_source_type", "source_type"),
         Index("idx_articles_scraped_at", "scraped_at"),
         Index("idx_articles_kg_status", "kg_status"),
     )
@@ -210,6 +214,7 @@ class Article(Base):
             "style": self.style,  # 文体
             "content_hash": self.content_hash,
             "source_id": self.source_id,
+            "source_type": self.source_type,  # 信源类型
             "category_id": self.category_id,
             "published_at": self.published_at.isoformat() if self.published_at else None,
             "scraped_at": self.scraped_at.isoformat() if self.scraped_at else None,

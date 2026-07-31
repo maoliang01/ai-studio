@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { Article, ArticleStats } from "@/types";
 import HighlightOverlay from "@/components/articles/HighlightOverlay";
@@ -69,6 +69,14 @@ function formatDate(dateStr: string | undefined): string {
 }
 
 export default function ArticlesPage() {
+  return (
+    <Suspense fallback={<div className="flex items-center justify-center h-60"><Loader2 className="h-8 w-8 animate-spin" /></div>}>
+      <ArticlesPageContent />
+    </Suspense>
+  );
+}
+
+function ArticlesPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const highlightName = searchParams.get("highlight");
@@ -191,6 +199,7 @@ export default function ArticlesPage() {
   // 筛选条件
   const [categoryFilter, setCategoryFilter] = useState<string>("");
   const [styleFilter, setStyleFilter] = useState<string>("");
+  const [sourceTypeFilter, setSourceTypeFilter] = useState<string>("");
   const [availableStyles, setAvailableStyles] = useState<Array<{name: string, count: number}>>([]);
 
   // 复选相关状态
@@ -280,6 +289,7 @@ export default function ArticlesPage() {
       if (searchQuery.trim()) params.set("q", searchQuery);
       if (categoryFilter) params.set("category_id", categoryFilter);
       if (styleFilter) params.set("style", styleFilter);
+      if (sourceTypeFilter) params.set("source_type", sourceTypeFilter);
 
       const res = await fetch(`/api/articles?${params.toString()}`);
       const data = await res.json();
@@ -356,12 +366,13 @@ export default function ArticlesPage() {
   const clearFilters = () => {
     setCategoryFilter("");
     setStyleFilter("");
+    setSourceTypeFilter("");
     setSearchQuery("");
     loadArticles(1);
   };
 
   // 是否有筛选条件
-  const hasFilters = categoryFilter || styleFilter || searchQuery.trim();
+  const hasFilters = categoryFilter || styleFilter || sourceTypeFilter || searchQuery.trim();
 
   // 删除文章
   const handleDelete = async (article: Article) => {
@@ -677,6 +688,42 @@ export default function ArticlesPage() {
               </DropdownMenuContent>
             </DropdownMenu>
 
+            {/* 信源筛选 */}
+            <DropdownMenu>
+              <DropdownMenuTrigger className="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium border border-input bg-background hover:bg-accent hover:text-accent-foreground h-9 px-3 min-w-[100px]">
+                <Filter className="w-4 h-4" />
+                信源 {sourceTypeFilter && (
+                  <Badge variant="secondary" className="text-xs px-1 py-0">
+                    {sourceTypeFilter === "web" ? "网页" : sourceTypeFilter === "wechat" ? "公众号" : sourceTypeFilter}
+                  </Badge>
+                )}
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuCheckboxItem
+                  checked={!sourceTypeFilter}
+                  onCheckedChange={() => { setSourceTypeFilter(""); }}
+                >
+                  全部
+                </DropdownMenuCheckboxItem>
+                <DropdownMenuCheckboxItem
+                  checked={sourceTypeFilter === "web"}
+                  onCheckedChange={(checked) => {
+                    setSourceTypeFilter(checked ? "web" : "");
+                  }}
+                >
+                  🌐 网页
+                </DropdownMenuCheckboxItem>
+                <DropdownMenuCheckboxItem
+                  checked={sourceTypeFilter === "wechat"}
+                  onCheckedChange={(checked) => {
+                    setSourceTypeFilter(checked ? "wechat" : "");
+                  }}
+                >
+                  📱 公众号
+                </DropdownMenuCheckboxItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+
             {/* 搜索按钮 */}
             <Button onClick={applyFilters} disabled={isSearching}>
               {isSearching && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
@@ -705,6 +752,12 @@ export default function ArticlesPage() {
                 <Badge variant="secondary" className="gap-1">
                   文体: {styleFilter}
                   <X className="w-3 h-3 cursor-pointer" onClick={() => setStyleFilter("")} />
+                </Badge>
+              )}
+              {sourceTypeFilter && (
+                <Badge variant="secondary" className="gap-1">
+                  信源: {sourceTypeFilter === "web" ? "网页" : sourceTypeFilter === "wechat" ? "公众号" : sourceTypeFilter}
+                  <X className="w-3 h-3 cursor-pointer" onClick={() => setSourceTypeFilter("")} />
                 </Badge>
               )}
               {searchQuery && (
@@ -776,6 +829,7 @@ export default function ArticlesPage() {
                     </TableHead>
                     <TableHead className="w-[250px]">标题</TableHead>
                     <TableHead>来源</TableHead>
+                    <TableHead>信源</TableHead>
                     <TableHead className="w-[200px]">发布链接</TableHead>
                     <TableHead>分类</TableHead>
                     <TableHead>文体</TableHead>
@@ -834,6 +888,13 @@ export default function ArticlesPage() {
                             <span className="font-medium">{article.sourceName}</span>
                           ) : (
                             <span className="text-muted-foreground">-</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-sm">
+                          {article.sourceType === "wechat" ? (
+                            <Badge variant="default" className="text-xs">📱 公众号</Badge>
+                          ) : (
+                            <Badge variant="secondary" className="text-xs">🌐 网页</Badge>
                           )}
                         </TableCell>
                         <TableCell className="text-sm">

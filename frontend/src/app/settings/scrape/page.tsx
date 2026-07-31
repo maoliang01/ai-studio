@@ -157,6 +157,12 @@ export default function ScrapeSettingsPage() {
   const [runningTasks, setRunningTasks] = useState<RunningTask[]>([]);  // 运行中的任务列表
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);  // 轮询定时器
 
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("tab") === "scheduled") {
+      setActiveTab("scheduled");
+    }
+  }, []);
+
   // 加载定时任务数据（使用 ref 确保可在 useEffect 中使用）
   const loadTasksRef = useRef<() => Promise<void>>(async () => {
     console.log("[debug] loadTasksRef 开始加载");

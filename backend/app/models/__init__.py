@@ -17,6 +17,11 @@ from app.models.scheduled_task import (
     ScrapeHistory,
     TaskStatus,
 )
+from app.models.wechat import (
+    WechatAccount,
+    WechatCookie,
+    WechatCrawlTask,
+)
 
 __all__ = [
     "Article",
@@ -28,4 +33,7 @@ __all__ = [
     "ScheduledTask",
     "ScrapeHistory",
     "TaskStatus",
+    "WechatAccount",
+    "WechatCookie",
+    "WechatCrawlTask",
 ]

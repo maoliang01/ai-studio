@@ -30,6 +30,7 @@ import {
   Bot as BotIcon,
   Database,
   Network,
+  Rss,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "@/stores/chat-store";
@@ -39,6 +40,7 @@ const navItems = [
   { href: "/kg", icon: Network, label: "知识图谱" },
   { href: "/prompts", icon: FileText, label: "提示词" },
   { href: "/scrape", icon: Globe, label: "网页爬取" },
+  { href: "/wechat", icon: Rss, label: "公众号爬取" },
   { href: "/articles", icon: Database, label: "文档管理" },
 ];
 
@@ -46,6 +48,7 @@ const settingsSubItems = [
   { href: "/settings", icon: Sliders, label: "基础设置" },
   { href: "/settings/models", icon: BotIcon, label: "大模型配置" },
   { href: "/settings/scrape", icon: Globe, label: "网页爬取配置" },
+  { href: "/settings/wechat", icon: Rss, label: "公众号配置" },
 ];
 
 export function AppSidebar() {

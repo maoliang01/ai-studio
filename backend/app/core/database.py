@@ -11,7 +11,7 @@ from typing import Generator, Optional
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
 from sqlalchemy.pool import QueuePool
 
@@ -169,10 +169,42 @@ def init_db():
 
     # 创建所有表
     Base.metadata.create_all(bind=engine)
+    _ensure_wechat_account_columns(engine)
     logger.info("数据库表已创建/更新")
 
     # 创建全文搜索索引（如果不存在）
     _create_fts_index(engine)
+
+
+def _ensure_wechat_account_columns(engine) -> None:
+    """为已有数据库补齐公众号低频发现所需字段。"""
+    statements = (
+        "ALTER TABLE wechat_accounts ADD COLUMN IF NOT EXISTS fakeid VARCHAR(200)",
+        "ALTER TABLE wechat_accounts ADD COLUMN IF NOT EXISTS min_crawl_interval_minutes INTEGER DEFAULT 60",
+        "ALTER TABLE wechat_accounts ADD COLUMN IF NOT EXISTS last_discovery_at TIMESTAMP NULL",
+        "ALTER TABLE wechat_accounts ADD COLUMN IF NOT EXISTS next_discovery_at TIMESTAMP NULL",
+        "ALTER TABLE wechat_accounts ADD COLUMN IF NOT EXISTS last_discovery_status VARCHAR(50) NULL",
+        "ALTER TABLE wechat_accounts ADD COLUMN IF NOT EXISTS rate_limit_count INTEGER DEFAULT 0",
+        "ALTER TABLE wechat_accounts ADD COLUMN IF NOT EXISTS discovery_cache TEXT NULL",
+        "ALTER TABLE wechat_cookies ADD COLUMN IF NOT EXISTS last_discovery_at TIMESTAMP NULL",
+        "ALTER TABLE wechat_cookies ADD COLUMN IF NOT EXISTS next_discovery_at TIMESTAMP NULL",
+        "ALTER TABLE wechat_cookies ADD COLUMN IF NOT EXISTS last_discovery_status VARCHAR(50) NULL",
+        "ALTER TABLE wechat_cookies ADD COLUMN IF NOT EXISTS rate_limit_count INTEGER DEFAULT 0",
+        """UPDATE wechat_cookies
+           SET last_discovery_at = (SELECT MAX(last_discovery_at) FROM wechat_accounts),
+               next_discovery_at = (SELECT MAX(next_discovery_at) FROM wechat_accounts),
+               last_discovery_status = CASE
+                   WHEN EXISTS (SELECT 1 FROM wechat_accounts WHERE last_discovery_status = 'rate_limited')
+                   THEN 'rate_limited' ELSE last_discovery_status END,
+               rate_limit_count = GREATEST(
+                   COALESCE(rate_limit_count, 0),
+                   COALESCE((SELECT MAX(rate_limit_count) FROM wechat_accounts), 0)
+               )
+           WHERE is_active = TRUE AND next_discovery_at IS NULL""",
+    )
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))
 
 
 def sync_settings_to_database(categories: dict, scrape_sources: dict) -> dict:

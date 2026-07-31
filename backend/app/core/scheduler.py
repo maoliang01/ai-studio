@@ -11,6 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.core.database import get_db
 from app.models.scheduled_task import ScheduledTask, ScrapeHistory, TaskStatus
+from app.models.wechat import WechatCrawlTask
 
 logger = logging.getLogger("scheduler")
 
@@ -26,6 +27,59 @@ def create_scheduler() -> BackgroundScheduler:
         }
     )
     return scheduler
+
+
+def run_wechat_crawl_task(task_id: str):
+    """执行微信公众号爬取任务"""
+    logger.info(f"⏰ [微信爬取] 开始执行任务: {task_id}")
+
+    # 创建新的数据库会话确保线程安全
+    from app.core.database import get_session_local
+
+    db = get_session_local()()
+    try:
+        task = db.query(WechatCrawlTask).filter(WechatCrawlTask.id == task_id).first()
+        if not task:
+            logger.error(f"任务不存在: {task_id}")
+            return
+
+        start_time = datetime.utcnow()
+
+        logger.info(f"⏰ [微信爬取] 开始爬取公众号...")
+
+        # 执行爬取
+        try:
+            import asyncio
+            from app.services.wechat.task_executor import WechatTaskExecutor
+
+            # 创建新的事件循环用于线程中运行
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            executor = WechatTaskExecutor(db)
+            result = loop.run_until_complete(executor.execute_task(task_id))
+            loop.close()
+
+            # 更新任务状态
+            end_time = datetime.utcnow()
+            duration = (end_time - start_time).total_seconds()
+
+            task.last_run_at = datetime.utcnow()
+            task.next_run_at = _calculate_next_run(task.schedule_time)
+            db.commit()
+
+            logger.info(f"✅ [微信爬取] 任务执行完成！耗时 {duration:.1f}秒")
+
+        except Exception as e:
+            logger.error(f"❌ [微信爬取] 任务执行失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            db.commit()
+
+    except Exception as e:
+        logger.error(f"执行微信任务 {task_id} 时出错: {e}")
+    finally:
+        db.close()
 
 
 def run_scheduled_task(task_id: str):
@@ -194,10 +248,13 @@ def sync_scheduler_tasks(scheduler: BackgroundScheduler):
         # 获取所有启用的任务
         tasks = db.query(ScheduledTask).filter(ScheduledTask.is_enabled == True).all()
 
+        # 获取所有启用的微信爬取任务
+        wechat_tasks = db.query(WechatCrawlTask).filter(WechatCrawlTask.is_enabled == True).all()
+
         # 清空现有任务（保留调度器运行）
         scheduler.remove_all_jobs()
 
-        # 添加新任务
+        # 添加普通定时任务
         for task in tasks:
             job_id = f"task_{task.id}"
             hour, minute = map(int, task.schedule_time.split(":"))
@@ -212,7 +269,33 @@ def sync_scheduler_tasks(scheduler: BackgroundScheduler):
             )
             logger.info(f"📅 [调度器] 添加任务: '{task.name}' → 每日 {task.schedule_time}")
 
-        logger.info(f"调度器同步完成，共 {len(tasks)} 个任务")
+        # 添加微信爬取任务
+        for task in wechat_tasks:
+            job_id = f"wechat_{task.id}"
+            if task.schedule_time:
+                hour, minute = map(int, task.schedule_time.split(":"))
+
+                # 根据 schedule_type 设置触发器
+                if task.schedule_type == "daily":
+                    trigger = CronTrigger(hour=hour, minute=minute, timezone="Asia/Shanghai")
+                elif task.schedule_type == "weekly":
+                    trigger = CronTrigger(day_of_week="mon", hour=hour, minute=minute, timezone="Asia/Shanghai")
+                elif task.schedule_type == "monthly":
+                    trigger = CronTrigger(day=1, hour=hour, minute=minute, timezone="Asia/Shanghai")
+                else:
+                    trigger = CronTrigger(hour=hour, minute=minute, timezone="Asia/Shanghai")
+
+                scheduler.add_job(
+                    func=run_wechat_crawl_task,
+                    trigger=trigger,
+                    id=job_id,
+                    args=[task.id],
+                    replace_existing=True,
+                    name=f"微信爬取: {task.account_id}",
+                )
+                logger.info(f"📅 [调度器] 添加微信任务: {task.account_id} → {task.schedule_type} {task.schedule_time}")
+
+        logger.info(f"调度器同步完成，共 {len(tasks)} 个普通任务，{len(wechat_tasks)} 个微信任务")
 
     except Exception as e:
         logger.error(f"同步调度任务失败: {e}")
