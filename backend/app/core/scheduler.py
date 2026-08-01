@@ -21,12 +21,42 @@ def create_scheduler() -> BackgroundScheduler:
     scheduler = BackgroundScheduler(
         timezone="Asia/Shanghai",
         job_defaults={
-            'max_instances': 3,  # 允许同一任务最多3个实例并发
+            'max_instances': 1,  # 同一任务最多1个实例，防止重复执行
             'coalesce': False,   # 不合并错过的执行
             'misfire_grace_time': 60,  # 错过触发时间60秒内仍执行
         }
     )
     return scheduler
+
+
+def cleanup_stuck_tasks(max_runtime_minutes: int = 60):
+    """清理运行时间过长的卡住任务"""
+    from app.core.database import get_session_local
+    SessionLocal = get_session_local()
+    session = SessionLocal()
+    try:
+        from datetime import timedelta
+        cutoff = datetime.utcnow() - timedelta(minutes=max_runtime_minutes)
+
+        # 查找运行时间超过 max_runtime_minutes 的任务
+        stuck_tasks = session.query(ScrapeHistory).filter(
+            ScrapeHistory.status == TaskStatus.RUNNING.value,
+            ScrapeHistory.started_at < cutoff
+        ).all()
+
+        if stuck_tasks:
+            logger.warning(f"发现 {len(stuck_tasks)} 个卡住的任务，正在清理...")
+            for task in stuck_tasks:
+                task.status = TaskStatus.FAILED.value
+                task.finished_at = datetime.utcnow()
+                task.error_message = f"任务超时（运行超过 {max_runtime_minutes} 分钟）自动终止"
+            session.commit()
+            logger.warning(f"已清理 {len(stuck_tasks)} 个卡住任务")
+
+    except Exception as e:
+        logger.error(f"清理卡住任务失败: {e}")
+    finally:
+        session.close()
 
 
 def run_wechat_crawl_task(task_id: str):
@@ -42,6 +72,13 @@ def run_wechat_crawl_task(task_id: str):
         if not task:
             logger.error(f"任务不存在: {task_id}")
             return
+
+        # 检查任务是否在最近10分钟内执行过（防止重复执行）
+        if task.last_run_at:
+            from datetime import timedelta
+            if datetime.utcnow() - task.last_run_at < timedelta(minutes=10):
+                logger.warning(f"微信任务 '{task_id}' 刚执行过，跳过本次执行")
+                return
 
         start_time = datetime.utcnow()
 
@@ -94,6 +131,16 @@ def run_scheduled_task(task_id: str):
         task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
         if not task:
             logger.error(f"任务不存在: {task_id}")
+            return
+
+        # 检查是否有同任务正在运行（防止重复执行）
+        running_count = db.query(ScrapeHistory).filter(
+            ScrapeHistory.task_id == task_id,
+            ScrapeHistory.status == TaskStatus.RUNNING.value
+        ).count()
+
+        if running_count > 0:
+            logger.warning(f"任务 '{task.name}' 已有实例在运行，跳过本次执行")
             return
 
         start_time = datetime.utcnow()
@@ -307,8 +354,24 @@ def start_scheduler() -> BackgroundScheduler:
     """启动调度器"""
     scheduler = create_scheduler()
 
+    # 启动时先清理卡住的任务（运行超过60分钟）
+    logger.info("启动时检查并清理卡住的任务...")
+    cleanup_stuck_tasks(max_runtime_minutes=60)
+
     # 初始同步
     sync_scheduler_tasks(scheduler)
+
+    # 每10分钟检查并清理卡住的任务
+    scheduler.add_job(
+        func=cleanup_stuck_tasks,
+        trigger=CronTrigger(minute="*/10", timezone="Asia/Shanghai"),
+        id="cleanup_stuck_tasks",
+        args=[60],  # 超时60分钟
+        replace_existing=True,
+        max_instances=1,
+        name="清理卡住任务",
+    )
+    logger.info("卡住任务自动清理任务已注册（每10分钟检查，运行超过60分钟的任务将被清理）")
 
     # 每小时重新同步一次（处理新增/修改的任务）
     scheduler.add_job(
