@@ -1340,6 +1340,7 @@ class Crawl4AIWrapper:
             timeout: 超时时间（秒）
             cookies: Cookie字符串，用于绕过反爬（如 "name=value; name2=value2"）
         """
+        import asyncio
         try:
             from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 
@@ -1358,16 +1359,23 @@ class Crawl4AIWrapper:
                 verbose=False,
             )
 
-            async with AsyncWebCrawler(config=browser_config, verbose=False) as crawler:
-                # 爬取参数
-                crawl_params = {"url": url, "config": run_config}
-
-                # 如果有 Cookie，添加 cookies 参数
+            async def _do_crawl(crawler, url, config, cookies):
+                """执行爬取的内部函数"""
+                crawl_params = {"url": url, "config": config}
                 if cookies:
                     crawl_params["cookies"] = cookies
-                    logger.info(f"使用 Cookie 爬取: {url}")
+                return await crawler.arun(**crawl_params)
 
-                result = await crawler.arun(**crawl_params)
+            async with AsyncWebCrawler(config=browser_config, verbose=False) as crawler:
+                # 使用 asyncio.wait_for 添加超时保护
+                try:
+                    result = await asyncio.wait_for(
+                        _do_crawl(crawler, url, run_config, cookies),
+                        timeout=timeout
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"Crawl4AI 爬取超时（{timeout}秒）: {url}")
+                    return {"success": False, "error": f"爬取超时（{timeout}秒）"}
 
                 if result.success:
                     # 检查是否是反爬页面
