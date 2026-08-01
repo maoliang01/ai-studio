@@ -18,6 +18,7 @@ from app.models.article import (
     Keyword, ArticleKeyword, ArticleLink
 )
 from app.services.scraper import ScrapedResult
+from app.services.scraper import extract_keywords_locally, summarize_locally
 from app.services import kg_sync
 
 logger = logging.getLogger("ai-studio")
@@ -87,6 +88,7 @@ class ArticleCreate(ArticleBase):
             "word_count": data.get("word_count", 0),
             "author": data.get("author"),
             "summary": data.get("summary", ""),
+            "style": data.get("style"),
             "category_id": data.get("category_id"),
             "source_id": data.get("source_id"),
             "published_at": data.get("published_at"),
@@ -111,6 +113,8 @@ class ArticleUpdate:
             result["author"] = data["author"]
         if "summary" in data:
             result["summary"] = data["summary"]
+        if "style" in data:
+            result["style"] = data["style"]
         if "category_id" in data:
             result["category_id"] = data["category_id"]
         if "published_at" in data:
@@ -187,6 +191,7 @@ def _scrape_result_to_article(
         word_count=result.word_count or 0,
         author=result.author,
         summary=result.summary or "",
+        style=result.style,
         status=result.status,
         error_message=result.error_message,
         category_id=category_id,
@@ -208,6 +213,8 @@ def _scrape_result_to_article(
 
     # 计算内容哈希
     article.content_hash = article.calculate_content_hash()
+    if article.content and not article.summary:
+        article.summary = summarize_locally(article.content)
 
     return article
 
@@ -368,6 +375,7 @@ async def create_article(
         word_count=data.get("word_count", len(content.replace(" ", "").replace("\n", ""))),
         author=data.get("author"),
         summary=data.get("summary", ""),
+        style=data.get("style"),
         content_hash=content_hash,
         category_id=data.get("category_id"),
         source_id=data.get("source_id"),
@@ -375,9 +383,14 @@ async def create_article(
         status="success",
     )
 
+    keyword_names = data.get("keywords") or extract_keywords_locally(
+        article.title,
+        article.content,
+    )
+
     # 处理关键词
-    if data.get("keywords"):
-        keywords = _get_or_create_keywords(db, data["keywords"])
+    if keyword_names:
+        keywords = _get_or_create_keywords(db, keyword_names)
         for kw in keywords:
             article.keywords.append(ArticleKeyword(keyword_id=kw.id))
 
@@ -408,7 +421,7 @@ async def update_article(
     update_data = ArticleUpdate.from_dict(request)
 
     # 更新基本字段
-    for field in ["title", "content", "html", "author", "summary", "category_id"]:
+    for field in ["title", "content", "html", "author", "summary", "style", "category_id"]:
         if field in update_data:
             setattr(article, field, update_data[field])
 
@@ -540,6 +553,7 @@ async def save_scrape_result(
         existing.word_count = result.word_count or existing.word_count
         existing.author = result.author or existing.author
         existing.summary = result.summary or existing.summary
+        existing.style = result.style or existing.style
         existing.status = result.status
         existing.error_message = result.error_message
 
@@ -553,13 +567,18 @@ async def save_scrape_result(
 
         existing.content_hash = existing.calculate_content_hash()
 
+        keyword_names = result.keywords or extract_keywords_locally(
+            existing.title or result.title or "",
+            existing.content or result.content or "",
+        )
+
         # 更新关键词
-        if result.keywords:
+        if keyword_names:
             db.query(ArticleKeyword).filter(
                 ArticleKeyword.article_id == existing.id
             ).delete()
 
-            keywords = _get_or_create_keywords(db, result.keywords)
+            keywords = _get_or_create_keywords(db, keyword_names)
             for kw in keywords:
                 existing.keywords.append(ArticleKeyword(keyword_id=kw.id))
 
@@ -583,9 +602,11 @@ async def save_scrape_result(
         for link_url in result.links:
             article.links.append(ArticleLink(target_url=link_url))
 
+    keyword_names = result.keywords or extract_keywords_locally(article.title, article.content)
+
     # 保存关键词
-    if result.keywords:
-        keywords = _get_or_create_keywords(db, result.keywords)
+    if keyword_names:
+        keywords = _get_or_create_keywords(db, keyword_names)
         for kw in keywords:
             article.keywords.append(ArticleKeyword(keyword_id=kw.id))
 
@@ -631,11 +652,25 @@ async def batch_save_articles(
                 existing.word_count = result.word_count or existing.word_count
                 existing.author = result.author or existing.author
                 existing.summary = result.summary or existing.summary
+                existing.style = result.style or existing.style
                 existing.status = result.status
                 existing.content_hash = existing.calculate_content_hash()
+                keyword_names = result.keywords or extract_keywords_locally(existing.title, existing.content)
+                if keyword_names:
+                    db.query(ArticleKeyword).filter(
+                        ArticleKeyword.article_id == existing.id
+                    ).delete()
+                    keywords = _get_or_create_keywords(db, keyword_names)
+                    for kw in keywords:
+                        existing.keywords.append(ArticleKeyword(keyword_id=kw.id))
                 updated += 1
             else:
                 article = _scrape_result_to_article(result, category_id, source_id)
+                keyword_names = result.keywords or extract_keywords_locally(article.title, article.content)
+                if keyword_names:
+                    keywords = _get_or_create_keywords(db, keyword_names)
+                    for kw in keywords:
+                        article.keywords.append(ArticleKeyword(keyword_id=kw.id))
                 db.add(article)
                 created += 1
 

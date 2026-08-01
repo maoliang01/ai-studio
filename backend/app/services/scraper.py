@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import re
+from collections import Counter
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta
@@ -782,6 +783,84 @@ MAX_AGE_YEARS = 10   # 文章最长10年
 # 内容质量阈值
 # ================================================
 MIN_CONTENT_WORDS = 50  # 内容最少字数
+
+KEYWORD_STOPWORDS = {
+    "我们", "你们", "他们", "进行", "通过", "有关", "相关", "工作", "活动", "表示",
+    "指出", "强调", "推进", "开展", "进一步", "不断", "持续", "加强", "提升",
+    "实现", "建设", "发展", "研究", "创新", "信息", "中心", "单位", "文章",
+    "内容", "发布", "来源", "记者", "编辑", "责任编辑", "中国", "有限公司",
+}
+
+
+def _normalize_keywords(keywords_raw: Any, limit: int = 5) -> List[str]:
+    """Normalize LLM or local keyword output into a short unique list."""
+    values: List[str] = []
+    if isinstance(keywords_raw, str):
+        values = re.split(r"[,，、;；\n]+", keywords_raw)
+    elif isinstance(keywords_raw, list):
+        for item in keywords_raw:
+            if isinstance(item, str):
+                values.extend(re.split(r"[,，、;；\n]+", item))
+            elif item:
+                values.append(str(item))
+
+    normalized: List[str] = []
+    seen = set()
+    for value in values:
+        keyword = re.sub(r"^[#\-\s]+|[#\-\s]+$", "", str(value).strip())
+        keyword = keyword.strip("：:。.!！?？\"'“”‘’（）()[]【】")
+        if not keyword or keyword in seen or keyword in KEYWORD_STOPWORDS:
+            continue
+        if len(keyword) < 2 or len(keyword) > 24:
+            continue
+        seen.add(keyword)
+        normalized.append(keyword)
+        if len(normalized) >= limit:
+            break
+    return normalized
+
+
+def extract_keywords_locally(title: str, content: str, limit: int = 5) -> List[str]:
+    """Extract stable keywords without an LLM as a persistence fallback."""
+    text = "\n".join([title or "", content or ""])
+    if not text.strip():
+        return []
+
+    candidates: List[str] = []
+    candidates.extend(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{2,24}(?:院|所|中心|大学|公司|集团|平台|系统|项目|工程|大赛|会议|论坛|计划|研究院|实验室)", text))
+    candidates.extend(re.findall(r"[\u4e00-\u9fff]{3,10}", text))
+    candidates.extend(re.findall(r"[A-Za-z][A-Za-z0-9_\-]{2,24}", text))
+
+    scored = Counter()
+    title_text = title or ""
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if candidate in KEYWORD_STOPWORDS or len(candidate) < 2 or len(candidate) > 24:
+            continue
+        if re.fullmatch(r"\d+", candidate):
+            continue
+        score = 3 if candidate in title_text else 1
+        if len(candidate) >= 4:
+            score += 1
+        scored[candidate] += score
+
+    return [kw for kw, _ in scored.most_common(limit)]
+
+
+def summarize_locally(content: str, limit: int = 180) -> str:
+    """Use the first meaningful sentences when the LLM metadata step is unavailable."""
+    if not content:
+        return ""
+    text = re.sub(r"\s+", " ", content).strip()
+    sentences = re.split(r"(?<=[。！？!?])\s*", text)
+    summary = ""
+    for sentence in sentences:
+        if len(sentence.strip()) < 8:
+            continue
+        if len(summary) + len(sentence) > limit and summary:
+            break
+        summary += sentence
+    return (summary or text[:limit]).strip()
 
 
 @dataclass
@@ -1848,6 +1927,12 @@ class WebScraper:
 
                 result.keywords = metadata.get("keywords", [])
 
+            if result.content and result.word_count >= 20:
+                if not result.summary:
+                    result.summary = summarize_locally(result.content)
+                if not result.keywords:
+                    result.keywords = extract_keywords_locally(result.title, result.content)
+
             # 9. 文体分析（可选，在摘要提取后进行）
             if options.extract_metadata and result.content and result.word_count >= 50 and not result.style:
                 result.style = await self._extract_style_with_llm(result.title, result.content)
@@ -1925,6 +2010,12 @@ class WebScraper:
             db = SessionLocal()
 
             try:
+                if result.content and result.word_count >= 20:
+                    if not result.summary:
+                        result.summary = summarize_locally(result.content)
+                    if not result.keywords:
+                        result.keywords = extract_keywords_locally(result.title, result.content)
+
                 # 爬取源配置历史上只写入 settings.json，文章表却通过外键引用
                 # PostgreSQL 的 scrape_sources。保存前补齐数据库记录，避免请求
                 # 表面成功但事务因悬空 source_id 回滚。
@@ -2395,33 +2486,31 @@ class WebScraper:
                 # 提取 JSON（处理 <think> 块 + ```json 围栏）
                 data = _extract_json_from_llm_response(response)
                 if data:
-                    # 确保 keywords 是列表（处理各种可能的格式）
-                    keywords_raw = data.get("keywords", [])
-                    keywords = []
-                    if isinstance(keywords_raw, str):
-                        # 如果是逗号分隔的字符串，转换为列表
-                        keywords = [k.strip() for k in keywords_raw.split(',') if k.strip()]
-                    elif isinstance(keywords_raw, list):
-                        for k in keywords_raw:
-                            if isinstance(k, str):
-                                # 如果元素本身包含逗号，再分割
-                                parts = [x.strip() for x in k.split(',') if x.strip()]
-                                keywords.extend(parts)
-                            elif k:
-                                keywords.append(str(k).strip())
-                    keywords = [k for k in keywords if k]  # 去重后去除空值
+                    keywords = _normalize_keywords(data.get("keywords", []))
+                    if not keywords:
+                        keywords = extract_keywords_locally(title, content)
+
+                    summary = data.get("summary", "") or data.get("摘要", "")
+                    if not summary:
+                        summary = summarize_locally(content)
 
                     return {
                         "title": data.get("title", title) if title or not data.get("title") else data.get("title"),
                         "published_at": data.get("published_at", ""),
                         "author": data.get("author", ""),
-                        "summary": data.get("summary", "") or data.get("摘要", ""),
+                        "summary": summary,
                         "keywords": keywords,
                     }
         except Exception as e:
             logger.error(f"LLM 元信息提取失败: {e}")
 
-        return {"title": title, "published_at": "", "author": "", "summary": "", "keywords": []}
+        return {
+            "title": title,
+            "published_at": "",
+            "author": "",
+            "summary": summarize_locally(content),
+            "keywords": extract_keywords_locally(title, content),
+        }
 
     async def _extract_style_with_llm(self, title: str, content: str) -> Optional[str]:
         """使用大模型分析文章文体类型"""

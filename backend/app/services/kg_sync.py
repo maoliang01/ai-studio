@@ -281,13 +281,15 @@ async def reconcile(apply: bool, db: Session) -> dict:
         fixed = {
             "missing_synced": 0,
             "orphans_deleted": 0,
-            "dirty_marked": 0
+            "dirty_marked": 0,
+            "orphan_entities_deleted": 0,
         }
         # 1) 删孤儿
         for aid in orphan_in_kg:
             ok = await neo4j.delete_article_full(aid)
             if ok:
                 fixed["orphans_deleted"] += 1
+        fixed["orphan_entities_deleted"] = await neo4j.cleanup_orphan_entities()
         # 2) 标脏数据为 pending(等用户重抽)
         for aid in dirty_in_kg:
             art = db.query(Article).filter(Article.id == aid).first()

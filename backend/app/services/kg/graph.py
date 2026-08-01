@@ -385,6 +385,7 @@ class Neo4jService:
             queries = {
                 "articles": "MATCH (a:Article) RETURN count(a) as count",
                 "entities": "MATCH (e:Entity) RETURN count(e) as count",
+                "orphan_entities": "MATCH (e:Entity) WHERE NOT (e)<-[:CONTAINS_ENTITY]-(:Article) RETURN count(e) as count",
                 "article_entity_links": "MATCH ()-[r:CONTAINS_ENTITY]->() RETURN count(r) as count",
                 "entity_relations": "MATCH ()-[r:RELATES_TO]->() RETURN count(r) as count",
             }
@@ -503,15 +504,41 @@ class Neo4jService:
             WITH entities
             UNWIND entities AS e
             WITH e
-            WHERE e IS NOT NULL AND NOT (e)<-[:CONTAINS_ENTITY]-()
+            WHERE e IS NOT NULL
+            SET e.source_articles = [id IN coalesce(e.source_articles, []) WHERE id <> $article_id]
+            WITH e
+            WHERE NOT (e)<-[:CONTAINS_ENTITY]-()
             DETACH DELETE e
             """
             try:
                 await session.run(query, {"article_id": article_id})
-                return True
             except Exception as e:
                 logger.error(f"delete_article_full 失败 {article_id}: {e}")
                 return False
+        await self.cleanup_orphan_entities()
+        return True
+
+    async def cleanup_orphan_entities(self) -> int:
+        """删除没有任何 Article 入边的 Entity，以及这些实体上的关系。"""
+        if not self._driver:
+            await self.connect()
+
+        async with self._driver.session() as session:
+            query = """
+            MATCH (e:Entity)
+            WHERE NOT (e)<-[:CONTAINS_ENTITY]-(:Article)
+            WITH collect(e) AS entities, count(e) AS deleted
+            UNWIND entities AS e
+            DETACH DELETE e
+            RETURN deleted
+            """
+            try:
+                result = await session.run(query)
+                record = await result.single()
+                return int(record["deleted"]) if record else 0
+            except Exception as e:
+                logger.error(f"cleanup_orphan_entities 失败: {e}")
+                return 0
 
     async def find_orphan_articles(self, sqlite_ids: set) -> list:
         """返回 Neo4j 中存在但不在 sqlite_ids 集合的 Article.id"""

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { normalizeArticleItem } from "../normalize";
 
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8080";
 
@@ -14,7 +15,7 @@ export async function GET(
       return NextResponse.json({ error: "文章不存在" }, { status: 404 });
     }
     const data = await res.json();
-    return NextResponse.json(data);
+    return NextResponse.json(normalizeArticleItem(data));
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "未知错误" },

@@ -111,6 +111,11 @@ export default function ScrapePage() {
   const [scheduleRange, setScheduleRange] = useState<"1d" | "7d" | "30d">("1d");
   const [isSavingSchedule, setIsSavingSchedule] = useState(false);
   const [scheduleMessage, setScheduleMessage] = useState<string | null>(null);
+  // 定时任务多选相关状态
+  const [selectedSources, setSelectedSources] = useState<ScrapeSource[]>([]);
+  const [customUrlInput, setCustomUrlInput] = useState("");
+  const [recentHistory, setRecentHistory] = useState<any[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   // 用于批量导出的选中状态
   const [selectedForExport, setSelectedForExport] = useState<Set<string>>(new Set());
 
@@ -162,6 +167,25 @@ export default function ScrapePage() {
     }
   }, [categories, selectedCategory]);
 
+  // 加载最近执行记录
+  useEffect(() => {
+    const loadRecentHistory = async () => {
+      setIsLoadingHistory(true);
+      try {
+        const res = await fetch("/api/scheduled/history?limit=5");
+        if (res.ok) {
+          const data = await res.json();
+          setRecentHistory(data.histories || data || []);
+        }
+      } catch (error) {
+        console.error("加载历史记录失败:", error);
+      } finally {
+        setIsLoadingHistory(false);
+      }
+    };
+    loadRecentHistory();
+  }, []);
+
   // 选择已有来源时自动填充 URL
   const handleSelectSource = (source: ScrapeSource) => {
     setSelectedSource(source);
@@ -175,29 +199,43 @@ export default function ScrapePage() {
   };
 
   const handleCreateSchedule = async () => {
-    if (!url.trim()) {
-      setScheduleMessage("请先输入网页地址或选择已配置的网站来源。");
+    // 验证至少选择了一个来源或输入了自定义 URL
+    if (selectedSources.length === 0 && !customUrlInput.trim()) {
+      setScheduleMessage("请至少选择一个网站来源或输入自定义 URL。");
       return;
     }
-    try {
-      const parsedUrl = new URL(url.trim());
-      if (!["http:", "https:"].includes(parsedUrl.protocol)) throw new Error("invalid protocol");
-    } catch {
-      setScheduleMessage("请输入有效的 http 或 https 网页地址。");
-      return;
+
+    // 验证自定义 URL 格式
+    if (customUrlInput.trim()) {
+      try {
+        const parsedUrl = new URL(customUrlInput.trim());
+        if (!["http:", "https:"].includes(parsedUrl.protocol)) throw new Error("invalid protocol");
+      } catch {
+        setScheduleMessage("请输入有效的 http 或 https 网页地址。");
+        return;
+      }
     }
 
     setIsSavingSchedule(true);
     setScheduleMessage(null);
     try {
-      const hostname = new URL(url.trim()).hostname;
+      // 构建任务名称
+      const sourceNames = selectedSources.map(s => s.name);
+      const customHostname = customUrlInput.trim() ? new URL(customUrlInput.trim()).hostname : "";
+      const nameParts = [...sourceNames];
+      if (customHostname) nameParts.push(customHostname);
+      const taskName = nameParts.length > 2
+        ? `${nameParts[0]} 等 ${nameParts.length} 个源 定时爬取`
+        : `${nameParts.join("、")} 定时爬取`;
+
+      // 创建定时任务
       const response = await fetch("/api/scheduled", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: `${selectedSource?.name || hostname} 定时爬取`,
-          sourceIds: selectedSource ? [selectedSource.id] : [],
-          customUrl: selectedSource ? undefined : url.trim(),
+          name: taskName,
+          sourceIds: selectedSources.map(s => s.id),
+          customUrl: customUrlInput.trim() || undefined,
           scheduleTime,
           scrapeRange: scheduleRange,
           isEnabled: true,
@@ -205,8 +243,19 @@ export default function ScrapePage() {
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || result.detail || "创建定时任务失败");
+
+      // 成功后重置状态并关闭对话框
       setScheduleDialogOpen(false);
-      setScheduleMessage(`定时任务已启用，将在每天 ${scheduleTime} 自动爬取并保存到文档管理。`);
+      setSelectedSources([]);
+      setCustomUrlInput("");
+      setScheduleMessage(`定时任务已启用，将在每天 ${scheduleTime} 自动爬取 ${selectedSources.length + (customUrlInput.trim() ? 1 : 0)} 个源并保存到文档管理。`);
+
+      // 刷新历史记录
+      const historyRes = await fetch("/api/scheduled/history?limit=5");
+      if (historyRes.ok) {
+        const historyData = await historyRes.json();
+        setRecentHistory(historyData.histories || historyData || []);
+      }
     } catch (error) {
       setScheduleMessage(error instanceof Error ? error.message : "创建定时任务失败");
     } finally {
@@ -1070,16 +1119,75 @@ export default function ScrapePage() {
                   </div>
                 )}
 
+                {/* 最近执行记录 */}
+                {recentHistory.length > 0 && (
+                  <Card className="mt-4">
+                    <CardHeader className="pb-3">
+                      <div className="flex items-center justify-between">
+                        <CardTitle className="text-sm font-medium flex items-center gap-2">
+                          <History className="h-4 w-4" />
+                          最近执行记录
+                        </CardTitle>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="text-xs"
+                          onClick={() => router.push("/settings/scrape?tab=scheduled")}
+                        >
+                          查看全部
+                        </Button>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="pt-0">
+                      <div className="space-y-2">
+                        {recentHistory.slice(0, 3).map((item, index) => (
+                          <div
+                            key={item.id || index}
+                            className="flex items-center gap-3 p-2 rounded-lg bg-muted/30"
+                          >
+                            {item.status === "success" ? (
+                              <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" />
+                            ) : item.status === "failed" ? (
+                              <AlertCircle className="h-4 w-4 text-destructive shrink-0" />
+                            ) : (
+                              <Loader2 className="h-4 w-4 text-muted-foreground shrink-0 animate-spin" />
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium truncate">
+                                {item.taskName || item.articleTitle || "定时任务"}
+                              </p>
+                              <p className="text-xs text-muted-foreground">
+                                {item.status === "success"
+                                  ? `成功爬取 ${item.articlesCount || 0} 篇文章`
+                                  : item.status === "failed"
+                                    ? `失败: ${item.errorMessage || "未知错误"}`
+                                    : "正在执行中..."}
+                              </p>
+                            </div>
+                            <span className="text-xs text-muted-foreground shrink-0">
+                              {item.startedAt
+                                ? new Date(item.startedAt).toLocaleString("zh-CN", {
+                                  month: "2-digit",
+                                  day: "2-digit",
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                })
+                                : ""}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
+
                 <Dialog open={scheduleDialogOpen} onOpenChange={setScheduleDialogOpen}>
-                  <DialogContent className="max-w-lg">
+                  <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
                     <DialogHeader>
                       <DialogTitle className="flex items-center gap-2"><Clock className="h-5 w-5" />设置网页定时爬取</DialogTitle>
                     </DialogHeader>
                     <div className="space-y-5 py-2">
-                      <div className="rounded-md bg-muted/60 px-3 py-2 text-sm">
-                        <p className="font-medium">{selectedSource?.name || "自定义网页"}</p>
-                        <p className="mt-1 break-all text-xs text-muted-foreground">{url}</p>
-                      </div>
+                      {/* 执行时间设置 */}
                       <div className="grid gap-4 sm:grid-cols-2">
                         <div className="space-y-2">
                           <Label htmlFor="webScheduleTime">每天执行时间</Label>
@@ -1094,13 +1202,93 @@ export default function ScrapePage() {
                           </select>
                         </div>
                       </div>
-                      <div className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-sm leading-6 text-muted-foreground">
-                        任务创建后立即启用。每次定时爬取会自动去重并保存到“文档管理”；已配置来源沿用其分类，自定义 URL 保存为未分类。
+
+                      {/* 已配置网站来源多选 */}
+                      <div className="space-y-2">
+                        <Label>选择网站来源 {selectedSources.length > 0 && <span className="text-primary">（已选 {selectedSources.length} 个）</span>}</Label>
+                        <ScrollArea className="h-[200px] rounded-md border p-3">
+                          {scrapeSources.filter(s => s.isEnabled).length === 0 ? (
+                            <div className="text-center py-6 text-muted-foreground">
+                              <p className="mb-2">暂无已配置的网站来源</p>
+                              <Button variant="outline" size="sm" onClick={handleAddSource}>
+                                <Settings className="mr-2 h-4 w-4" />去配置网站
+                              </Button>
+                            </div>
+                          ) : (
+                            <div className="space-y-2">
+                              {scrapeSources.filter(s => s.isEnabled).map((source) => (
+                                <div
+                                  key={source.id}
+                                  className={cn(
+                                    "flex items-center gap-3 p-2 rounded-lg cursor-pointer transition-all",
+                                    selectedSources.some(s => s.id === source.id)
+                                      ? "bg-primary/10 border border-primary/30"
+                                      : "hover:bg-muted/50 border border-transparent"
+                                  )}
+                                  onClick={() => {
+                                    setSelectedSources(prev =>
+                                      prev.some(s => s.id === source.id)
+                                        ? prev.filter(s => s.id !== source.id)
+                                        : [...prev, source]
+                                    );
+                                  }}
+                                >
+                                  <Checkbox
+                                    checked={selectedSources.some(s => s.id === source.id)}
+                                    onCheckedChange={(checked) => {
+                                      setSelectedSources(prev =>
+                                        checked
+                                          ? [...prev, source]
+                                          : prev.filter(s => s.id !== source.id)
+                                      );
+                                    }}
+                                  />
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2">
+                                      <span className="font-medium text-sm">{source.name}</span>
+                                      <Badge className={cn("text-xs", getCategoryColors(source.category, categories))}>
+                                        {getCategoryLabel(source.category, categories)}
+                                      </Badge>
+                                    </div>
+                                    <p className="text-xs text-muted-foreground truncate">{source.url}</p>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </ScrollArea>
                       </div>
+
+                      {/* 自定义 URL 输入 */}
+                      <div className="space-y-2">
+                        <Label htmlFor="customUrl">自定义 URL（可选）</Label>
+                        <div className="flex gap-2">
+                          <Input
+                            id="customUrl"
+                            value={customUrlInput}
+                            onChange={(e) => setCustomUrlInput(e.target.value)}
+                            placeholder="https://example.com"
+                          />
+                        </div>
+                      </div>
+
+                      {/* 提示信息 */}
+                      <div className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-sm leading-6 text-muted-foreground">
+                        任务创建后立即启用。每次定时爬取会自动去重并保存到"文档管理"；已配置来源沿用其分类，自定义 URL 保存为未分类。
+                      </div>
+
                       {scheduleMessage && <p className="text-sm text-destructive">{scheduleMessage}</p>}
+
+                      {/* 操作按钮 */}
                       <div className="flex justify-end gap-2">
                         <Button variant="outline" onClick={() => setScheduleDialogOpen(false)}>取消</Button>
-                        <Button onClick={handleCreateSchedule} disabled={isSavingSchedule || !scheduleTime}>{isSavingSchedule && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}创建并启用</Button>
+                        <Button
+                          onClick={handleCreateSchedule}
+                          disabled={isSavingSchedule || !scheduleTime || (selectedSources.length === 0 && !customUrlInput.trim())}
+                        >
+                          {isSavingSchedule && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                          创建并启用
+                        </Button>
                       </div>
                     </div>
                   </DialogContent>

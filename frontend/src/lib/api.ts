@@ -656,10 +656,13 @@ function normalizeArticle(data: Record<string, unknown>): Article {
     wordCount: data.word_count as number ?? data.wordCount as number ?? 0,
     author: data.author as string | undefined,
     summary: data.summary as string | undefined,
+    style: data.style as string | undefined,
     contentHash: data.content_hash as string | undefined,
     sourceId: data.source_id as string | undefined,
+    sourceName: data.source_name as string | undefined,
     sourceType: data.source_type as string | undefined,
     categoryId: data.category_id as string | undefined,
+    categoryName: data.category_name as string | undefined,
     publishedAt: data.published_at as string | undefined,
     scrapedAt: data.scraped_at as string,
     status: (data.status as Article["status"]) || "success",
@@ -667,6 +670,10 @@ function normalizeArticle(data: Record<string, unknown>): Article {
     keywords: (data.keywords as string[]) || [],
     createdAt: data.created_at as string | undefined,
     updatedAt: data.updated_at as string | undefined,
+    kgStatus: data.kg_status as Article["kgStatus"],
+    kgProcessedAt: data.kg_processed_at as string | undefined,
+    kgContentHash: data.kg_content_hash as string | undefined,
+    kgErrorMessage: data.kg_error_message as string | undefined,
   };
 }
 // ================================================

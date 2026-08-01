@@ -97,7 +97,8 @@ async def get_graph_stats():
 
         stats["articles_in_db"] = db_count
         kg_articles = stats.get("articles", 0)
-        stats["drift_detected"] = kg_articles != db_count
+        stats["orphan_entities"] = stats.get("orphan_entities", 0)
+        stats["drift_detected"] = kg_articles != db_count or stats["orphan_entities"] > 0
 
         return {
             "status": "success",
@@ -586,13 +587,20 @@ async def get_sync_status(db: Session = Depends(get_db)):
         }
         total_in_db = sum(normalized.values())
 
-        # 2. Neo4j Article 数 + 漂移检测
+        # 2. Neo4j Article 数 + 孤立实体数 + 漂移检测
         neo4j = Neo4jService()
         await neo4j.connect()
         async with neo4j._driver.session() as s:
             r = await s.run("MATCH (a:Article) RETURN count(a) AS c")
             rec = await r.single()
             total_in_kg = rec["c"] if rec else 0
+            r_orphan = await s.run("""
+                MATCH (e:Entity)
+                WHERE NOT (e)<-[:CONTAINS_ENTITY]-(:Article)
+                RETURN count(e) AS c
+            """)
+            rec_orphan = await r_orphan.single()
+            orphan_entities = rec_orphan["c"] if rec_orphan else 0
         await neo4j.close()
 
         return {
@@ -600,7 +608,8 @@ async def get_sync_status(db: Session = Depends(get_db)):
             "by_status": normalized,
             "total_in_db": total_in_db,
             "total_in_kg": total_in_kg,
-            "drift_detected": total_in_db != total_in_kg,
+            "orphan_entities": orphan_entities,
+            "drift_detected": total_in_db != total_in_kg or orphan_entities > 0,
             "sync_state": get_sync_state(),
         }
     except Exception as e:
@@ -624,6 +633,26 @@ async def reconcile_knowledge_graph(
     except Exception as e:
         logger.error(f"对账失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/cleanup-orphans")
+async def cleanup_orphan_entities():
+    """删除没有任何 Article 入边的孤立 Entity 节点及其关系。"""
+    neo4j = Neo4jService()
+    try:
+        await neo4j.connect()
+        deleted = await neo4j.cleanup_orphan_entities()
+        stats = await neo4j.get_graph_stats()
+        return {
+            "status": "success",
+            "deleted": deleted,
+            "stats": stats,
+        }
+    except Exception as e:
+        logger.error(f"清理孤立实体失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        await neo4j.close()
 
 
 @router.post("/process-pending")

@@ -56,6 +56,7 @@ interface Stats {
   articles_in_db?: number;   // SQLite 中 success 文章数
   drift_detected?: boolean;  // 数量不一致
   entities: number;
+  orphan_entities?: number;
   article_entity_links: number;
   entity_relations: number;
   entities_by_type?: Record<string, number>;
@@ -72,6 +73,7 @@ interface SyncStatus {
   };
   total_in_db: number;
   total_in_kg: number;
+  orphan_entities?: number;
   drift_detected: boolean;
   sync_state: {
     in_progress: boolean;
@@ -602,6 +604,14 @@ function KnowledgeGraphPageContent() {
                   try {
                     const res = await fetch("/api/kg/reconcile?apply=true", { method: "POST" });
                     const data = await res.json();
+                    if (!res.ok) {
+                      throw new Error(data.detail || "对账接口执行失败");
+                    }
+                    const cleanupRes = await fetch("/api/kg/cleanup-orphans", { method: "POST" });
+                    const cleanupData = await cleanupRes.json();
+                    if (!cleanupRes.ok) {
+                      throw new Error(cleanupData.detail || "孤立实体清理失败");
+                    }
                     alert(
                       `对账结果:\n` +
                       `  文档管理: ${data.sqlite_count}\n` +
@@ -612,6 +622,7 @@ function KnowledgeGraphPageContent() {
                       (data.fixed ? `\n已修复: ${JSON.stringify(data.fixed)}` : "")
                     );
                     loadStats();
+                    loadSyncStatus();
                     loadGraphData();
                   } catch (e) {
                     alert("对账失败: " + e);

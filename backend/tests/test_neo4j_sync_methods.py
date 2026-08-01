@@ -130,6 +130,27 @@ async def test_delete_article_full_keeps_shared_entities(neo4j_service):
 
 
 @pytest.mark.asyncio
+async def test_cleanup_orphan_entities_removes_entity_only_graph(neo4j_service):
+    e1, e2 = f"orphan-{uuid.uuid4()}", f"orphan-{uuid.uuid4()}"
+    async with neo4j_service._driver.session() as session:
+        await session.run(
+            "CREATE (e1:Entity {name: $e1, entity_type: 'ORG'})"
+            "-[:RELATES_TO]->"
+            "(e2:Entity {name: $e2, entity_type: 'EVENT'})",
+            e1=e1,
+            e2=e2,
+        )
+
+    deleted = await neo4j_service.cleanup_orphan_entities()
+    assert deleted == 2
+
+    async with neo4j_service._driver.session() as session:
+        r = await session.run("MATCH (e:Entity) RETURN count(e) AS c")
+        row = await r.single()
+        assert row["c"] == 0
+
+
+@pytest.mark.asyncio
 async def test_find_orphan_articles(neo4j_service):
     a1, a2, a3 = f"a-{uuid.uuid4()}", f"a-{uuid.uuid4()}", f"a-{uuid.uuid4()}"
     async with neo4j_service._driver.session() as session:
