@@ -16,6 +16,7 @@ from app.services.kg_sync import (
     extract_and_link_entities,
     reconcile,
     recover_interrupted_articles,
+    build_keyword_fallback_entities,
 )
 
 
@@ -78,6 +79,24 @@ def test_recover_interrupted_articles_marks_processing_pending():
     assert recovered == 2
     db.query.return_value.filter.return_value.update.assert_called_once()
     db.commit.assert_called_once()
+
+
+def test_keyword_fallback_builds_entities_without_relations():
+    article = MagicMock()
+    article.id = "article-1"
+    article.keywords = []
+    for priority, name in [(10, "空天院"), (8, "遥感技术"), (1, "空天院")]:
+        link = MagicMock()
+        link.priority = priority
+        link.keyword.name = name
+        article.keywords.append(link)
+
+    entities = build_keyword_fallback_entities(article)
+
+    assert [entity.name for entity in entities] == ["空天院", "遥感技术"]
+    assert entities[0].entity_type == "ORGANIZATION"
+    assert entities[1].entity_type == "TECHNOLOGY"
+    assert all(entity.subtype == "KEYWORD_FALLBACK" for entity in entities)
 
 
 @pytest.mark.asyncio

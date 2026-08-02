@@ -5,8 +5,8 @@
 """
 import logging
 import asyncio
-from typing import Optional, List, Dict, Any
-from datetime import datetime
+from typing import Optional, List, Dict, Any, Literal
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
 from sqlalchemy.orm import Session
@@ -18,6 +18,7 @@ from app.services.kg import Neo4jService, EntityExtractor, EmbeddingService
 from app.services.kg.graph import EntityNode, Relationship
 from app.services.kg.embedding import VectorStore
 from app.services.kg.qa import answer_question
+from app.services.kg.mining import find_relation_evidence
 from app.services import kg_sync
 
 logger = logging.getLogger("ai-studio")
@@ -35,6 +36,25 @@ def get_neo4j_service() -> Neo4jService:
 def get_embedding_service() -> EmbeddingService:
     """获取 Embedding 服务实例"""
     return EmbeddingService()
+
+
+def get_causal_article_records(db: Session) -> List[Dict[str, Any]]:
+    """Load the bounded historical corpus used for review-only causal mining."""
+    articles = (
+        db.query(Article)
+        .filter(Article.status == "success")
+        .order_by(Article.scraped_at.desc())
+        .limit(500)
+        .all()
+    )
+    return [
+        {
+            "id": str(article.id),
+            "content": article.content or "",
+            "summary": article.summary or "",
+        }
+        for article in articles
+    ]
 
 
 # ============ 健康检查 ============
@@ -583,9 +603,34 @@ async def get_sync_status(db: Session = Depends(get_db)):
             "processing": by_status.get("processing", 0),
             "success": by_status.get("success", 0),
             "failed": by_status.get("failed", 0),
+            "partial": by_status.get("partial", 0),
             "skipped": by_status.get("skipped", 0),
         }
         total_in_db = sum(normalized.values())
+        failed_articles = [
+            {
+                "id": str(article.id),
+                "title": article.title,
+                "error": article.kg_error_message,
+            }
+            for article in db.query(Article)
+            .filter(Article.status == "success", Article.kg_status == "failed")
+            .order_by(Article.updated_at.desc())
+            .limit(20)
+            .all()
+        ]
+        partial_articles = [
+            {
+                "id": str(article.id),
+                "title": article.title,
+                "warning": article.kg_error_message,
+            }
+            for article in db.query(Article)
+            .filter(Article.status == "success", Article.kg_status == "partial")
+            .order_by(Article.updated_at.desc())
+            .limit(20)
+            .all()
+        ]
 
         # 2. Neo4j Article 数 + 孤立实体数 + 漂移检测
         neo4j = Neo4jService()
@@ -610,6 +655,8 @@ async def get_sync_status(db: Session = Depends(get_db)):
             "total_in_kg": total_in_kg,
             "orphan_entities": orphan_entities,
             "drift_detected": total_in_db != total_in_kg or orphan_entities > 0,
+            "failed_articles": failed_articles,
+            "partial_articles": partial_articles,
             "sync_state": get_sync_state(),
         }
     except Exception as e:
@@ -863,6 +910,524 @@ async def explore_entity_profile(
         if article_id in articles_by_id
     ]
     return {"status": "success", **profile}
+
+
+class AliasReviewRequest(BaseModel):
+    source: str = Field(min_length=1, max_length=500)
+    target: str = Field(min_length=1, max_length=500)
+    decision: Literal["approved", "rejected"]
+    canonical_name: Optional[str] = Field(default=None, max_length=500)
+    note: str = Field(default="", max_length=500)
+
+
+class CrossDocumentReviewRequest(BaseModel):
+    source: str = Field(min_length=1, max_length=500)
+    target: str = Field(min_length=1, max_length=500)
+    decision: Literal["approved", "rejected"]
+    note: str = Field(default="", max_length=500)
+
+
+class LegacyRelationReviewRequest(BaseModel):
+    source: str = Field(min_length=1, max_length=500)
+    target: str = Field(min_length=1, max_length=500)
+    rel_type: str = Field(min_length=1, max_length=100)
+    decision: Literal["kept", "deleted"]
+    note: str = Field(default="", max_length=500)
+
+
+class InferenceReviewRequest(BaseModel):
+    source: str = Field(min_length=1, max_length=500)
+    target: str = Field(min_length=1, max_length=500)
+    rel_type: Literal["part_of", "located_in", "precedes", "succeeds"]
+    decision: Literal["approved", "rejected"]
+    note: str = Field(default="", max_length=500)
+
+
+class LinkPredictionReviewRequest(BaseModel):
+    source: str = Field(min_length=1, max_length=500)
+    target: str = Field(min_length=1, max_length=500)
+    decision: Literal["approved", "rejected"]
+    note: str = Field(default="", max_length=500)
+
+
+class CausalReviewRequest(BaseModel):
+    source: str = Field(min_length=1, max_length=500)
+    target: str = Field(min_length=1, max_length=500)
+    rel_type: Literal["causes", "enables"]
+    decision: Literal["approved", "rejected"]
+    note: str = Field(default="", max_length=500)
+
+
+@router.get("/mining/reviews")
+async def get_mining_reviews(
+    review_type: Optional[str] = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=2000),
+):
+    neo4j = Neo4jService()
+    try:
+        reviews = await neo4j.get_mining_reviews(review_type=review_type, limit=limit)
+        return {"status": "success", "count": len(reviews), "reviews": reviews}
+    finally:
+        await neo4j.close()
+
+
+@router.post("/mining/reviews/{review_id}/undo")
+async def undo_mining_review(review_id: str):
+    neo4j = Neo4jService()
+    try:
+        review = await neo4j.undo_mining_review(review_id)
+        return {"status": "success", "review": review}
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    finally:
+        await neo4j.close()
+
+
+@router.get("/mining/aliases")
+async def get_alias_candidates(
+    min_shared_articles: int = Query(default=2, ge=1, le=20),
+    min_score: float = Query(default=0.32, ge=0.0, le=1.0),
+    limit: int = Query(default=50, ge=1, le=200),
+    include_reviewed: bool = Query(default=False),
+):
+    """返回待人工确认的实体别名候选，不自动合并。"""
+    neo4j = Neo4jService()
+    try:
+        candidates = await neo4j.get_alias_candidates(
+            min_shared_articles=min_shared_articles,
+            min_score=min_score,
+            limit=limit,
+            include_reviewed=include_reviewed,
+        )
+        return {"status": "success", "count": len(candidates), "candidates": candidates}
+    finally:
+        await neo4j.close()
+
+
+@router.post("/mining/aliases/review")
+async def review_alias_candidate(request: AliasReviewRequest):
+    neo4j = Neo4jService()
+    try:
+        review = await neo4j.review_alias_candidate(
+            source=request.source.strip(),
+            target=request.target.strip(),
+            decision=request.decision,
+            canonical_name=request.canonical_name.strip() if request.canonical_name else None,
+            note=request.note.strip(),
+        )
+        return {"status": "success", "review": review}
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    finally:
+        await neo4j.close()
+
+
+@router.post("/mining/backfill-legacy-evidence")
+async def backfill_legacy_relation_evidence(
+    apply: bool = Query(default=False),
+    limit: int = Query(default=500, ge=1, le=5000),
+    db: Session = Depends(get_db),
+):
+    """从同时包含两端实体的原文句子中恢复旧关系证据。"""
+    neo4j = Neo4jService()
+    try:
+        relations = await neo4j.get_legacy_relations(limit=limit)
+        article_ids = {
+            article_id
+            for relation in relations
+            for article_id in set(relation.get("source_article_ids") or [])
+                & set(relation.get("target_article_ids") or [])
+        }
+        articles = db.query(Article).filter(Article.id.in_(article_ids)).all() \
+            if article_ids else []
+        article_by_id = {str(article.id): article for article in articles}
+        recovered = []
+
+        for relation in relations:
+            shared_ids = sorted(
+                set(relation.get("source_article_ids") or [])
+                & set(relation.get("target_article_ids") or [])
+            )
+            for article_id in shared_ids:
+                article = article_by_id.get(str(article_id))
+                if not article:
+                    continue
+                evidence = find_relation_evidence(
+                    article.content or "",
+                    relation["source"],
+                    relation["target"],
+                )
+                if not evidence:
+                    continue
+                item = {
+                    "source": relation["source"],
+                    "target": relation["target"],
+                    "rel_type": relation["rel_type"],
+                    "article_id": str(article_id),
+                    "article_title": article.title,
+                    "evidence": evidence,
+                }
+                if apply:
+                    item["applied"] = await neo4j.add_recovered_relation_evidence(
+                        source=relation["source"],
+                        target=relation["target"],
+                        rel_type=relation["rel_type"],
+                        article_id=str(article_id),
+                        evidence=evidence,
+                        confidence=relation.get("confidence") or 0.6,
+                    )
+                recovered.append(item)
+                break
+
+        return {
+            "status": "success",
+            "applied": apply,
+            "legacy_scanned": len(relations),
+            "recoverable": len(recovered),
+            "remaining": len(relations) - len(recovered),
+            "recovered": recovered,
+        }
+    finally:
+        await neo4j.close()
+
+
+@router.get("/mining/cross-document")
+async def get_cross_document_candidates(
+    min_shared_articles: int = Query(default=2, ge=2, le=20),
+    limit: int = Query(default=50, ge=1, le=200),
+    include_reviewed: bool = Query(default=False),
+):
+    """返回跨文档稳定共现但尚无显式关系的实体对。"""
+    neo4j = Neo4jService()
+    try:
+        candidates = await neo4j.get_cross_document_candidates(
+            min_shared_articles=min_shared_articles,
+            limit=limit,
+            include_reviewed=include_reviewed,
+        )
+        return {"status": "success", "count": len(candidates), "candidates": candidates}
+    finally:
+        await neo4j.close()
+
+
+@router.post("/mining/cross-document/review")
+async def review_cross_document_candidate(request: CrossDocumentReviewRequest):
+    neo4j = Neo4jService()
+    try:
+        review = await neo4j.review_cross_document_candidate(
+            source=request.source.strip(),
+            target=request.target.strip(),
+            decision=request.decision,
+            note=request.note.strip(),
+        )
+        return {"status": "success", "review": review}
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    finally:
+        await neo4j.close()
+
+
+@router.get("/mining/legacy-relations")
+async def get_legacy_relations(limit: int = Query(default=100, ge=1, le=1000)):
+    neo4j = Neo4jService()
+    try:
+        relations = await neo4j.get_legacy_relations(limit=limit)
+        return {"status": "success", "count": len(relations), "relations": relations}
+    finally:
+        await neo4j.close()
+
+
+@router.post("/mining/legacy-relations/review")
+async def review_legacy_relation(request: LegacyRelationReviewRequest):
+    neo4j = Neo4jService()
+    try:
+        review = await neo4j.review_legacy_relation(
+            source=request.source.strip(),
+            target=request.target.strip(),
+            rel_type=request.rel_type.strip(),
+            decision=request.decision,
+            note=request.note.strip(),
+        )
+        return {"status": "success", "review": review}
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    finally:
+        await neo4j.close()
+
+
+@router.get("/mining/communities")
+async def get_communities(
+    min_size: int = Query(default=3, ge=2, le=100),
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    """执行轻量标签传播，返回实体社区。"""
+    neo4j = Neo4jService()
+    try:
+        communities = await neo4j.get_communities(min_size=min_size, limit=limit)
+        return {"status": "success", "count": len(communities), "communities": communities}
+    finally:
+        await neo4j.close()
+
+
+@router.get("/mining/inferences")
+async def get_transitive_inferences(
+    relation_types: List[str] = Query(default=[]),
+    max_hops: int = Query(default=3, ge=2, le=5),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """返回带完整关系链和来源文章的传递规则候选，不自动写图。"""
+    allowed = {"part_of", "located_in", "precedes", "succeeds"}
+    requested = relation_types or sorted(allowed)
+    invalid = sorted(set(requested) - allowed)
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"不支持的传递关系: {', '.join(invalid)}")
+    neo4j = Neo4jService()
+    try:
+        inferences = await neo4j.get_transitive_inferences(
+            relation_types=requested,
+            max_hops=max_hops,
+            limit=limit,
+        )
+        return {"status": "success", "count": len(inferences), "inferences": inferences}
+    finally:
+        await neo4j.close()
+
+
+@router.post("/mining/inferences/review")
+async def review_transitive_inference(request: InferenceReviewRequest):
+    neo4j = Neo4jService()
+    try:
+        review = await neo4j.review_inference_candidate(
+            source=request.source.strip(),
+            target=request.target.strip(),
+            rel_type=request.rel_type,
+            decision=request.decision,
+            note=request.note.strip(),
+        )
+        return {"status": "success", "review": review}
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    finally:
+        await neo4j.close()
+
+
+@router.get("/mining/link-predictions")
+async def get_link_predictions(
+    min_common_neighbors: int = Query(default=2, ge=1, le=20),
+    min_score: float = Query(default=0.2, ge=0.0, le=1.0),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    neo4j = Neo4jService()
+    try:
+        predictions = await neo4j.get_link_predictions(
+            min_common_neighbors=min_common_neighbors,
+            min_score=min_score,
+            limit=limit,
+        )
+        return {"status": "success", "count": len(predictions), "predictions": predictions}
+    finally:
+        await neo4j.close()
+
+
+@router.post("/mining/link-predictions/review")
+async def review_link_prediction(request: LinkPredictionReviewRequest):
+    neo4j = Neo4jService()
+    try:
+        review = await neo4j.review_link_prediction(
+            source=request.source.strip(),
+            target=request.target.strip(),
+            decision=request.decision,
+            note=request.note.strip(),
+        )
+        return {"status": "success", "review": review}
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    finally:
+        await neo4j.close()
+
+
+@router.post("/mining/embeddings/generate")
+async def generate_graph_embeddings(
+    dimensions: int = Query(default=16, ge=2, le=64),
+):
+    neo4j = Neo4jService()
+    try:
+        result = await neo4j.generate_graph_embeddings(dimensions=dimensions)
+        return {"status": "success", **result}
+    finally:
+        await neo4j.close()
+
+
+@router.get("/mining/embeddings/status")
+async def get_graph_embedding_status():
+    neo4j = Neo4jService()
+    try:
+        result = await neo4j.get_graph_embedding_status()
+        return {"status": "success", **result}
+    finally:
+        await neo4j.close()
+
+
+@router.get("/mining/embeddings/evaluate")
+async def evaluate_graph_embeddings(k: int = Query(default=5, ge=1, le=20)):
+    neo4j = Neo4jService()
+    try:
+        result = await neo4j.evaluate_graph_embeddings(k=k)
+        return {"status": "success", **result}
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    finally:
+        await neo4j.close()
+
+
+@router.delete("/mining/embeddings")
+async def clear_graph_embeddings():
+    neo4j = Neo4jService()
+    try:
+        cleared = await neo4j.clear_graph_embeddings()
+        return {"status": "success", "cleared": cleared}
+    finally:
+        await neo4j.close()
+
+
+@router.get("/mining/similar/{entity_name}")
+async def get_similar_entities(
+    entity_name: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    same_type: bool = Query(default=True),
+    min_score: float = Query(default=0.0, ge=-1.0, le=1.0),
+):
+    neo4j = Neo4jService()
+    try:
+        result = await neo4j.get_similar_entities(
+            entity_name=entity_name,
+            limit=limit,
+            same_type=same_type,
+            min_score=min_score,
+        )
+        return {"status": "success", **result}
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    finally:
+        await neo4j.close()
+
+
+@router.get("/mining/causal-candidates")
+async def get_causal_candidates(
+    limit: int = Query(default=100, ge=1, le=500),
+    include_history: bool = Query(default=True),
+    db: Session = Depends(get_db),
+):
+    neo4j = Neo4jService()
+    try:
+        articles = get_causal_article_records(db) if include_history else None
+        candidates = await neo4j.get_causal_candidates(limit=limit, articles=articles)
+        return {"status": "success", "count": len(candidates), "candidates": candidates}
+    finally:
+        await neo4j.close()
+
+
+@router.post("/mining/causal-candidates/review")
+async def review_causal_candidate(
+    request: CausalReviewRequest,
+    db: Session = Depends(get_db),
+):
+    neo4j = Neo4jService()
+    try:
+        review = await neo4j.review_causal_candidate(
+            source=request.source.strip(),
+            target=request.target.strip(),
+            rel_type=request.rel_type,
+            decision=request.decision,
+            note=request.note.strip(),
+            articles=get_causal_article_records(db),
+        )
+        return {"status": "success", "review": review}
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error))
+    finally:
+        await neo4j.close()
+
+
+@router.get("/mining/causal-chains")
+async def get_causal_chains(
+    source: Optional[str] = Query(default=None, max_length=500),
+    target: Optional[str] = Query(default=None, max_length=500),
+    max_hops: int = Query(default=4, ge=1, le=6),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    neo4j = Neo4jService()
+    try:
+        chains = await neo4j.get_causal_chains(
+            source=source,
+            target=target,
+            max_hops=max_hops,
+            limit=limit,
+        )
+        return {"status": "success", "count": len(chains), "chains": chains}
+    finally:
+        await neo4j.close()
+
+
+@router.get("/mining/timeline")
+async def get_event_timeline(
+    start_date: Optional[date] = Query(default=None),
+    end_date: Optional[date] = Query(default=None),
+    query: Optional[str] = Query(default=None, max_length=200),
+    limit: int = Query(default=500, ge=1, le=2000),
+    db: Session = Depends(get_db),
+):
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(status_code=400, detail="开始日期不能晚于结束日期")
+    neo4j = Neo4jService()
+    try:
+        events = await neo4j.get_temporal_events(limit=limit)
+    finally:
+        await neo4j.close()
+
+    article_ids = {
+        str(article_id)
+        for event in events
+        for article_id in event.get("article_ids", [])
+        if article_id
+    }
+    articles = db.query(Article).filter(Article.id.in_(article_ids)).all() if article_ids else []
+    article_by_id = {str(article.id): article for article in articles}
+    timeline = []
+    normalized_query = (query or "").strip().casefold()
+    for event in events:
+        if normalized_query and normalized_query not in (
+            f"{event.get('name', '')} {event.get('description', '')}".casefold()
+        ):
+            continue
+        event_articles = [
+            article_by_id[str(article_id)]
+            for article_id in event.get("article_ids", [])
+            if str(article_id) in article_by_id
+        ]
+        published_dates = sorted({
+            article.published_at for article in event_articles if article.published_at
+        })
+        observed_at = published_dates[0] if published_dates else None
+        if start_date and (not observed_at or observed_at < start_date):
+            continue
+        if end_date and (not observed_at or observed_at > end_date):
+            continue
+        timeline.append({
+            **event,
+            "observed_at": observed_at.isoformat() if observed_at else None,
+            "articles": [
+                {
+                    "id": str(article.id),
+                    "title": article.title,
+                    "url": article.url,
+                    "published_at": article.published_at.isoformat() if article.published_at else None,
+                }
+                for article in event_articles
+            ],
+        })
+    timeline.sort(key=lambda item: (item["observed_at"] is None, item["observed_at"] or "", item["name"]))
+    return {"status": "success", "count": len(timeline), "events": timeline[:limit]}
 
 
 @router.post("/qa/answer")

@@ -39,7 +39,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Loader2, Search, Trash2, Eye, ChevronLeft, ChevronRight, RefreshCw, Database, Filter, X, FileText, Download, AlertTriangle, Network } from "lucide-react";
+import { Loader2, Search, Trash2, Eye, ChevronLeft, ChevronRight, RefreshCw, Database, Filter, X, FileText, Download, AlertTriangle, Network, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
 // 格式化数字
@@ -118,6 +118,7 @@ function ArticlesPageContent() {
   const [selectedArticle, setSelectedArticle] = useState<Article | null>(null);
   const [dbConnected, setDbConnected] = useState(false);
   const [checkingDb, setCheckingDb] = useState(true);
+  const [isBackfillingMetadata, setIsBackfillingMetadata] = useState(false);
 
   // 来自 ?article=ID 自动打开文章
   // 注意:不把 selectedArticle 放进依赖,否则关闭弹窗 (selectedArticle→null) 会触发
@@ -324,6 +325,29 @@ function ArticlesPageContent() {
       setAvailableStyles(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error("加载文体列表失败:", err);
+    }
+  };
+
+  const backfillMetadata = async () => {
+    if (!confirm("补全缺失的摘要、作者、关键词和字数？已有内容不会被覆盖。")) return;
+    setIsBackfillingMetadata(true);
+    try {
+      const res = await fetch("/api/articles/backfill-metadata?apply=true", {
+        method: "POST",
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || data.error || "补全失败");
+      const changed = data.stats?.articles_changed || 0;
+      toast.success(
+        changed > 0
+          ? `已补全 ${changed} 篇文章的缺失元数据`
+          : "所有文章元数据已经完整"
+      );
+      await loadArticles(page);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "补全失败");
+    } finally {
+      setIsBackfillingMetadata(false);
     }
   };
 
@@ -564,6 +588,19 @@ function ArticlesPageContent() {
           <p className="text-muted-foreground">管理已爬取并存入数据库的文档</p>
         </div>
         <div className="flex items-center gap-4">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={backfillMetadata}
+            disabled={isBackfillingMetadata}
+          >
+            {isBackfillingMetadata ? (
+              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+            ) : (
+              <Sparkles className="w-4 h-4 mr-2" />
+            )}
+            补全元数据
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -816,7 +853,7 @@ function ArticlesPageContent() {
             </div>
           ) : (
             <>
-              <Table>
+              <Table className="min-w-[1480px]">
                 <TableHeader>
                   <TableRow>
                     <TableHead className="w-10">
@@ -828,7 +865,7 @@ function ArticlesPageContent() {
                       />
                     </TableHead>
                     <TableHead className="w-[250px]">标题</TableHead>
-                    <TableHead>来源</TableHead>
+                    <TableHead className="w-[clamp(160px,12vw,220px)] min-w-[160px] whitespace-nowrap">来源</TableHead>
                     <TableHead>信源</TableHead>
                     <TableHead className="w-[200px]">发布链接</TableHead>
                     <TableHead>分类</TableHead>
@@ -883,11 +920,11 @@ function ArticlesPageContent() {
                             )}
                           </div>
                         </TableCell>
-                        <TableCell className="text-sm">
+                        <TableCell className="w-[clamp(160px,12vw,220px)] min-w-[160px] max-w-[220px] text-sm">
                           {article.sourceName ? (
-                            <span className="font-medium">{article.sourceName}</span>
+                            <span className="block truncate whitespace-nowrap font-medium" title={article.sourceName}>{article.sourceName}</span>
                           ) : (
-                            <span className="text-muted-foreground">-</span>
+                            <span className="whitespace-nowrap text-muted-foreground">-</span>
                           )}
                         </TableCell>
                         <TableCell className="text-sm">

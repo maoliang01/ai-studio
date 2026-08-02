@@ -902,6 +902,44 @@ class ScrapedResult:
             self.scraped_at = datetime.now().isoformat()
 
 
+def merge_scraped_result_into_article(
+    article: Any,
+    result: ScrapedResult,
+    category_id: Optional[str] = None,
+    source_id: Optional[str] = None,
+) -> bool:
+    """Update an existing article without erasing established provenance."""
+    previous_hash = article.content_hash or article.calculate_content_hash()
+    article.title = result.title or article.title
+    article.content = result.content or article.content
+    article.html = result.html or article.html
+    article.word_count = result.word_count or article.word_count
+    article.author = result.author or article.author
+    article.summary = result.summary or article.summary
+    article.style = result.style or article.style
+    article.status = result.status
+    article.error_message = result.error_message
+
+    if category_id:
+        article.category_id = category_id
+    if source_id:
+        article.source_id = source_id
+
+    if result.published_at:
+        try:
+            article.published_at = datetime.strptime(result.published_at, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            pass
+
+    article.content_hash = article.calculate_content_hash()
+    content_changed = previous_hash != article.content_hash
+    if content_changed:
+        article.kg_status = "pending"
+        article.kg_processed_at = None
+        article.kg_error_message = None
+    return content_changed
+
+
 class DateExtractor:
     """
     日期提取器（核心组件）
@@ -2003,7 +2041,7 @@ class WebScraper:
             result: 爬取结果
             category_id: 分类 ID
             source_id: 来源 ID
-            deduplicate: 是否去重（默认True，URL重复时删除旧文章保存新文章）
+            deduplicate: 保留兼容参数；URL 重复时始终原位更新，避免来源和 KG 关联丢失
 
         Returns:
             Tuple[bool, str]: (是否成功, 文章ID 或 错误信息)
@@ -2058,71 +2096,35 @@ class WebScraper:
                 existing = db.query(Article).filter(Article.url == result.url).first()
 
                 if existing:
-                    if deduplicate:
-                        # 去重模式：删除旧文章，保存新文章
-                        old_id = existing.id
-                        old_title = existing.title[:30] if existing.title else "未知"
+                    merge_scraped_result_into_article(
+                        existing,
+                        result,
+                        category_id=category_id,
+                        source_id=source_id,
+                    )
 
-                        # 先删除关联的关键词和链接
+                    if result.keywords:
                         db.query(ArticleKeyword).filter(
                             ArticleKeyword.article_id == existing.id
                         ).delete()
-                        db.query(ArticleLink).filter(
-                            ArticleLink.source_article_id == existing.id
-                        ).delete()
-                        db.delete(existing)
-                        db.commit()
 
-                        logger.info(f"去重删除旧文章: id={old_id}, title={old_title}...")
+                        for kw_name in result.keywords:
+                            if not kw_name or not kw_name.strip():
+                                continue
+                            kw_name = kw_name.strip()
+                            keyword = db.query(Keyword).filter(Keyword.name == kw_name).first()
+                            if not keyword:
+                                keyword = Keyword(name=kw_name)
+                                db.add(keyword)
+                                db.flush()
+                            existing.keywords.append(ArticleKeyword(keyword_id=keyword.id))
 
-                        # 继续创建新文章（下面的代码）
-                    else:
-                        # 非去重模式：更新已存在的文章
-                        existing.title = result.title or existing.title
-                        existing.content = result.content or existing.content
-                        existing.html = result.html or existing.html
-                        existing.word_count = result.word_count or existing.word_count
-                        existing.author = result.author or existing.author
-                        existing.summary = result.summary or existing.summary
-                        existing.style = result.style or existing.style  # 文体
-                        existing.status = result.status
-                        existing.error_message = result.error_message
-
-                        # 更新分类和来源（如果文章没有分类）
-                        if category_id and not existing.category_id:
-                            existing.category_id = category_id
-                        if source_id and not existing.source_id:
-                            existing.source_id = source_id
-
-                        if result.published_at:
-                            try:
-                                from datetime import datetime as dt
-                                existing.published_at = dt.strptime(result.published_at, "%Y-%m-%d").date()
-                            except (ValueError, TypeError):
-                                pass
-
-                        existing.content_hash = existing.calculate_content_hash()
-
-                        # 更新关键词
-                        if result.keywords:
-                            db.query(ArticleKeyword).filter(
-                                ArticleKeyword.article_id == existing.id
-                            ).delete()
-
-                            for kw_name in result.keywords:
-                                if not kw_name or not kw_name.strip():
-                                    continue
-                                kw_name = kw_name.strip()
-                                keyword = db.query(Keyword).filter(Keyword.name == kw_name).first()
-                                if not keyword:
-                                    keyword = Keyword(name=kw_name)
-                                    db.add(keyword)
-                                    db.flush()
-                                existing.keywords.append(ArticleKeyword(keyword_id=keyword.id))
-
-                        db.commit()
-                        logger.info(f"更新数据库文章: id={existing.id}, url={existing.url[:50]}")
-                        return True, existing.id
+                    db.commit()
+                    logger.info(
+                        f"更新数据库文章并保留来源: id={existing.id}, "
+                        f"source_id={existing.source_id}, url={existing.url[:50]}"
+                    )
+                    return True, existing.id
 
                 # 创建新文章
                 article = Article(

@@ -19,6 +19,7 @@ from app.models.article import (
 )
 from app.services.scraper import ScrapedResult
 from app.services.scraper import extract_keywords_locally, summarize_locally
+from app.services.article_enrichment import build_article_enrichment
 from app.services import kg_sync
 
 logger = logging.getLogger("ai-studio")
@@ -273,14 +274,20 @@ async def list_articles(
             ArticleKeyword, Article.id == ArticleKeyword.article_id
         ).outerjoin(
             Keyword, ArticleKeyword.keyword_id == Keyword.id
+        ).outerjoin(
+            ScrapeSource, Article.source_id == ScrapeSource.id
         ).filter(
             or_(
                 Article.title.ilike(keyword_pattern),
                 Article.content.ilike(keyword_pattern),
                 Article.summary.ilike(keyword_pattern),
-                Keyword.name.ilike(keyword_pattern)
+                Article.author.ilike(keyword_pattern),
+                Article.url.ilike(keyword_pattern),
+                Article.style.ilike(keyword_pattern),
+                Keyword.name.ilike(keyword_pattern),
+                ScrapeSource.name.ilike(keyword_pattern),
             )
-        )
+        ).distinct()
     if category_id:
         query = query.filter(Article.category_id == category_id)
     if source_id:
@@ -322,6 +329,54 @@ async def list_articles(
     ]
 
     return ArticleListResponse.create(items, total, page, page_size)
+
+
+@router.post("/backfill-metadata")
+async def backfill_article_metadata(
+    apply: bool = Query(False, description="是否写入补全结果"),
+    limit: int = Query(500, ge=1, le=5000),
+    db: Session = Depends(get_db),
+):
+    """扫描并补全缺失摘要、作者、关键词和字数，不覆盖已有信息。"""
+    articles = db.query(Article).order_by(Article.created_at.asc()).limit(limit).all()
+    stats = {
+        "scanned": len(articles),
+        "articles_changed": 0,
+        "summaries": 0,
+        "authors": 0,
+        "keywords": 0,
+        "word_counts": 0,
+    }
+    samples = []
+
+    for article in articles:
+        changes = build_article_enrichment(article)
+        if not changes:
+            continue
+        stats["articles_changed"] += 1
+        for field in ("summary", "author", "word_count"):
+            if field in changes:
+                stats[{"summary": "summaries", "author": "authors", "word_count": "word_counts"}[field]] += 1
+                if apply:
+                    setattr(article, field, changes[field])
+        if "keywords" in changes:
+            stats["keywords"] += 1
+            if apply:
+                for priority, keyword in enumerate(_get_or_create_keywords(db, changes["keywords"])):
+                    article.keywords.append(
+                        ArticleKeyword(keyword_id=keyword.id, priority=priority)
+                    )
+        if len(samples) < 10:
+            samples.append({
+                "article_id": article.id,
+                "title": article.title,
+                "fields": list(changes.keys()),
+            })
+
+    if apply:
+        db.commit()
+
+    return {"status": "success", "applied": apply, "stats": stats, "samples": samples}
 
 
 @router.get("/{article_id}")
@@ -556,6 +611,10 @@ async def save_scrape_result(
         existing.style = result.style or existing.style
         existing.status = result.status
         existing.error_message = result.error_message
+        if category_id:
+            existing.category_id = category_id
+        if source_id:
+            existing.source_id = source_id
 
         if result.published_at:
             try:
@@ -655,6 +714,10 @@ async def batch_save_articles(
                 existing.style = result.style or existing.style
                 existing.status = result.status
                 existing.content_hash = existing.calculate_content_hash()
+                if category_id:
+                    existing.category_id = category_id
+                if source_id:
+                    existing.source_id = source_id
                 keyword_names = result.keywords or extract_keywords_locally(existing.title, existing.content)
                 if keyword_names:
                     db.query(ArticleKeyword).filter(

@@ -37,6 +37,8 @@ RELATION_TYPES = [
     "part_of",      # 属于
     "precedes",     # 先于
     "succeeds",     # 后于
+    "causes",       # 导致
+    "enables",      # 促进/使能
 ]
 
 # 细分领域建议(LLM 可自由发挥,这里只做引导)

@@ -1,17 +1,16 @@
 import { NextResponse } from "next/server";
-import { normalizeArticleResponse } from "../normalize";
 
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8080";
 
-// 搜索文章
-export async function GET(request: Request) {
+export async function POST(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const params = Object.fromEntries(searchParams.entries());
-
-    const res = await fetch(`${BACKEND_URL}/api/articles?${new URLSearchParams(params)}`);
+    const res = await fetch(
+      `${BACKEND_URL}/api/articles/backfill-metadata?${searchParams.toString()}`,
+      { method: "POST" }
+    );
     const data = await res.json();
-    return NextResponse.json(normalizeArticleResponse(data), { status: res.status });
+    return NextResponse.json(data, { status: res.status });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "未知错误" },

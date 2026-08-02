@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_session_local
 from app.models.article import Article
 from app.services.kg import Neo4jService, EntityExtractor
+from app.services.kg.graph import EntityNode
 
 logger = logging.getLogger("ai-studio")
 
@@ -31,6 +32,7 @@ _sync_state = {
     "last_finished_at": None,     # 上次完成时间
 }
 _sync_state_lock = threading.Lock()
+_kg_rebuild_lock = asyncio.Lock()
 
 
 def _set_in_progress(delta: int, success: bool = True) -> None:
@@ -53,6 +55,39 @@ def get_sync_state() -> dict:
     """供前端轮询:取同步进度快照"""
     with _sync_state_lock:
         return dict(_sync_state)
+
+
+def build_keyword_fallback_entities(article: Article, limit: int = 12) -> list[EntityNode]:
+    """Build entity-only fallback data from persisted article keywords."""
+    organization_suffixes = ("院", "所", "中心", "大学", "公司", "集团", "实验室")
+    technology_terms = ("技术", "系统", "平台", "模型", "算法", "遥感", "卫星", "人工智能")
+    entities = []
+    seen = set()
+    keyword_links = sorted(
+        article.keywords or [],
+        key=lambda item: item.priority or 0,
+        reverse=True,
+    )
+    for link in keyword_links:
+        name = (link.keyword.name or "").strip() if link.keyword else ""
+        if len(name) < 2 or name in seen:
+            continue
+        seen.add(name)
+        entity_type = "CONCEPT"
+        if name.endswith(organization_suffixes):
+            entity_type = "ORGANIZATION"
+        elif any(term in name for term in technology_terms):
+            entity_type = "TECHNOLOGY"
+        entities.append(EntityNode(
+            name=name,
+            entity_type=entity_type,
+            description="文章关键词降级提取",
+            subtype="KEYWORD_FALLBACK",
+            source_articles=[str(article.id)],
+        ))
+        if len(entities) >= limit:
+            break
+    return entities
 
 
 def recover_interrupted_articles(db: Session) -> int:
@@ -159,57 +194,71 @@ async def _extract_and_link_entities_inner(article_id: str) -> bool:
             return False
 
         extractor = EntityExtractor()
+        extraction_error = None
         try:
             result = await asyncio.wait_for(
                 extractor.extract(content, article_id=str(article.id)),
                 timeout=300,
             )
         except asyncio.TimeoutError:
-            article.kg_status = "failed"
-            article.kg_error_message = "知识抽取超时（300 秒），可重新执行"
-            session.commit()
+            result = None
+            extraction_error = "知识抽取超时（300 秒）"
             logger.error(f"文章 {article_id} 实体抽取超时")
-            return False
-        if result.error:
-            article.kg_status = "failed"
-            article.kg_error_message = result.error
-            session.commit()
+        if result and result.error:
+            extraction_error = result.error
             logger.error(f"文章 {article_id} 实体抽取失败: {result.error}")
-            return False
 
-        entities = extractor.deduplicate_entities(result.entities)
-        relations = result.relations
+        is_partial = extraction_error is not None
+        if is_partial:
+            entities = build_keyword_fallback_entities(article)
+            relations = []
+            if not entities:
+                article.kg_status = "failed"
+                article.kg_error_message = extraction_error
+                session.commit()
+                return False
+        else:
+            entities = extractor.deduplicate_entities(result.entities)
+            relations = result.relations
 
         # 仅在新结果解析成功后替换旧知识，避免失败重抽破坏可用图谱。
-        neo4j = build_neo4j()
-        try:
-            if not await neo4j.clear_article_knowledge(article.id):
-                raise RuntimeError("清理文章旧知识失败")
-            await neo4j.upsert_article_metadata(
-                article_id=article.id,
-                title=article.title or "",
-                url=article.url or "",
-                summary=article.summary,
-                content_hash=article.content_hash,
-                kg_status="success"
-            )
+        async with _kg_rebuild_lock:
+            neo4j = build_neo4j()
+            try:
+                if not await neo4j.clear_article_knowledge(article.id):
+                    raise RuntimeError("清理文章旧知识失败")
+                await neo4j.upsert_article_metadata(
+                    article_id=article.id,
+                    title=article.title or "",
+                    url=article.url or "",
+                    summary=article.summary,
+                    content_hash=article.content_hash,
+                    kg_status="partial" if is_partial else "success"
+                )
 
-            # 批量建实体 + 带来源证据的边
-            await neo4j.batch_create_entities_and_relations(
-                article_id=article.id,
-                entities=entities,
-                relations=relations
-            )
-        finally:
-            await neo4j.close()
+                # 图替换必须串行，避免并发清理把共享实体误判为孤立实体。
+                await neo4j.batch_create_entities_and_relations(
+                    article_id=article.id,
+                    entities=entities,
+                    relations=relations
+                )
+            finally:
+                await neo4j.close()
 
-        # SQLite 标 success
-        article.kg_status = "success"
+        article.kg_status = "partial" if is_partial else "success"
         article.kg_processed_at = datetime.utcnow()
         article.kg_content_hash = article.content_hash
-        article.kg_error_message = None
+        article.kg_error_message = (
+            f"模型抽取未完成，已使用关键词降级：{extraction_error}"[:500]
+            if is_partial else None
+        )
         session.commit()
-        logger.info(f"文章 {article_id} 实体抽取成功,entities={len(entities)}")
+        logger.info(
+            "文章 %s 实体抽取%s,entities=%s",
+            article_id,
+            "部分完成" if is_partial else "成功",
+            len(entities),
+        )
         return True
 
     except Exception as e:

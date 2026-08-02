@@ -24,6 +24,16 @@ import {
   X,
   Route,
   BookOpen,
+  Users,
+  GitMerge,
+  ScanSearch,
+  ShieldCheck,
+  BrainCircuit,
+  Undo2,
+  Clock3,
+  Link2,
+  Boxes,
+  GitBranch,
 } from "lucide-react";
 import { toast } from "sonner";
 import EntitySourcePopover from "@/components/kg/EntitySourcePopover";
@@ -65,12 +75,15 @@ interface SyncStatus {
     processing: number;
     success: number;
     failed: number;
+    partial: number;
     skipped: number;
   };
   total_in_db: number;
   total_in_kg: number;
   orphan_entities?: number;
   drift_detected: boolean;
+  failed_articles: Array<{ id: string; title: string; error?: string }>;
+  partial_articles: Array<{ id: string; title: string; warning?: string }>;
   sync_state: {
     in_progress: boolean;
     active_count: number;
@@ -92,6 +105,7 @@ interface EntityProfile {
     confidence?: number;
     support_count: number;
     source_articles: string[];
+    provenance_status?: string;
   }>;
   evidence: Array<{
     claim_id: string;
@@ -101,6 +115,7 @@ interface EntityProfile {
     evidence?: string;
     confidence?: number;
     article_id?: string;
+    status?: string;
   }>;
 }
 
@@ -115,8 +130,155 @@ interface KnowledgePath {
     support_count: number;
     source_articles: string[];
     evidence_samples: string[];
+    provenance_status?: string;
   }>;
 }
+
+interface EntityCommunity {
+  id: string;
+  label: string;
+  size: number;
+  article_count: number;
+  internal_edges: number;
+  density: number;
+  members: Array<{ name: string; entity_type?: string; subtype?: string }>;
+  entity_types: Record<string, number>;
+  summary: string;
+  core_entities: Array<{ name: string; score: number }>;
+  bridge_entities: Array<{ name: string; external_connections: number }>;
+}
+
+interface CrossDocumentCandidate {
+  source: string;
+  source_type?: string;
+  target: string;
+  target_type?: string;
+  shared_articles: string[];
+  support_count: number;
+  score: number;
+}
+
+interface AliasCandidate {
+  left: { name: string; entity_type?: string };
+  right: { name: string; entity_type?: string };
+  score: number;
+  shared_articles: string[];
+  reasons: string[];
+}
+
+interface LegacyRelation {
+  source: string;
+  target: string;
+  rel_type: string;
+  confidence?: number;
+}
+
+interface MiningReview {
+  id: string;
+  review_type: "alias" | "cross_document" | "legacy_relation" | "inference" | "link_prediction" | "causal";
+  source: string;
+  target: string;
+  rel_type?: string;
+  decision: string;
+  status?: "active" | "undone";
+  reviewed_at?: string;
+  undone_at?: string;
+}
+
+interface InferenceCandidate {
+  source: string;
+  target: string;
+  rel_type: string;
+  path: string[];
+  hops: number;
+  confidence: number;
+  source_articles: string[];
+  rule: string;
+}
+
+interface LinkPredictionCandidate {
+  source: string;
+  source_type?: string;
+  target: string;
+  target_type?: string;
+  score: number;
+  common_neighbors: string[];
+  common_neighbor_count: number;
+  jaccard: number;
+  adamic_adar: number;
+  reasons: string[];
+}
+
+interface TimelineEvent {
+  name: string;
+  subtype?: string;
+  description?: string;
+  observed_at?: string;
+  date_markers: string[];
+  articles: Array<{ id: string; title: string; url?: string; published_at?: string }>;
+  temporal_relations: Array<{ target?: string; rel_type?: string; confidence?: number }>;
+}
+
+interface SimilarEntity {
+  name: string;
+  entity_type?: string;
+  subtype?: string;
+  score: number;
+}
+
+interface CausalCandidate {
+  source: string;
+  target: string;
+  rel_type: "causes" | "enables";
+  confidence: number;
+  support_count: number;
+  source_articles: string[];
+  evidence_samples: string[];
+  markers: string[];
+  discovery_sources?: string[];
+}
+
+interface CausalChain {
+  nodes: Array<{ name: string; entity_type?: string; subtype?: string }>;
+  relations: Array<{
+    rel_type: "causes" | "enables";
+    confidence?: number;
+    source_articles: string[];
+    evidence_samples: string[];
+  }>;
+  hops: number;
+  confidence: number;
+}
+
+interface EmbeddingStatus {
+  entity_count: number;
+  embedded_count: number;
+  coverage: number;
+  dimensions: number;
+  current_version?: string;
+  stale: boolean;
+  edge_count: number;
+}
+
+interface EmbeddingQuality {
+  k: number;
+  evaluated_entities: number;
+  coverage: number;
+  precision_at_k: number;
+  recall_at_k: number;
+  mean_neighbor_similarity: number;
+}
+
+const provenanceLabels: Record<string, string> = {
+  evidence_backed: "正式证据",
+  recovered_evidence: "恢复证据",
+  reviewed_candidate: "审核共现",
+  inferred_reviewed: "审核推理",
+  prediction_reviewed: "审核预测",
+  causal_reviewed: "审核因果",
+  legacy_reviewed: "历史已审",
+  legacy: "历史无证据",
+};
 
 function KnowledgeGraphPageContent() {
   const [graphData, setGraphData] = useState<GraphData>({ nodes: [], edges: [] });
@@ -140,6 +302,24 @@ function KnowledgeGraphPageContent() {
   const [pathTarget, setPathTarget] = useState("");
   const [pathDepth, setPathDepth] = useState(4);
   const [paths, setPaths] = useState<KnowledgePath[]>([]);
+  const [communities, setCommunities] = useState<EntityCommunity[]>([]);
+  const [crossDocumentCandidates, setCrossDocumentCandidates] = useState<CrossDocumentCandidate[]>([]);
+  const [aliasCandidates, setAliasCandidates] = useState<AliasCandidate[]>([]);
+  const [legacyRelations, setLegacyRelations] = useState<LegacyRelation[]>([]);
+  const [miningReviews, setMiningReviews] = useState<MiningReview[]>([]);
+  const [inferences, setInferences] = useState<InferenceCandidate[]>([]);
+  const [linkPredictions, setLinkPredictions] = useState<LinkPredictionCandidate[]>([]);
+  const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
+  const [timelineQuery, setTimelineQuery] = useState("");
+  const [similarQuery, setSimilarQuery] = useState("");
+  const [similarEntities, setSimilarEntities] = useState<SimilarEntity[]>([]);
+  const [embeddingVersion, setEmbeddingVersion] = useState<string | null>(null);
+  const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus | null>(null);
+  const [embeddingQuality, setEmbeddingQuality] = useState<EmbeddingQuality | null>(null);
+  const [causalCandidates, setCausalCandidates] = useState<CausalCandidate[]>([]);
+  const [causalSource, setCausalSource] = useState("");
+  const [causalTarget, setCausalTarget] = useState("");
+  const [causalChains, setCausalChains] = useState<CausalChain[]>([]);
   const [exploreLoading, setExploreLoading] = useState(false);
 
   const svgRef = useRef<SVGSVGElement>(null);
@@ -342,6 +522,181 @@ function KnowledgeGraphPageContent() {
     } catch (error) {
       setPaths([]);
       toast.error(error instanceof Error ? error.message : "路径查询失败");
+    } finally {
+      setExploreLoading(false);
+    }
+  };
+
+  const loadMiningResults = async (mode: "community" | "cross-document" | "aliases" | "governance" | "inference" | "prediction" | "timeline" | "causal") => {
+    setExploreLoading(true);
+    try {
+      if (mode === "governance") {
+        const [legacyResponse, reviewResponse] = await Promise.all([
+          fetch("/api/kg/mining/legacy-relations?limit=100"),
+          fetch("/api/kg/mining/reviews?limit=100"),
+        ]);
+        const [legacyData, reviewData] = await Promise.all([
+          legacyResponse.json(), reviewResponse.json(),
+        ]);
+        if (!legacyResponse.ok || !reviewResponse.ok) {
+          throw new Error(legacyData.detail || reviewData.detail || "治理数据加载失败");
+        }
+        setLegacyRelations(legacyData.relations || []);
+        setMiningReviews(reviewData.reviews || []);
+        return;
+      }
+      const endpoints = {
+        community: "/api/kg/mining/communities?min_size=3&limit=30",
+        "cross-document": "/api/kg/mining/cross-document?min_shared_articles=2&limit=50",
+        aliases: "/api/kg/mining/aliases?min_shared_articles=2&limit=50",
+        inference: "/api/kg/mining/inferences?max_hops=3&limit=100",
+        prediction: "/api/kg/mining/link-predictions?min_common_neighbors=2&min_score=0.2&limit=100",
+        timeline: `/api/kg/mining/timeline?limit=500${timelineQuery.trim() ? `&query=${encodeURIComponent(timelineQuery.trim())}` : ""}`,
+        causal: "/api/kg/mining/causal-candidates?limit=100",
+      } as const;
+      const endpoint = endpoints[mode];
+      const response = await fetch(endpoint);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "知识挖掘失败");
+      if (mode === "community") setCommunities(data.communities || []);
+      if (mode === "cross-document") setCrossDocumentCandidates(data.candidates || []);
+      if (mode === "aliases") setAliasCandidates(data.candidates || []);
+      if (mode === "inference") setInferences(data.inferences || []);
+      if (mode === "prediction") setLinkPredictions(data.predictions || []);
+      if (mode === "timeline") setTimelineEvents(data.events || []);
+      if (mode === "causal") setCausalCandidates(data.candidates || []);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "知识挖掘失败");
+    } finally {
+      setExploreLoading(false);
+    }
+  };
+
+  const changeExploreTab = (value: string) => {
+    setExploreTab(value);
+    if (value === "community" && communities.length === 0) loadMiningResults("community");
+    if (value === "cross-document" && crossDocumentCandidates.length === 0) loadMiningResults("cross-document");
+    if (value === "aliases" && aliasCandidates.length === 0) loadMiningResults("aliases");
+    if (value === "governance" && legacyRelations.length === 0) loadMiningResults("governance");
+    if (value === "inference" && inferences.length === 0) loadMiningResults("inference");
+    if (value === "prediction" && linkPredictions.length === 0) loadMiningResults("prediction");
+    if (value === "timeline" && timelineEvents.length === 0) loadMiningResults("timeline");
+    if (value === "causal" && causalCandidates.length === 0) loadMiningResults("causal");
+    if (value === "similar" && !embeddingStatus) loadEmbeddingDiagnostics();
+  };
+
+  const undoMiningReview = async (reviewId: string) => {
+    setExploreLoading(true);
+    try {
+      const response = await fetch(`/api/kg/mining/reviews/${encodeURIComponent(reviewId)}/undo`, { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "撤销审核失败");
+      toast.success("审核已撤销");
+      await loadMiningResults("governance");
+      loadGraphData();
+      loadStats();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "撤销审核失败");
+    } finally {
+      setExploreLoading(false);
+    }
+  };
+
+  const submitMiningReview = async (
+    endpoint: string,
+    payload: Record<string, string>,
+    mode: "cross-document" | "aliases" | "governance" | "inference" | "prediction" | "causal",
+  ) => {
+    setExploreLoading(true);
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "审核操作失败");
+      toast.success("审核结果已保存");
+      await loadMiningResults(mode);
+      loadStats();
+      loadGraphData();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "审核操作失败");
+    } finally {
+      setExploreLoading(false);
+    }
+  };
+
+  const loadEmbeddingDiagnostics = async () => {
+    setExploreLoading(true);
+    try {
+      const [statusResponse, qualityResponse] = await Promise.all([
+        fetch("/api/kg/mining/embeddings/status"),
+        fetch("/api/kg/mining/embeddings/evaluate?k=5"),
+      ]);
+      const [statusData, qualityData] = await Promise.all([
+        statusResponse.json(), qualityResponse.json(),
+      ]);
+      if (!statusResponse.ok) throw new Error(statusData.detail || "图嵌入状态加载失败");
+      setEmbeddingStatus(statusData);
+      setEmbeddingVersion(statusData.current_version || null);
+      setEmbeddingQuality(qualityResponse.ok ? qualityData : null);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "图嵌入状态加载失败");
+    } finally {
+      setExploreLoading(false);
+    }
+  };
+
+  const loadCausalChains = async () => {
+    const params = new URLSearchParams({ max_hops: "4", limit: "100" });
+    if (causalSource.trim()) params.set("source", causalSource.trim());
+    if (causalTarget.trim()) params.set("target", causalTarget.trim());
+    setExploreLoading(true);
+    try {
+      const response = await fetch(`/api/kg/mining/causal-chains?${params.toString()}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "因果链查询失败");
+      setCausalChains(data.chains || []);
+      if (!data.chains?.length) toast.info("没有找到已审核的因果链");
+    } catch (error) {
+      setCausalChains([]);
+      toast.error(error instanceof Error ? error.message : "因果链查询失败");
+    } finally {
+      setExploreLoading(false);
+    }
+  };
+
+  const generateEmbeddings = async () => {
+    setExploreLoading(true);
+    try {
+      const response = await fetch("/api/kg/mining/embeddings/generate?dimensions=16", { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "图嵌入生成失败");
+      setEmbeddingVersion(data.version || null);
+      toast.success(`已更新 ${data.entity_count} 个实体向量`);
+      await loadEmbeddingDiagnostics();
+      if (similarQuery.trim()) await loadSimilarEntities();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "图嵌入生成失败");
+    } finally {
+      setExploreLoading(false);
+    }
+  };
+
+  const loadSimilarEntities = async () => {
+    const entityName = similarQuery.trim();
+    if (!entityName) return;
+    setExploreLoading(true);
+    try {
+      const response = await fetch(`/api/kg/mining/similar/${encodeURIComponent(entityName)}?limit=30&min_score=0&same_type=true`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "相似实体查询失败");
+      setSimilarEntities(data.results || []);
+      setEmbeddingVersion(data.version || null);
+    } catch (error) {
+      setSimilarEntities([]);
+      toast.error(error instanceof Error ? error.message : "相似实体查询失败");
     } finally {
       setExploreLoading(false);
     }
@@ -802,7 +1157,7 @@ function KnowledgeGraphPageContent() {
                 </span>
               )}
             </div>
-            <div className="grid grid-cols-5 gap-1 text-center text-xs">
+            <div className="grid grid-cols-6 gap-1 text-center text-xs">
               <div className="bg-white p-2 rounded">
                 <div className="text-base font-semibold text-emerald-600">
                   {syncStatus.by_status.success}
@@ -828,6 +1183,12 @@ function KnowledgeGraphPageContent() {
                 <div className="text-gray-500">失败</div>
               </div>
               <div className="bg-white p-2 rounded">
+                <div className="text-base font-semibold text-orange-600">
+                  {syncStatus.by_status.partial}
+                </div>
+                <div className="text-gray-500">部分</div>
+              </div>
+              <div className="bg-white p-2 rounded">
                 <div className="text-base font-semibold text-gray-500">
                   {syncStatus.by_status.skipped}
                 </div>
@@ -843,13 +1204,14 @@ function KnowledgeGraphPageContent() {
                   ` · 上次完成 ${new Date(syncStatus.sync_state.last_finished_at).toLocaleTimeString("zh-CN")}`}
               </div>
             )}
-            {(syncStatus.by_status.pending > 0 || syncStatus.by_status.skipped > 0) && (
+            {(syncStatus.by_status.pending > 0 || syncStatus.by_status.skipped > 0 || syncStatus.by_status.failed > 0) && (
               <Button
                 size="sm"
                 className="w-full mt-2 h-7 text-xs bg-indigo-600 hover:bg-indigo-700"
                 disabled={syncStatus.sync_state.in_progress}
                 onClick={async () => {
-                  if (!confirm(`立即抽取 ${syncStatus.by_status.pending + syncStatus.by_status.skipped} 篇待抽文章?后台并发 3 个任务,每篇 0.5s 间隔。`)) return;
+                  const retryCount = syncStatus.by_status.pending + syncStatus.by_status.skipped + syncStatus.by_status.failed;
+                  if (!confirm(`立即处理 ${retryCount} 篇待处理或失败文章？`)) return;
                   try {
                     const res = await fetch("/api/kg/process-pending?limit=200", { method: "POST" });
                     const data = await res.json();
@@ -867,9 +1229,29 @@ function KnowledgeGraphPageContent() {
                 {syncStatus.sync_state.in_progress ? (
                   <><Loader2 className="w-3 h-3 mr-1 animate-spin" />抽取中</>
                 ) : (
-                  <><Play className="w-3 h-3 mr-1" />立即抽取 ({syncStatus.by_status.pending + syncStatus.by_status.skipped})</>
+                  <><Play className="w-3 h-3 mr-1" />立即处理 ({syncStatus.by_status.pending + syncStatus.by_status.skipped + syncStatus.by_status.failed})</>
                 )}
               </Button>
+            )}
+            {syncStatus.failed_articles?.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {syncStatus.failed_articles.slice(0, 3).map((article) => (
+                  <div key={article.id} className="border-l-2 border-red-300 pl-2 text-[10px] text-gray-600">
+                    <div className="truncate font-medium">{article.title || article.id}</div>
+                    <div className="line-clamp-2 text-red-600">{article.error || "知识抽取失败"}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {syncStatus.partial_articles?.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {syncStatus.partial_articles.slice(0, 3).map((article) => (
+                  <div key={article.id} className="border-l-2 border-orange-300 pl-2 text-[10px] text-gray-600">
+                    <div className="truncate font-medium">{article.title || article.id}</div>
+                    <div className="line-clamp-2 text-orange-700">{article.warning || "已使用关键词降级提取"}</div>
+                  </div>
+                ))}
+              </div>
             )}
           </div>
         )}
@@ -1059,10 +1441,19 @@ function KnowledgeGraphPageContent() {
                   <X className="w-4 h-4" />
                 </Button>
               </div>
-              <Tabs value={exploreTab} onValueChange={setExploreTab} className="max-h-[calc(100vh-12rem)]">
-                <TabsList className="mx-4 mt-3 grid w-[calc(100%-2rem)] grid-cols-2">
-                  <TabsTrigger value="path"><Route className="w-4 h-4 mr-2" />路径发现</TabsTrigger>
-                  <TabsTrigger value="profile"><BookOpen className="w-4 h-4 mr-2" />实体档案</TabsTrigger>
+              <Tabs value={exploreTab} onValueChange={changeExploreTab} className="max-h-[calc(100vh-12rem)]">
+                <TabsList className="mx-4 mt-3 grid h-auto w-[calc(100%-2rem)] grid-cols-5 gap-1">
+                  <TabsTrigger value="path"><Route className="w-4 h-4 mr-1" />路径</TabsTrigger>
+                  <TabsTrigger value="profile"><BookOpen className="w-4 h-4 mr-1" />档案</TabsTrigger>
+                  <TabsTrigger value="community"><Users className="w-4 h-4 mr-1" />社区</TabsTrigger>
+                  <TabsTrigger value="inference"><BrainCircuit className="w-4 h-4 mr-1" />推理</TabsTrigger>
+                  <TabsTrigger value="timeline"><Clock3 className="w-4 h-4 mr-1" />时序</TabsTrigger>
+                  <TabsTrigger value="prediction"><Link2 className="w-4 h-4 mr-1" />预测</TabsTrigger>
+                  <TabsTrigger value="similar"><Boxes className="w-4 h-4 mr-1" />相似</TabsTrigger>
+                  <TabsTrigger value="causal"><GitBranch className="w-4 h-4 mr-1" />因果</TabsTrigger>
+                  <TabsTrigger value="cross-document"><GitMerge className="w-4 h-4 mr-1" />共现</TabsTrigger>
+                  <TabsTrigger value="aliases"><ScanSearch className="w-4 h-4 mr-1" />别名</TabsTrigger>
+                  <TabsTrigger value="governance"><ShieldCheck className="w-4 h-4 mr-1" />治理</TabsTrigger>
                 </TabsList>
                 <TabsContent value="path" className="m-0 p-4">
                   <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
@@ -1098,7 +1489,12 @@ function KnowledgeGraphPageContent() {
                           {path.relationships.map((rel, relIndex) => (
                             <div key={relIndex} className="bg-gray-50 p-2 text-xs">
                               <div className="font-medium">{rel.source} — {rel.rel_type} → {rel.target}</div>
-                              <div className="mt-1 text-gray-500">支持 {rel.support_count} 次 · 来源 {rel.source_articles.length} 篇{rel.confidence != null ? ` · 置信度 ${Math.round(rel.confidence * 100)}%` : ""}</div>
+                              <div className="mt-1 flex flex-wrap items-center gap-1 text-gray-500">
+                                <span>支持 {rel.support_count} 次 · 来源 {rel.source_articles.length} 篇{rel.confidence != null ? ` · 置信度 ${Math.round(rel.confidence * 100)}%` : ""}</span>
+                                <Badge variant="outline" className="h-5 px-1 text-[10px]">
+                                  {provenanceLabels[rel.provenance_status || "legacy"] || "来源待确认"}
+                                </Badge>
+                              </div>
                               {rel.evidence_samples?.[0] && <div className="mt-1 text-gray-700">“{rel.evidence_samples[0]}”</div>}
                             </div>
                           ))}
@@ -1139,7 +1535,10 @@ function KnowledgeGraphPageContent() {
                           <div className="space-y-2">
                             {entityProfile.evidence.length === 0 ? <div className="text-sm text-gray-400">旧关系尚无可审计证据，等待文章重建完成</div> : entityProfile.evidence.map((claim) => (
                               <div key={claim.claim_id} className="border-l-2 border-indigo-300 pl-3 text-sm">
-                                <div className="font-medium">{claim.source} — {claim.rel_type} → {claim.target}</div>
+                                <div className="flex items-center gap-2 font-medium">
+                                  <span>{claim.source} — {claim.rel_type} → {claim.target}</span>
+                                  {claim.status === "recovered" && <Badge variant="outline" className="h-5 px-1 text-[10px]">恢复证据</Badge>}
+                                </div>
                                 <div className="mt-1 text-gray-600">{claim.evidence || "未保留原文片段"}</div>
                               </div>
                             ))}
@@ -1147,6 +1546,388 @@ function KnowledgeGraphPageContent() {
                         </div>
                       </div>
                     )}
+                  </ScrollArea>
+                </TabsContent>
+                <TabsContent value="community" className="m-0 p-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-medium">Louvain 实体社区</div>
+                      <div className="text-xs text-gray-500">按关系紧密程度自动分组</div>
+                    </div>
+                    <Button size="icon" variant="outline" onClick={() => loadMiningResults("community")} disabled={exploreLoading} title="重新计算社区">
+                      <RefreshCw className={`w-4 h-4 ${exploreLoading ? "animate-spin" : ""}`} />
+                    </Button>
+                  </div>
+                  <div className="mt-3 grid grid-cols-[1fr_auto_1fr_auto] items-center gap-2 border-y py-2">
+                    <Input list="kg-entity-names" value={causalSource} onChange={(event) => setCausalSource(event.target.value)} placeholder="因果链起点" />
+                    <span className="text-gray-400">→</span>
+                    <Input list="kg-entity-names" value={causalTarget} onChange={(event) => setCausalTarget(event.target.value)} placeholder="终点（可选）" onKeyDown={(event) => event.key === "Enter" && loadCausalChains()} />
+                    <Button size="icon" variant="outline" onClick={loadCausalChains} disabled={exploreLoading} title="查询已审核因果链">
+                      <Route className="h-4 w-4" />
+                    </Button>
+                  </div>
+                  {causalChains.length > 0 && (
+                    <div className="border-b py-2">
+                      <div className="text-xs font-medium">已审核因果链 · {causalChains.length}</div>
+                      {causalChains.slice(0, 4).map((chain, index) => (
+                        <button key={`${chain.nodes.map((node) => node.name).join("-")}-${index}`} className="mt-1 block w-full truncate text-left text-xs text-indigo-700 hover:underline" onClick={() => { setExploreTab("path"); setPathSource(chain.nodes[0]?.name || ""); setPathTarget(chain.nodes.at(-1)?.name || ""); }}>
+                          {chain.nodes.map((node) => node.name).join(" → ")} · {Math.round(chain.confidence * 100)}%
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <ScrollArea className="mt-3 h-[20rem] pr-3">
+                    {communities.length === 0 && !exploreLoading ? (
+                      <div className="py-12 text-center text-sm text-gray-400">尚未发现满足条件的实体社区</div>
+                    ) : communities.map((community) => (
+                      <div key={community.id} className="border-b py-3 first:pt-0 last:border-0">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0 text-sm font-medium">{community.label}</div>
+                          <Badge variant="secondary" className="shrink-0">{community.size} 实体</Badge>
+                        </div>
+                        <div className="mt-1 text-xs text-gray-500">{community.article_count} 篇文章 · {community.internal_edges} 条内部关系 · 密度 {Math.round(community.density * 100)}%</div>
+                        <div className="mt-2 text-xs text-gray-700">{community.summary}</div>
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {community.core_entities.map((entity) => (
+                            <Badge key={entity.name} variant="secondary">核心 {entity.name}</Badge>
+                          ))}
+                          {community.bridge_entities.map((entity) => (
+                            <Badge key={entity.name} variant="outline">桥接 {entity.name} · {entity.external_connections}</Badge>
+                          ))}
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {community.members.slice(0, 10).map((member) => (
+                            <button key={member.name} className="border bg-gray-50 px-2 py-1 text-xs hover:bg-gray-100" onClick={() => { setExploreTab("profile"); loadEntityProfile(member.name); }}>{member.name}</button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </ScrollArea>
+                </TabsContent>
+                <TabsContent value="inference" className="m-0 p-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-medium">可解释规则推理</div>
+                      <div className="text-xs text-gray-500">候选 {inferences.length} 条</div>
+                    </div>
+                    <Button size="icon" variant="outline" onClick={() => loadMiningResults("inference")} disabled={exploreLoading} title="重新计算推理候选">
+                      <RefreshCw className={`w-4 h-4 ${exploreLoading ? "animate-spin" : ""}`} />
+                    </Button>
+                  </div>
+                  <ScrollArea className="mt-3 h-[25rem] pr-3">
+                    {inferences.length === 0 && !exploreLoading ? (
+                      <div className="py-12 text-center text-sm text-gray-400">当前证据关系未形成可用传递链</div>
+                    ) : inferences.map((inference, index) => (
+                      <div key={`${inference.source}-${inference.rel_type}-${inference.target}-${index}`} className="border-b py-3 first:pt-0 last:border-0">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="text-sm font-medium">{inference.source} <span className="text-gray-400">→</span> {inference.target}</div>
+                          <Badge variant="outline">{Math.round(inference.confidence * 100)}%</Badge>
+                        </div>
+                        <div className="mt-1 text-xs text-gray-500">{inference.rule} · {inference.hops} 跳 · {inference.source_articles.length} 篇来源</div>
+                        <div className="mt-2 flex flex-wrap items-center gap-1 text-xs text-indigo-700">
+                          {inference.path.map((entity, pathIndex) => (
+                            <span key={`${entity}-${pathIndex}`} className="contents">
+                              <button className="hover:underline" onClick={() => { setExploreTab("profile"); loadEntityProfile(entity); }}>{entity}</button>
+                              {pathIndex < inference.path.length - 1 && <span className="text-gray-400">→</span>}
+                            </span>
+                          ))}
+                        </div>
+                        <div className="mt-2 flex gap-1">
+                          <Button size="sm" className="h-7 px-2 text-xs" disabled={exploreLoading} onClick={() => submitMiningReview(
+                            "/api/kg/mining/inferences/review",
+                            { source: inference.source, target: inference.target, rel_type: inference.rel_type, decision: "approved" },
+                            "inference",
+                          )}><CheckCircle2 className="mr-1 h-3 w-3" />确认推理</Button>
+                          <Button size="icon" variant="outline" className="h-7 w-7" disabled={exploreLoading} title="拒绝推理候选" onClick={() => submitMiningReview(
+                            "/api/kg/mining/inferences/review",
+                            { source: inference.source, target: inference.target, rel_type: inference.rel_type, decision: "rejected" },
+                            "inference",
+                          )}><X className="h-3 w-3" /></Button>
+                        </div>
+                      </div>
+                    ))}
+                  </ScrollArea>
+                </TabsContent>
+                <TabsContent value="timeline" className="m-0 p-4">
+                  <div className="flex gap-2">
+                    <Input value={timelineQuery} onChange={(event) => setTimelineQuery(event.target.value)} placeholder="搜索事件" onKeyDown={(event) => event.key === "Enter" && loadMiningResults("timeline")} />
+                    <Button size="icon" onClick={() => loadMiningResults("timeline")} disabled={exploreLoading} title="查询时间线">
+                      {exploreLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                    </Button>
+                  </div>
+                  <ScrollArea className="mt-3 h-[25rem] pr-3">
+                    {timelineEvents.length === 0 && !exploreLoading ? (
+                      <div className="py-12 text-center text-sm text-gray-400">没有匹配的事件时间记录</div>
+                    ) : timelineEvents.map((event, index) => (
+                      <div key={`${event.name}-${index}`} className="border-b py-3 first:pt-0 last:border-0">
+                        <div className="flex items-start justify-between gap-2">
+                          <button className="text-left text-sm font-medium text-indigo-700 hover:underline" onClick={() => { setExploreTab("profile"); loadEntityProfile(event.name); }}>{event.name}</button>
+                          <Badge variant="outline">{event.observed_at || "日期待定"}</Badge>
+                        </div>
+                        {event.description && <div className="mt-1 line-clamp-2 text-xs text-gray-600">{event.description}</div>}
+                        <div className="mt-1 text-xs text-gray-500">文中时间 {event.date_markers.filter(Boolean).join("、") || "未标注"} · 来源 {event.articles.length} 篇</div>
+                        {event.temporal_relations.some((relation) => relation.target) && (
+                          <div className="mt-1 text-xs text-gray-500">
+                            {event.temporal_relations.filter((relation) => relation.target).slice(0, 3).map((relation) => `${relation.rel_type} ${relation.target}`).join(" · ")}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </ScrollArea>
+                </TabsContent>
+                <TabsContent value="prediction" className="m-0 p-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-medium">结构链接预测</div>
+                      <div className="text-xs text-gray-500">候选 {linkPredictions.length} 条</div>
+                    </div>
+                    <Button size="icon" variant="outline" onClick={() => loadMiningResults("prediction")} disabled={exploreLoading} title="重新计算链接预测">
+                      <RefreshCw className={`h-4 w-4 ${exploreLoading ? "animate-spin" : ""}`} />
+                    </Button>
+                  </div>
+                  <ScrollArea className="mt-3 h-[25rem] pr-3">
+                    {linkPredictions.length === 0 && !exploreLoading ? (
+                      <div className="py-12 text-center text-sm text-gray-400">没有达到阈值的结构预测</div>
+                    ) : linkPredictions.map((prediction, index) => (
+                      <div key={`${prediction.source}-${prediction.target}-${index}`} className="border-b py-3 first:pt-0 last:border-0">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="text-sm font-medium">{prediction.source} <span className="text-gray-400">↔</span> {prediction.target}</div>
+                          <Badge variant="outline">{Math.round(prediction.score * 100)}%</Badge>
+                        </div>
+                        <div className="mt-1 text-xs text-gray-500">{prediction.reasons.join(" · ")}</div>
+                        <div className="mt-1 text-xs text-gray-600">共同邻居：{prediction.common_neighbors.slice(0, 8).join("、")}</div>
+                        <div className="mt-2 flex gap-1">
+                          <Button size="sm" className="h-7 px-2 text-xs" disabled={exploreLoading} onClick={() => submitMiningReview(
+                            "/api/kg/mining/link-predictions/review",
+                            { source: prediction.source, target: prediction.target, decision: "approved" },
+                            "prediction",
+                          )}><CheckCircle2 className="mr-1 h-3 w-3" />确认关联</Button>
+                          <Button size="icon" variant="outline" className="h-7 w-7" disabled={exploreLoading} title="拒绝预测候选" onClick={() => submitMiningReview(
+                            "/api/kg/mining/link-predictions/review",
+                            { source: prediction.source, target: prediction.target, decision: "rejected" },
+                            "prediction",
+                          )}><X className="h-3 w-3" /></Button>
+                        </div>
+                      </div>
+                    ))}
+                  </ScrollArea>
+                </TabsContent>
+                <TabsContent value="similar" className="m-0 p-4">
+                  <div className="flex gap-2">
+                    <Input list="kg-entity-names" value={similarQuery} onChange={(event) => setSimilarQuery(event.target.value)} placeholder="输入实体名称" onKeyDown={(event) => event.key === "Enter" && loadSimilarEntities()} />
+                    <Button size="icon" onClick={loadSimilarEntities} disabled={exploreLoading} title="查询相似实体">
+                      {exploreLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                    </Button>
+                    <Button size="icon" variant="outline" onClick={generateEmbeddings} disabled={exploreLoading} title="生成或刷新图嵌入">
+                      <RefreshCw className={`h-4 w-4 ${exploreLoading ? "animate-spin" : ""}`} />
+                    </Button>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-gray-500">
+                    <span className="truncate">{embeddingVersion ? `版本 ${embeddingVersion}` : "尚未生成图嵌入"}</span>
+                    {embeddingStatus && (
+                      <Badge variant={embeddingStatus.stale ? "destructive" : "secondary"} className="shrink-0 text-[10px]">
+                        {embeddingStatus.stale ? "需刷新" : `${embeddingStatus.embedded_count}/${embeddingStatus.entity_count}`}
+                      </Badge>
+                    )}
+                  </div>
+                  {embeddingQuality && (
+                    <div className="mt-2 grid grid-cols-3 gap-2 border-y py-2 text-center text-[10px] text-gray-500">
+                      <div><div className="font-medium text-gray-800">{Math.round(embeddingQuality.precision_at_k * 100)}%</div>精确率@{embeddingQuality.k}</div>
+                      <div><div className="font-medium text-gray-800">{Math.round(embeddingQuality.recall_at_k * 100)}%</div>召回率@{embeddingQuality.k}</div>
+                      <div><div className="font-medium text-gray-800">{Math.round(embeddingQuality.mean_neighbor_similarity * 100)}%</div>邻居相似度</div>
+                    </div>
+                  )}
+                  <ScrollArea className="mt-3 h-[24rem] pr-3">
+                    {similarEntities.length === 0 && !exploreLoading ? (
+                      <div className="py-12 text-center text-sm text-gray-400">生成嵌入后查询实体相似度</div>
+                    ) : similarEntities.map((entity) => (
+                      <button key={entity.name} className="flex w-full items-center justify-between gap-3 border-b py-3 text-left first:pt-0 last:border-0 hover:bg-gray-50" onClick={() => { setExploreTab("profile"); loadEntityProfile(entity.name); }}>
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium text-indigo-700">{entity.name}</div>
+                          <div className="text-xs text-gray-500">{entity.entity_type || "OTHER"} · {entity.subtype || "未分类"}</div>
+                        </div>
+                        <Badge variant="outline">{Math.round(entity.score * 100)}%</Badge>
+                      </button>
+                    ))}
+                  </ScrollArea>
+                </TabsContent>
+                <TabsContent value="causal" className="m-0 p-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-medium">证据约束因果候选</div>
+                      <div className="text-xs text-gray-500">候选 {causalCandidates.length} 条</div>
+                    </div>
+                    <Button size="icon" variant="outline" onClick={() => loadMiningResults("causal")} disabled={exploreLoading} title="重新发现因果候选">
+                      <RefreshCw className={`h-4 w-4 ${exploreLoading ? "animate-spin" : ""}`} />
+                    </Button>
+                  </div>
+                  <ScrollArea className="mt-3 h-[25rem] pr-3">
+                    {causalCandidates.length === 0 && !exploreLoading ? (
+                      <div className="py-12 text-center text-sm text-gray-400">现有证据中没有满足严格条件的因果候选</div>
+                    ) : causalCandidates.map((candidate, index) => (
+                      <div key={`${candidate.source}-${candidate.rel_type}-${candidate.target}-${index}`} className="border-b py-3 first:pt-0 last:border-0">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="text-sm font-medium">{candidate.source} <span className="text-gray-400">→</span> {candidate.target}</div>
+                          <Badge variant="outline">{Math.round(candidate.confidence * 100)}%</Badge>
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-gray-500">
+                          <span>{candidate.rel_type} · 触发词 {candidate.markers.join("、")} · {candidate.source_articles.length} 篇来源</span>
+                          {candidate.discovery_sources?.includes("historical_article") && <Badge variant="secondary" className="text-[10px]">历史原文</Badge>}
+                        </div>
+                        {candidate.evidence_samples[0] && <div className="mt-2 line-clamp-3 text-xs text-gray-700">{candidate.evidence_samples[0]}</div>}
+                        <div className="mt-2 flex gap-1">
+                          <Button size="sm" className="h-7 px-2 text-xs" disabled={exploreLoading} onClick={() => submitMiningReview(
+                            "/api/kg/mining/causal-candidates/review",
+                            { source: candidate.source, target: candidate.target, rel_type: candidate.rel_type, decision: "approved" },
+                            "causal",
+                          )}><CheckCircle2 className="mr-1 h-3 w-3" />确认因果</Button>
+                          <Button size="icon" variant="outline" className="h-7 w-7" disabled={exploreLoading} title="拒绝因果候选" onClick={() => submitMiningReview(
+                            "/api/kg/mining/causal-candidates/review",
+                            { source: candidate.source, target: candidate.target, rel_type: candidate.rel_type, decision: "rejected" },
+                            "causal",
+                          )}><X className="h-3 w-3" /></Button>
+                        </div>
+                      </div>
+                    ))}
+                  </ScrollArea>
+                </TabsContent>
+                <TabsContent value="cross-document" className="m-0 p-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-medium">跨文档关系候选</div>
+                      <div className="text-xs text-gray-500">至少在两篇文章共同出现，尚无显式关系</div>
+                    </div>
+                    <Button size="icon" variant="outline" onClick={() => loadMiningResults("cross-document")} disabled={exploreLoading} title="重新发现候选">
+                      <RefreshCw className={`w-4 h-4 ${exploreLoading ? "animate-spin" : ""}`} />
+                    </Button>
+                  </div>
+                  <ScrollArea className="mt-3 h-[25rem] pr-3">
+                    {crossDocumentCandidates.map((candidate, index) => (
+                      <div key={`${candidate.source}-${candidate.target}-${index}`} className="border-b py-3 first:pt-0 last:border-0">
+                        <div className="text-sm font-medium">
+                          <button className="text-indigo-700 hover:underline" onClick={() => { setExploreTab("profile"); loadEntityProfile(candidate.source); }}>{candidate.source}</button>
+                          <span className="px-2 text-gray-400">↔</span>
+                          <button className="text-indigo-700 hover:underline" onClick={() => { setExploreTab("profile"); loadEntityProfile(candidate.target); }}>{candidate.target}</button>
+                        </div>
+                        <div className="mt-1 text-xs text-gray-500">共同出现 {candidate.support_count} 篇 · 关联评分 {Math.round(candidate.score * 100)}%</div>
+                        <div className="mt-2 flex gap-1">
+                          <Button size="sm" className="h-7 px-2 text-xs" disabled={exploreLoading} onClick={() => submitMiningReview(
+                            "/api/kg/mining/cross-document/review",
+                            { source: candidate.source, target: candidate.target, decision: "approved" },
+                            "cross-document",
+                          )}><CheckCircle2 className="mr-1 h-3 w-3" />确认共现</Button>
+                          <Button size="icon" variant="outline" className="h-7 w-7" disabled={exploreLoading} title="拒绝候选" onClick={() => submitMiningReview(
+                            "/api/kg/mining/cross-document/review",
+                            { source: candidate.source, target: candidate.target, decision: "rejected" },
+                            "cross-document",
+                          )}><X className="h-3 w-3" /></Button>
+                          <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => { setPathSource(candidate.source); setPathTarget(candidate.target); setExploreTab("path"); }}>检查路径</Button>
+                        </div>
+                      </div>
+                    ))}
+                  </ScrollArea>
+                </TabsContent>
+                <TabsContent value="aliases" className="m-0 p-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-medium">实体别名候选</div>
+                      <div className="text-xs text-gray-500">仅供人工审查，不会自动合并</div>
+                    </div>
+                    <Button size="icon" variant="outline" onClick={() => loadMiningResults("aliases")} disabled={exploreLoading} title="重新识别别名">
+                      <RefreshCw className={`w-4 h-4 ${exploreLoading ? "animate-spin" : ""}`} />
+                    </Button>
+                  </div>
+                  <ScrollArea className="mt-3 h-[25rem] pr-3">
+                    {aliasCandidates.length === 0 && !exploreLoading ? (
+                      <div className="py-12 text-center text-sm text-gray-400">未发现高可信别名候选</div>
+                    ) : aliasCandidates.map((candidate, index) => (
+                      <div key={`${candidate.left.name}-${candidate.right.name}-${index}`} className="border-b py-3 first:pt-0 last:border-0">
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="text-sm font-medium">{candidate.left.name} <span className="text-gray-400">≈</span> {candidate.right.name}</div>
+                          <Badge variant="outline">{Math.round(candidate.score * 100)}%</Badge>
+                        </div>
+                        <div className="mt-1 text-xs text-gray-500">{candidate.reasons.join(" · ")}</div>
+                        <div className="mt-2 flex gap-2">
+                          {[candidate.left, candidate.right].map((entity) => (
+                            <Button key={entity.name} size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => { setExploreTab("profile"); loadEntityProfile(entity.name); }}>查看 {entity.name}</Button>
+                          ))}
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          <Button size="sm" className="h-7 px-2 text-xs" disabled={exploreLoading} onClick={() => submitMiningReview(
+                            "/api/kg/mining/aliases/review",
+                            { source: candidate.left.name, target: candidate.right.name, canonical_name: candidate.left.name, decision: "approved" },
+                            "aliases",
+                          )}><CheckCircle2 className="mr-1 h-3 w-3" />左侧为主</Button>
+                          <Button size="sm" variant="outline" className="h-7 px-2 text-xs" disabled={exploreLoading} onClick={() => submitMiningReview(
+                            "/api/kg/mining/aliases/review",
+                            { source: candidate.left.name, target: candidate.right.name, canonical_name: candidate.right.name, decision: "approved" },
+                            "aliases",
+                          )}><CheckCircle2 className="mr-1 h-3 w-3" />右侧为主</Button>
+                          <Button size="icon" variant="outline" className="h-7 w-7" disabled={exploreLoading} title="拒绝别名候选" onClick={() => submitMiningReview(
+                            "/api/kg/mining/aliases/review",
+                            { source: candidate.left.name, target: candidate.right.name, decision: "rejected" },
+                            "aliases",
+                          )}><X className="h-3 w-3" /></Button>
+                        </div>
+                      </div>
+                    ))}
+                  </ScrollArea>
+                </TabsContent>
+                <TabsContent value="governance" className="m-0 p-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-medium">历史无证据关系</div>
+                      <div className="text-xs text-gray-500">待审核 {legacyRelations.length} 条</div>
+                    </div>
+                    <Button size="icon" variant="outline" onClick={() => loadMiningResults("governance")} disabled={exploreLoading} title="刷新待审核关系">
+                      <RefreshCw className={`w-4 h-4 ${exploreLoading ? "animate-spin" : ""}`} />
+                    </Button>
+                  </div>
+                  <ScrollArea className="mt-3 h-[25rem] pr-3">
+                    {miningReviews.length > 0 && (
+                      <div className="mb-4 border-b pb-3">
+                        <div className="mb-2 text-xs font-medium text-gray-700">审核记录</div>
+                        <div className="space-y-2">
+                          {miningReviews.slice(0, 10).map((review) => (
+                            <div key={review.id} className="flex items-center justify-between gap-2 bg-gray-50 p-2 text-xs">
+                              <div className="min-w-0">
+                                <div className="truncate font-medium">{review.source} → {review.target}</div>
+                                <div className="text-gray-500">{review.review_type} · {review.decision} · {review.status === "undone" ? "已撤销" : "生效中"}</div>
+                              </div>
+                              {review.status !== "undone" && (
+                                <Button size="icon" variant="ghost" className="h-7 w-7 shrink-0" title="撤销审核" disabled={exploreLoading} onClick={() => undoMiningReview(review.id)}>
+                                  <Undo2 className="h-3.5 w-3.5" />
+                                </Button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {legacyRelations.length === 0 && !exploreLoading ? (
+                      <div className="py-12 text-center text-sm text-gray-400">没有待审核的历史关系</div>
+                    ) : legacyRelations.map((relation, index) => (
+                      <div key={`${relation.source}-${relation.rel_type}-${relation.target}-${index}`} className="border-b py-3 first:pt-0 last:border-0">
+                        <div className="text-sm font-medium">{relation.source} <span className="text-gray-400">→</span> {relation.target}</div>
+                        <div className="mt-1 text-xs text-gray-500">{relation.rel_type}</div>
+                        <div className="mt-2 flex gap-1">
+                          <Button size="sm" variant="outline" className="h-7 px-2 text-xs" disabled={exploreLoading} onClick={() => submitMiningReview(
+                            "/api/kg/mining/legacy-relations/review",
+                            { source: relation.source, target: relation.target, rel_type: relation.rel_type, decision: "kept" },
+                            "governance",
+                          )}><CheckCircle2 className="mr-1 h-3 w-3" />保留</Button>
+                          <Button size="icon" variant="destructive" className="h-7 w-7" disabled={exploreLoading} title="删除历史关系" onClick={() => {
+                            if (confirm(`删除关系“${relation.source} → ${relation.target}”？审核快照会保留。`)) {
+                              submitMiningReview(
+                                "/api/kg/mining/legacy-relations/review",
+                                { source: relation.source, target: relation.target, rel_type: relation.rel_type, decision: "deleted" },
+                                "governance",
+                              );
+                            }
+                          }}><Trash2 className="h-3 w-3" /></Button>
+                        </div>
+                      </div>
+                    ))}
                   </ScrollArea>
                 </TabsContent>
               </Tabs>
