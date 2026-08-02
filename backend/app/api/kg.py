@@ -10,7 +10,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.database import get_db
 from app.models.article import Article
@@ -659,6 +659,8 @@ async def cleanup_orphan_entities():
 async def process_pending_articles_now(
     limit: int = Query(default=200, ge=1, le=1000, description="最多处理多少篇"),
     max_concurrency: int = Query(default=3, ge=1, le=10, description="并发数"),
+    include_failed: bool = Query(default=True, description="是否同时重试失败文章"),
+    include_success: bool = Query(default=False, description="是否安全重建已成功文章的证据"),
     db: Session = Depends(get_db)
 ):
     """
@@ -671,6 +673,8 @@ async def process_pending_articles_now(
             max_concurrency=max_concurrency,
             rate_limit_seconds=0.5,
             limit=limit,
+            include_failed=include_failed,
+            include_success=include_success,
         )
         return {"status": "success", **result}
     except Exception as e:
@@ -679,34 +683,29 @@ async def process_pending_articles_now(
 
 
 @router.post("/reprocess/{article_id}")
-async def reprocess_article(article_id: str):
+async def reprocess_article(article_id: str, db: Session = Depends(get_db)):
     """重抽单篇文章:清旧实体+关系,重新走 extract_and_link_entities"""
-    from app.core.database import get_session_local
-    SessionLocal = get_session_local()
-    session = SessionLocal()
-    try:
-        article = session.query(Article).filter(Article.id == article_id).first()
-        if not article:
-            raise HTTPException(status_code=404, detail="文章不存在")
-    finally:
-        session.close()
+    article = db.query(Article).filter(Article.id == article_id).first()
+    if not article:
+        raise HTTPException(status_code=404, detail="文章不存在")
 
     try:
-        # 清旧实体(彻底删 Article 节点 + 边 + 孤儿实体)
-        neo4j = Neo4jService()
-        await neo4j.connect()
-        await neo4j.delete_article_full(article_id)
-        await neo4j.close()
-
-        # 重置 SQLite 状态,让 extract_and_link_entities 重新走
+        # 先抽取，解析成功后由同步服务原子式替换旧知识，避免失败重抽清空可用数据。
         article.kg_status = "pending"
         article.kg_error_message = None
-        session.commit()
-        session.close()
+        db.commit()
 
-        # 重新抽取
         await kg_sync.extract_and_link_entities(article_id)
-        return {"status": "success", "article_id": article_id, "message": "重抽完成"}
+        db.expire_all()
+        refreshed = db.query(Article).filter(Article.id == article_id).first()
+        final_status = refreshed.kg_status if refreshed else "failed"
+        return {
+            "status": "success" if final_status == "success" else "failed",
+            "article_id": article_id,
+            "kg_status": final_status,
+            "error": refreshed.kg_error_message if refreshed else "文章不存在",
+            "message": "重抽完成" if final_status == "success" else "重抽失败",
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -762,6 +761,108 @@ class QARequest(BaseModel):
     question: str
     model_id: str = "default"
     session_id: Optional[str] = None
+
+
+class PathExploreRequest(BaseModel):
+    source: str
+    target: str
+    max_depth: int = 4
+    limit: int = 10
+    relation_types: List[str] = Field(default_factory=list)
+
+
+@router.post("/explore/path")
+async def explore_shortest_path(
+    request: PathExploreRequest,
+    db: Session = Depends(get_db),
+):
+    """查找实体间可解释最短路径，并补充路径所引用的文章元数据。"""
+    source = request.source.strip()
+    target = request.target.strip()
+    if not source or not target:
+        raise HTTPException(status_code=400, detail="起点和终点实体不能为空")
+    if source == target:
+        raise HTTPException(status_code=400, detail="起点和终点不能相同")
+
+    neo4j = Neo4jService()
+    try:
+        paths = await neo4j.find_shortest_paths(
+            source_name=source,
+            target_name=target,
+            max_depth=request.max_depth,
+            limit=request.limit,
+            relation_types=request.relation_types,
+        )
+    finally:
+        await neo4j.close()
+
+    article_ids = {
+        article_id
+        for path in paths
+        for rel in path.get("relationships", [])
+        for article_id in rel.get("source_articles", [])
+    }
+    articles = []
+    if article_ids:
+        rows = db.query(Article).filter(Article.id.in_(article_ids)).all()
+        articles = [
+            {
+                "id": str(article.id),
+                "title": article.title,
+                "url": article.url,
+                "published_at": article.published_at.isoformat()
+                if article.published_at else None,
+            }
+            for article in rows
+        ]
+
+    return {
+        "status": "success",
+        "source": source,
+        "target": target,
+        "count": len(paths),
+        "paths": paths,
+        "articles": articles,
+    }
+
+
+@router.get("/explore/entity-profile/{entity_name}")
+async def explore_entity_profile(
+    entity_name: str,
+    neighbor_limit: int = Query(default=20, ge=1, le=100),
+    evidence_limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    """返回实体跨文档档案、邻居关系和原文证据。"""
+    neo4j = Neo4jService()
+    try:
+        profile = await neo4j.get_entity_profile(
+            entity_name=entity_name,
+            neighbor_limit=neighbor_limit,
+            evidence_limit=evidence_limit,
+        )
+    finally:
+        await neo4j.close()
+    if not profile:
+        raise HTTPException(status_code=404, detail="实体不存在")
+
+    article_ids = profile.pop("article_ids", [])
+    article_rows = db.query(Article).filter(Article.id.in_(article_ids)).all() \
+        if article_ids else []
+    articles_by_id = {str(article.id): article for article in article_rows}
+    profile["articles"] = [
+        {
+            "id": article_id,
+            "title": articles_by_id[article_id].title,
+            "url": articles_by_id[article_id].url,
+            "summary": articles_by_id[article_id].summary,
+            "published_at": articles_by_id[article_id].published_at.isoformat()
+            if articles_by_id[article_id].published_at else None,
+        }
+        for article_id in article_ids
+        if article_id in articles_by_id
+    ]
+    return {"status": "success", **profile}
 
 
 @router.post("/qa/answer")

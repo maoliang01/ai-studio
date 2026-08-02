@@ -46,12 +46,28 @@ async def lifespan(app: FastAPI):
         interval = int(os.getenv("KG_RECONCILE_INTERVAL_MINUTES", "10"))
         register_kg_reconcile_job(_scheduler, interval_minutes=interval)
 
+        # 幂等初始化图谱约束、Claim 索引和现有实体的稳定标识。
+        from app.services.kg import Neo4jService
+        neo4j = Neo4jService()
+        try:
+            await neo4j.init_schema()
+        except Exception as e:
+            logger.error(f"启动时初始化知识图谱模式失败: {e}")
+        finally:
+            await neo4j.close()
+
         # 启动时自动处理 kg_status in (NULL, 'pending') 的老文章
         from app.core.database import get_session_local
-        from app.services.kg_sync import process_pending_articles
+        from app.services.kg_sync import (
+            process_pending_articles,
+            recover_interrupted_articles,
+        )
         SessionLocal = get_session_local()
         session = SessionLocal()
         try:
+            recovered = recover_interrupted_articles(session)
+            if recovered:
+                logger.warning(f"恢复 {recovered} 篇被后端重启中断的KG任务")
             result = await process_pending_articles(session)
             if result["scanned"] > 0:
                 logger.warning(

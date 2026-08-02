@@ -14,6 +14,7 @@ build/
 # Node.js
 node_modules/
 .next/
+.next-*/
 out/
 .vercel
 
@@ -55,6 +56,7 @@ htmlcov/
 .superpowers/
 .worktrees/
 data/
+backups/
 # PID files
 .pids/
 

@@ -15,19 +15,15 @@ import {
   Search,
   Play,
   RefreshCw,
-  Database,
   Loader2,
   AlertCircle,
   CheckCircle2,
-  Eye,
   Filter,
-  ZoomIn,
-  ZoomOut,
-  Maximize2,
   Trash2,
-  Upload,
   Star,
   X,
+  Route,
+  BookOpen,
 } from "lucide-react";
 import { toast } from "sonner";
 import EntitySourcePopover from "@/components/kg/EntitySourcePopover";
@@ -85,6 +81,43 @@ interface SyncStatus {
   };
 }
 
+interface EntityProfile {
+  entity: Record<string, unknown> & { name?: string; entity_type?: string; description?: string };
+  article_count: number;
+  articles: Array<{ id: string; title: string; url?: string }>;
+  neighbors: Array<{
+    name: string;
+    entity_type?: string;
+    rel_type: string;
+    confidence?: number;
+    support_count: number;
+    source_articles: string[];
+  }>;
+  evidence: Array<{
+    claim_id: string;
+    source: string;
+    target: string;
+    rel_type: string;
+    evidence?: string;
+    confidence?: number;
+    article_id?: string;
+  }>;
+}
+
+interface KnowledgePath {
+  length: number;
+  nodes: Array<{ name: string; entity_type?: string }>;
+  relationships: Array<{
+    source: string;
+    target: string;
+    rel_type: string;
+    confidence?: number;
+    support_count: number;
+    source_articles: string[];
+    evidence_samples: string[];
+  }>;
+}
+
 function KnowledgeGraphPageContent() {
   const [graphData, setGraphData] = useState<GraphData>({ nodes: [], edges: [] });
   const [stats, setStats] = useState<Stats | null>(null);
@@ -99,6 +132,15 @@ function KnowledgeGraphPageContent() {
   const [highlightQuery, setHighlightQuery] = useState<string | null>(null);
   const [highlightedNodeIds, setHighlightedNodeIds] = useState<Set<string>>(new Set());
   const [popoverEntity, setPopoverEntity] = useState<string | null>(null);
+  const [exploreOpen, setExploreOpen] = useState(false);
+  const [exploreTab, setExploreTab] = useState("path");
+  const [profileQuery, setProfileQuery] = useState("");
+  const [entityProfile, setEntityProfile] = useState<EntityProfile | null>(null);
+  const [pathSource, setPathSource] = useState("");
+  const [pathTarget, setPathTarget] = useState("");
+  const [pathDepth, setPathDepth] = useState(4);
+  const [paths, setPaths] = useState<KnowledgePath[]>([]);
+  const [exploreLoading, setExploreLoading] = useState(false);
 
   const svgRef = useRef<SVGSVGElement>(null);
   const simulationRef = useRef<any>(null);
@@ -253,6 +295,55 @@ function KnowledgeGraphPageContent() {
       }
     } catch (error) {
       console.error("搜索失败:", error);
+    }
+  };
+
+  const loadEntityProfile = async (name = profileQuery) => {
+    const entityName = name.trim();
+    if (!entityName) return;
+    setExploreLoading(true);
+    try {
+      const response = await fetch(
+        `/api/kg/explore/entity-profile/${encodeURIComponent(entityName)}`
+      );
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "实体档案查询失败");
+      setEntityProfile(data);
+      setProfileQuery(entityName);
+    } catch (error) {
+      setEntityProfile(null);
+      toast.error(error instanceof Error ? error.message : "实体档案查询失败");
+    } finally {
+      setExploreLoading(false);
+    }
+  };
+
+  const findKnowledgePaths = async () => {
+    if (!pathSource.trim() || !pathTarget.trim()) {
+      toast.error("请输入起点和终点实体");
+      return;
+    }
+    setExploreLoading(true);
+    try {
+      const response = await fetch("/api/kg/explore/path", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source: pathSource.trim(),
+          target: pathTarget.trim(),
+          max_depth: pathDepth,
+          limit: 10,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "路径查询失败");
+      setPaths(data.paths || []);
+      if (!data.paths?.length) toast.info("指定深度内未发现连接路径");
+    } catch (error) {
+      setPaths([]);
+      toast.error(error instanceof Error ? error.message : "路径查询失败");
+    } finally {
+      setExploreLoading(false);
     }
   };
 
@@ -944,10 +1035,126 @@ function KnowledgeGraphPageContent() {
           <span className="text-xs text-gray-400">
             拖拽节点可移动 | 滚轮缩放 | 点击节点查看详情
           </span>
+          <Button
+            size="sm"
+            variant={exploreOpen ? "default" : "outline"}
+            className="ml-auto"
+            onClick={() => setExploreOpen((open) => !open)}
+          >
+            <Route className="w-4 h-4 mr-2" />
+            知识探索
+          </Button>
         </div>
 
         {/* 图谱画布 */}
         <div className="flex-1 relative">
+          {exploreOpen && (
+            <Card className="absolute right-4 top-4 z-10 w-[min(34rem,calc(100%-2rem))] max-h-[calc(100%-2rem)] overflow-hidden bg-white shadow-lg">
+              <div className="flex items-center justify-between border-b px-4 py-3">
+                <div>
+                  <div className="font-semibold">知识探索</div>
+                  <div className="text-xs text-gray-500">基于文章来源与关系证据进行探索</div>
+                </div>
+                <Button size="icon" variant="ghost" onClick={() => setExploreOpen(false)} title="关闭">
+                  <X className="w-4 h-4" />
+                </Button>
+              </div>
+              <Tabs value={exploreTab} onValueChange={setExploreTab} className="max-h-[calc(100vh-12rem)]">
+                <TabsList className="mx-4 mt-3 grid w-[calc(100%-2rem)] grid-cols-2">
+                  <TabsTrigger value="path"><Route className="w-4 h-4 mr-2" />路径发现</TabsTrigger>
+                  <TabsTrigger value="profile"><BookOpen className="w-4 h-4 mr-2" />实体档案</TabsTrigger>
+                </TabsList>
+                <TabsContent value="path" className="m-0 p-4">
+                  <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
+                    <Input list="kg-entity-names" value={pathSource} onChange={(e) => setPathSource(e.target.value)} placeholder="起点实体" />
+                    <span className="text-gray-400">→</span>
+                    <Input list="kg-entity-names" value={pathTarget} onChange={(e) => setPathTarget(e.target.value)} placeholder="终点实体" onKeyDown={(e) => e.key === "Enter" && findKnowledgePaths()} />
+                  </div>
+                  <div className="mt-2 flex items-center gap-2">
+                    <label className="text-xs text-gray-500" htmlFor="path-depth">最大深度</label>
+                    <select id="path-depth" className="h-9 rounded-md border bg-white px-2 text-sm" value={pathDepth} onChange={(e) => setPathDepth(Number(e.target.value))}>
+                      {[2, 3, 4, 5, 6].map((depth) => <option key={depth} value={depth}>{depth}</option>)}
+                    </select>
+                    <Button className="ml-auto" onClick={findKnowledgePaths} disabled={exploreLoading}>
+                      {exploreLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Search className="w-4 h-4 mr-2" />}
+                      查找路径
+                    </Button>
+                  </div>
+                  <ScrollArea className="mt-4 h-[22rem] pr-3">
+                    {paths.length === 0 ? (
+                      <div className="py-12 text-center text-sm text-gray-400">输入两个实体，探索它们之间的最短关系链</div>
+                    ) : paths.map((path, pathIndex) => (
+                      <div key={pathIndex} className="mb-4 border-b pb-4 last:border-0">
+                        <div className="mb-2 text-sm font-medium">路径 {pathIndex + 1} · {path.length} 跳</div>
+                        <div className="flex flex-wrap items-center gap-1 text-sm">
+                          {path.nodes.map((node, nodeIndex) => (
+                            <span key={`${node.name}-${nodeIndex}`} className="contents">
+                              <button className="text-indigo-700 hover:underline" onClick={() => { setExploreTab("profile"); loadEntityProfile(node.name); }}>{node.name}</button>
+                              {nodeIndex < path.nodes.length - 1 && <span className="text-gray-400">→</span>}
+                            </span>
+                          ))}
+                        </div>
+                        <div className="mt-3 space-y-2">
+                          {path.relationships.map((rel, relIndex) => (
+                            <div key={relIndex} className="bg-gray-50 p-2 text-xs">
+                              <div className="font-medium">{rel.source} — {rel.rel_type} → {rel.target}</div>
+                              <div className="mt-1 text-gray-500">支持 {rel.support_count} 次 · 来源 {rel.source_articles.length} 篇{rel.confidence != null ? ` · 置信度 ${Math.round(rel.confidence * 100)}%` : ""}</div>
+                              {rel.evidence_samples?.[0] && <div className="mt-1 text-gray-700">“{rel.evidence_samples[0]}”</div>}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </ScrollArea>
+                </TabsContent>
+                <TabsContent value="profile" className="m-0 p-4">
+                  <div className="flex gap-2">
+                    <Input list="kg-entity-names" value={profileQuery} onChange={(e) => setProfileQuery(e.target.value)} placeholder="输入实体名称" onKeyDown={(e) => e.key === "Enter" && loadEntityProfile()} />
+                    <Button size="icon" onClick={() => loadEntityProfile()} disabled={exploreLoading} title="查询实体档案">
+                      {exploreLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                    </Button>
+                  </div>
+                  <ScrollArea className="mt-4 h-[24rem] pr-3">
+                    {!entityProfile ? (
+                      <div className="py-12 text-center text-sm text-gray-400">查询实体的跨文档来源、邻居和原文证据</div>
+                    ) : (
+                      <div className="space-y-4">
+                        <div>
+                          <div className="text-lg font-semibold">{entityProfile.entity.name || profileQuery}</div>
+                          <div className="mt-1 text-sm text-gray-600">{entityProfile.entity.description || "暂无描述"}</div>
+                          <div className="mt-2 text-xs text-gray-500">出现于 {entityProfile.article_count} 篇文章 · {entityProfile.neighbors.length} 个关联实体 · {entityProfile.evidence.length} 条可审计证据</div>
+                        </div>
+                        <div>
+                          <div className="mb-2 text-sm font-medium">主要关系</div>
+                          <div className="flex flex-wrap gap-2">
+                            {entityProfile.neighbors.map((neighbor) => (
+                              <button key={`${neighbor.name}-${neighbor.rel_type}`} className="border bg-gray-50 px-2 py-1 text-left text-xs hover:bg-gray-100" onClick={() => { setPathSource(profileQuery); setPathTarget(neighbor.name); setExploreTab("path"); }}>
+                                {neighbor.name} · {neighbor.rel_type} ({neighbor.support_count})
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="mb-2 text-sm font-medium">关系证据</div>
+                          <div className="space-y-2">
+                            {entityProfile.evidence.length === 0 ? <div className="text-sm text-gray-400">旧关系尚无可审计证据，等待文章重建完成</div> : entityProfile.evidence.map((claim) => (
+                              <div key={claim.claim_id} className="border-l-2 border-indigo-300 pl-3 text-sm">
+                                <div className="font-medium">{claim.source} — {claim.rel_type} → {claim.target}</div>
+                                <div className="mt-1 text-gray-600">{claim.evidence || "未保留原文片段"}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </ScrollArea>
+                </TabsContent>
+              </Tabs>
+              <datalist id="kg-entity-names">
+                {graphData.nodes.filter((node) => node.type !== "Article").map((node) => <option key={node.id} value={node.label} />)}
+              </datalist>
+            </Card>
+          )}
           {isLoading ? (
             <div className="absolute inset-0 flex items-center justify-center">
               <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
@@ -956,7 +1163,7 @@ function KnowledgeGraphPageContent() {
             <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-500">
               <Network className="w-16 h-16 mb-4 text-gray-300" />
               <p className="text-lg mb-2">暂无图谱数据</p>
-              <p className="text-sm">点击"批量处理文章"开始构建知识图谱</p>
+              <p className="text-sm">点击“批量处理文章”开始构建知识图谱</p>
             </div>
           ) : (
             <svg

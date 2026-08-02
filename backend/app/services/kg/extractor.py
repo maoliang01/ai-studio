@@ -59,7 +59,7 @@ EXTRACTION_PROMPT = """你是一个知识图谱专家。请从以下文章中提
    {subtype_guide}
 3. 关系类型(必填)：{relation_types}
 4. 每个实体输出:name(名称)、type(类型)、subtype(细分类型)、description(简要描述)
-5. 每个关系输出:source(源实体)、target(目标实体)、rel_type(关系类型)
+5. 每个关系输出:source(源实体)、target(目标实体)、rel_type(关系类型)、evidence(原文依据)、confidence(0到1)
 6. 只提取文章中明确提到的实体和关系
 7. 实体名称要标准化(如 "OpenAI" 不写成 "open ai")
 8. subtype 用英文大写单词,不要用空格/中文
@@ -82,12 +82,20 @@ EXTRACTION_PROMPT = """你是一个知识图谱专家。请从以下文章中提
         {{"name": "实体名称", "type": "实体类型", "subtype": "细分类型", "description": "简要描述"}}
     ],
     "relations": [
-        {{"source": "源实体", "target": "目标实体", "rel_type": "关系类型"}}
+        {{"source": "源实体", "target": "目标实体", "rel_type": "关系类型", "evidence": "原文中的简短依据", "confidence": 0.9}}
     ]
 }}
 
 文章内容：
 {content}
+"""
+
+JSON_REPAIR_PROMPT = """请把下面的知识图谱抽取结果修复为严格合法的 JSON。
+只能输出 JSON 对象，不要输出解释、Markdown 或思考过程。
+顶层必须包含 entities 和 relations 两个数组；不要新增原结果中不存在的事实。
+
+待修复内容：
+{response}
 """
 
 
@@ -148,25 +156,59 @@ class EntityExtractor:
                 temperature=0.3,  # 较低温度确保稳定性
                 max_tokens=4096
             )
+            model_error = self._get_model_error(response)
+            if model_error:
+                return ExtractionResult(error=f"模型调用失败: {model_error}")
 
-            # 解析 JSON
+            # 解析 JSON；模型偶尔会输出缺逗号或附带说明，失败时进行一次低温修复。
             result = self._parse_llm_response(response, article_id=article_id)
+            if result.error:
+                repair_response = await llm_service.non_stream_chat(
+                    model_id=self.model_id or "default",
+                    messages=[{
+                        "role": "user",
+                        "content": JSON_REPAIR_PROMPT.format(response=str(response)[:16000]),
+                    }],
+                    temperature=0.0,
+                    max_tokens=4096,
+                )
+                repair_error = self._get_model_error(repair_response)
+                if repair_error:
+                    return ExtractionResult(error=f"模型修复调用失败: {repair_error}")
+                repaired = self._parse_llm_response(
+                    repair_response,
+                    article_id=article_id,
+                )
+                if not repaired.error:
+                    logger.info("实体抽取 JSON 自动修复成功")
+                    return repaired
+                logger.warning(
+                    "实体抽取 JSON 自动修复失败: 原始=%s, 修复=%s",
+                    result.error,
+                    repaired.error,
+                )
             return result
 
         except Exception as e:
             logger.error(f"实体抽取失败: {e}")
             return ExtractionResult(error=str(e))
 
+    @staticmethod
+    def _get_model_error(response: Any) -> Optional[str]:
+        """识别 LLMService 错误响应，避免把网络错误误报成 JSON 错误。"""
+        text = str(response or "").strip()
+        if text.startswith("[错误]"):
+            return text.removeprefix("[错误]").strip()
+        return None
+
     def _parse_llm_response(self, response: str, article_id: Optional[str] = None) -> ExtractionResult:
         """解析 LLM 返回的 JSON 响应"""
-        # 提取 JSON 部分
-        json_match = re.search(r'\{[\s\S]*\}', response)
-        if not json_match:
+        json_str = self._extract_json_object(response)
+        if not json_str:
             logger.warning("LLM 响应中未找到 JSON")
             return ExtractionResult(error="解析失败：响应中未找到 JSON")
 
         try:
-            json_str = json_match.group(0)
             data = json.loads(json_str)
 
             entities = []
@@ -206,17 +248,34 @@ class EntityExtractor:
                     ))
 
             # 解析关系
-            for r in data.get("relations", []):
+            entity_names = {entity.name for entity in entities}
+            relation_items = data.get("relations", data.get("relationships", []))
+            for r in relation_items:
                 if r.get("source") and r.get("target") and r.get("rel_type"):
+                    source = r["source"].strip()
+                    target = r["target"].strip()
+                    if source == target or source not in entity_names or target not in entity_names:
+                        continue
                     # 标准化关系类型
                     rel_type = r["rel_type"].lower().replace("-", "_").replace(" ", "_")
                     if rel_type not in RELATION_TYPES:
                         rel_type = "related_to"
 
+                    try:
+                        confidence = float(r.get("confidence", 0.8))
+                    except (TypeError, ValueError):
+                        confidence = 0.8
+                    confidence = max(0.0, min(confidence, 1.0))
+
                     relations.append(Relationship(
-                        source=r["source"].strip(),
-                        target=r["target"].strip(),
-                        rel_type=rel_type
+                        source=source,
+                        target=target,
+                        rel_type=rel_type,
+                        properties={
+                            "article_id": article_id,
+                            "evidence": str(r.get("evidence") or "").strip()[:500],
+                            "confidence": confidence,
+                        },
                     ))
 
             logger.info(f"抽取完成：{len(entities)} 个实体, {len(relations)} 个关系")
@@ -230,6 +289,27 @@ class EntityExtractor:
         except json.JSONDecodeError as e:
             logger.error(f"JSON 解析失败: {e}")
             return ExtractionResult(error=f"JSON 解析失败: {e}")
+
+    @staticmethod
+    def _extract_json_object(response: Any) -> Optional[str]:
+        """从代码块或说明文字中提取第一个可解码的 JSON 对象。"""
+        if isinstance(response, dict):
+            return json.dumps(response, ensure_ascii=False)
+        text = str(response or "").strip()
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(text):
+            if char != "{":
+                continue
+            try:
+                data, end = decoder.raw_decode(text[index:])
+                if not isinstance(data, dict) or "entities" not in data:
+                    continue
+                if "relations" not in data and "relationships" not in data:
+                    continue
+                return text[index:index + end]
+            except json.JSONDecodeError:
+                continue
+        return None
 
     def validate_entity(self, entity: EntityNode) -> bool:
         """

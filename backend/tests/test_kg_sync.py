@@ -15,6 +15,7 @@ from app.services.kg_sync import (
     on_article_deleted,
     extract_and_link_entities,
     reconcile,
+    recover_interrupted_articles,
 )
 
 
@@ -25,6 +26,8 @@ def mock_neo4j():
         instance = MagicMock()
         instance.upsert_article_metadata = AsyncMock(return_value=True)
         instance.delete_article_full = AsyncMock(return_value=True)
+        instance.clear_article_knowledge = AsyncMock(return_value=True)
+        instance.close = AsyncMock(return_value=None)
         instance.cleanup_orphan_entities = AsyncMock(return_value=0)
         instance.find_orphan_articles = AsyncMock(return_value=[])
         instance.find_dirty_articles = AsyncMock(return_value=[])
@@ -64,6 +67,17 @@ def article():
     a.kg_error_message = None
     a.kg_processed_at = None
     return a
+
+
+def test_recover_interrupted_articles_marks_processing_pending():
+    db = MagicMock()
+    db.query.return_value.filter.return_value.update.return_value = 2
+
+    recovered = recover_interrupted_articles(db)
+
+    assert recovered == 2
+    db.query.return_value.filter.return_value.update.assert_called_once()
+    db.commit.assert_called_once()
 
 
 @pytest.mark.asyncio

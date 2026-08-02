@@ -55,6 +55,19 @@ def get_sync_state() -> dict:
         return dict(_sync_state)
 
 
+def recover_interrupted_articles(db: Session) -> int:
+    """后端重启后恢复失去执行协程的 processing 文章。"""
+    count = db.query(Article).filter(Article.kg_status == "processing").update(
+        {
+            Article.kg_status: "pending",
+            Article.kg_error_message: "后端重启，知识抽取任务已重新排队",
+        },
+        synchronize_session=False,
+    )
+    db.commit()
+    return count
+
+
 def build_neo4j() -> Neo4jService:
     """构建 Neo4jService(可被 patch 注入)"""
     return Neo4jService()
@@ -121,20 +134,19 @@ async def extract_and_link_entities(article_id: str) -> None:
     _set_in_progress(1)
     success = False
     try:
-        await _extract_and_link_entities_inner(article_id)
-        success = True
+        success = await _extract_and_link_entities_inner(article_id)
     finally:
         _set_in_progress(-1, success=success)
 
 
-async def _extract_and_link_entities_inner(article_id: str) -> None:
+async def _extract_and_link_entities_inner(article_id: str) -> bool:
     """实际抽实体逻辑(被 extract_and_link_entities 包一层做状态计数)"""
     session = get_session_local()()
     try:
         article = session.query(Article).filter(Article.id == article_id).first()
         if not article:
             logger.warning(f"extract_and_link_entities: 文章 {article_id} 不存在")
-            return
+            return False
 
         article.kg_status = "processing"
         session.commit()
@@ -144,37 +156,52 @@ async def _extract_and_link_entities_inner(article_id: str) -> None:
             article.kg_status = "skipped"
             article.kg_error_message = "内容为空,跳过抽取"
             session.commit()
-            return
+            return False
 
         extractor = EntityExtractor()
-        result = await extractor.extract(content, article_id=str(article.id))
+        try:
+            result = await asyncio.wait_for(
+                extractor.extract(content, article_id=str(article.id)),
+                timeout=300,
+            )
+        except asyncio.TimeoutError:
+            article.kg_status = "failed"
+            article.kg_error_message = "知识抽取超时（300 秒），可重新执行"
+            session.commit()
+            logger.error(f"文章 {article_id} 实体抽取超时")
+            return False
         if result.error:
             article.kg_status = "failed"
             article.kg_error_message = result.error
             session.commit()
             logger.error(f"文章 {article_id} 实体抽取失败: {result.error}")
-            return
+            return False
 
         entities = extractor.deduplicate_entities(result.entities)
         relations = result.relations
 
-        # 同步 metadata
+        # 仅在新结果解析成功后替换旧知识，避免失败重抽破坏可用图谱。
         neo4j = build_neo4j()
-        await neo4j.upsert_article_metadata(
-            article_id=article.id,
-            title=article.title or "",
-            url=article.url or "",
-            summary=article.summary,
-            content_hash=article.content_hash,
-            kg_status="success"
-        )
+        try:
+            if not await neo4j.clear_article_knowledge(article.id):
+                raise RuntimeError("清理文章旧知识失败")
+            await neo4j.upsert_article_metadata(
+                article_id=article.id,
+                title=article.title or "",
+                url=article.url or "",
+                summary=article.summary,
+                content_hash=article.content_hash,
+                kg_status="success"
+            )
 
-        # 批量建实体 + 边
-        await neo4j.batch_create_entities_and_relations(
-            article_id=article.id,
-            entities=entities,
-            relations=relations
-        )
+            # 批量建实体 + 带来源证据的边
+            await neo4j.batch_create_entities_and_relations(
+                article_id=article.id,
+                entities=entities,
+                relations=relations
+            )
+        finally:
+            await neo4j.close()
 
         # SQLite 标 success
         article.kg_status = "success"
@@ -183,6 +210,7 @@ async def _extract_and_link_entities_inner(article_id: str) -> None:
         article.kg_error_message = None
         session.commit()
         logger.info(f"文章 {article_id} 实体抽取成功,entities={len(entities)}")
+        return True
 
     except Exception as e:
         logger.exception(f"extract_and_link_entities 异常 {article_id}: {e}")
@@ -194,6 +222,7 @@ async def _extract_and_link_entities_inner(article_id: str) -> None:
                 session.commit()
         except Exception:
             session.rollback()
+        return False
     finally:
         session.close()
 
@@ -202,7 +231,9 @@ async def process_pending_articles(
     db: Session,
     max_concurrency: int = 3,
     rate_limit_seconds: float = 0.5,
-    limit: int = 200
+    limit: int = 200,
+    include_failed: bool = False,
+    include_success: bool = False,
 ) -> dict:
     """
     启动时把 kg_status in (NULL, 'pending') 的文章批量抽实体。
@@ -211,25 +242,41 @@ async def process_pending_articles(
     """
     from app.models.article import Article
 
+    retry_statuses = ["pending", "skipped"]
+    if include_failed:
+        retry_statuses.append("failed")
+    if include_success:
+        retry_statuses.append("success")
     pending = db.query(Article).filter(
         Article.status == "success",
-        (Article.kg_status.is_(None)) | (Article.kg_status.in_(["pending", "skipped"]))
+        (Article.kg_status.is_(None)) | (Article.kg_status.in_(retry_statuses))
     ).limit(limit).all()
 
     if not pending:
         return {"scanned": 0, "scheduled": 0}
 
+    # 创建协程前先认领任务，避免连续点击或启动钩子并发扫描到同一篇文章。
+    pending_ids = [article.id for article in pending]
+    db.query(Article).filter(Article.id.in_(pending_ids)).update(
+        {
+            Article.kg_status: "processing",
+            Article.kg_error_message: None,
+        },
+        synchronize_session=False,
+    )
+    db.commit()
+
     sem = asyncio.Semaphore(max_concurrency)
 
-    async def _run_one(a: Article):
+    async def _run_one(article_id: str):
         async with sem:
             try:
-                await extract_and_link_entities(a.id)
+                await extract_and_link_entities(article_id)
             except Exception as e:
-                logger.error(f"process_pending_articles 抽 {a.id} 失败: {e}")
+                logger.error(f"process_pending_articles 抽 {article_id} 失败: {e}")
             await asyncio.sleep(rate_limit_seconds)
 
-    tasks = [asyncio.create_task(_run_one(a)) for a in pending]
+    tasks = [asyncio.create_task(_run_one(article_id)) for article_id in pending_ids]
 
     # 标记本次启动时间,供前端显示
     with _sync_state_lock:
@@ -275,6 +322,9 @@ async def reconcile(apply: bool, db: Session) -> dict:
         "missing_in_kg": missing_in_kg,
         "orphan_in_kg": orphan_in_kg,
         "dirty_in_kg": dirty_in_kg,
+        "failed_in_db": [
+            art.id for art in sqlite_articles if art.kg_status == "failed"
+        ],
     }
 
     if apply:
@@ -283,6 +333,7 @@ async def reconcile(apply: bool, db: Session) -> dict:
             "orphans_deleted": 0,
             "dirty_marked": 0,
             "orphan_entities_deleted": 0,
+            "failed_retried": 0,
         }
         # 1) 删孤儿
         for aid in orphan_in_kg:
@@ -305,6 +356,17 @@ async def reconcile(apply: bool, db: Session) -> dict:
                 db.commit()
                 asyncio.create_task(extract_and_link_entities(aid))
                 fixed["missing_synced"] += 1
+        # 4) 失败文章不一定缺少 Article 节点，也要显式重试。
+        for aid in result["failed_in_db"]:
+            if aid in missing_in_kg:
+                continue
+            art = db.query(Article).filter(Article.id == aid).first()
+            if art:
+                art.kg_status = "pending"
+                art.kg_error_message = None
+                db.commit()
+                asyncio.create_task(extract_and_link_entities(aid))
+                fixed["failed_retried"] += 1
         result["fixed"] = fixed
 
     return result

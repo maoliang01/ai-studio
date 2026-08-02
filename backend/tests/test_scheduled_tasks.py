@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -56,11 +57,13 @@ async def test_run_now_timeout_always_finishes_history(monkeypatch):
     monkeypatch.setattr("app.services.scraper.get_scraper", lambda: SlowScraper())
     monkeypatch.setattr(scheduled, "IMMEDIATE_URL_TIMEOUT_SECONDS", 0.001)
     monkeypatch.setattr(scheduled, "IMMEDIATE_TASK_MAX_RUNTIME_SECONDS", 0.001)
-    monkeypatch.setattr(
-        scheduled._immediate_executor,
-        "submit",
-        lambda fn: fn(),
-    )
+    def run_in_worker_thread(fn):
+        worker = threading.Thread(target=fn)
+        worker.start()
+        worker.join()
+        return worker
+
+    monkeypatch.setattr(scheduled._immediate_executor, "submit", run_in_worker_thread)
 
     response = await scheduled.run_task_now("task-1", db=api_db)
 
@@ -70,4 +73,3 @@ async def test_run_now_timeout_always_finishes_history(monkeypatch):
     assert "超时" in history_obj.error_message
     worker_db.commit.assert_called_once()
     worker_db.close.assert_called_once()
-

@@ -5,6 +5,9 @@ Neo4j 图数据库服务
 """
 import os
 import logging
+import hashlib
+import re
+import unicodedata
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass
 from neo4j import AsyncGraphDatabase, AsyncDriver, Record
@@ -26,6 +29,7 @@ class EntityNode:
     subtype: Optional[str] = None
     properties: Optional[Dict[str, Any]] = None
     source_articles: Optional[List[str]] = None
+    entity_id: Optional[str] = None
 
 
 @dataclass
@@ -35,6 +39,25 @@ class Relationship:
     target: str
     rel_type: str
     properties: Optional[Dict[str, Any]] = None
+
+
+def build_entity_id(name: str, entity_type: str) -> str:
+    """生成稳定实体标识；后续实体消歧可迁移 canonical_id 而不依赖展示名称。"""
+    normalized = unicodedata.normalize("NFKC", name or "").casefold().strip()
+    normalized = re.sub(r"[\s\-_·•]+", "", normalized)
+    digest = hashlib.sha256(f"{entity_type.upper()}:{normalized}".encode("utf-8")).hexdigest()
+    return f"ent-{digest[:24]}"
+
+
+def build_claim_id(
+    article_id: str,
+    source: str,
+    rel_type: str,
+    target: str,
+    evidence: str,
+) -> str:
+    raw = "\x1f".join([article_id, source, rel_type, target, evidence])
+    return f"claim-{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:32]}"
 
 
 class Neo4jService:
@@ -85,12 +108,16 @@ class Neo4jService:
             constraints = [
                 "CREATE CONSTRAINT article_id IF NOT EXISTS FOR (a:Article) REQUIRE a.id IS UNIQUE",
                 "CREATE CONSTRAINT entity_name IF NOT EXISTS FOR (e:Entity) REQUIRE e.name IS UNIQUE",
+                "CREATE CONSTRAINT entity_canonical_id IF NOT EXISTS FOR (e:Entity) REQUIRE e.canonical_id IS UNIQUE",
+                "CREATE CONSTRAINT claim_id IF NOT EXISTS FOR (c:Claim) REQUIRE c.id IS UNIQUE",
             ]
             # 创建索引
             indexes = [
                 "CREATE INDEX article_title IF NOT EXISTS FOR (a:Article) ON (a.title)",
                 "CREATE INDEX entity_type IF NOT EXISTS FOR (e:Entity) ON (e.entity_type)",
                 "CREATE INDEX entity_name_idx IF NOT EXISTS FOR (e:Entity) ON (e.name)",
+                "CREATE INDEX claim_article_id IF NOT EXISTS FOR (c:Claim) ON (c.article_id)",
+                "CREATE INDEX claim_rel_type IF NOT EXISTS FOR (c:Claim) ON (c.rel_type)",
             ]
 
             for cql in constraints + indexes:
@@ -99,6 +126,37 @@ class Neo4jService:
                 except Exception as e:
                     # 忽略已存在的约束/索引错误
                     logger.debug(f"约束/索引创建: {e}")
+
+            missing_result = await session.run(
+                """
+                MATCH (e:Entity)
+                WHERE e.canonical_id IS NULL
+                RETURN elementId(e) AS element_id, e.name AS name,
+                       e.entity_type AS entity_type
+                """
+            )
+            for record in await missing_result.data():
+                canonical_id = build_entity_id(
+                    record["name"] or "",
+                    record["entity_type"] or "CONCEPT",
+                )
+                try:
+                    await session.run(
+                        """
+                        MATCH (e:Entity)
+                        WHERE elementId(e) = $element_id
+                        SET e.canonical_id = $canonical_id,
+                            e.canonical_name = coalesce(e.canonical_name, e.name)
+                        """,
+                        element_id=record["element_id"],
+                        canonical_id=canonical_id,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "实体 canonical_id 回填冲突 name=%s: %s",
+                        record["name"],
+                        e,
+                    )
 
             logger.info("Neo4j 模式初始化完成")
 
@@ -147,6 +205,7 @@ class Neo4jService:
             await self.connect()
 
         new_articles = source_articles or []
+        canonical_id = build_entity_id(name, entity_type)
 
         async with self._driver.session() as session:
             try:
@@ -154,7 +213,9 @@ class Neo4jService:
                     # MERGE 后合并 source_articles 列表(去重)
                     query = """
                     MERGE (e:Entity {name: $name})
-                    SET e.entity_type = $entity_type,
+                    SET e.canonical_id = coalesce(e.canonical_id, $canonical_id),
+                        e.canonical_name = coalesce(e.canonical_name, $name),
+                        e.entity_type = $entity_type,
                         e.description = $description,
                         e.subtype = $subtype,
                         e.source_articles = REDUCE(acc = coalesce(e.source_articles, []), item IN $new_articles |
@@ -164,6 +225,7 @@ class Neo4jService:
                     """
                     await session.run(query, {
                         "name": name,
+                        "canonical_id": canonical_id,
                         "entity_type": entity_type,
                         "description": description or "",
                         "subtype": subtype or "",
@@ -172,7 +234,9 @@ class Neo4jService:
                 else:
                     query = """
                     MERGE (e:Entity {name: $name})
-                    SET e.entity_type = $entity_type,
+                    SET e.canonical_id = coalesce(e.canonical_id, $canonical_id),
+                        e.canonical_name = coalesce(e.canonical_name, $name),
+                        e.entity_type = $entity_type,
                         e.description = $description,
                         e.subtype = $subtype,
                         e.updated_at = datetime()
@@ -180,6 +244,7 @@ class Neo4jService:
                     """
                     await session.run(query, {
                         "name": name,
+                        "canonical_id": canonical_id,
                         "entity_type": entity_type,
                         "description": description or "",
                         "subtype": subtype or ""
@@ -224,20 +289,56 @@ class Neo4jService:
         source_entity: str,
         target_entity: str,
         rel_type: str,
-        confidence: float = 1.0
+        confidence: float = 1.0,
+        article_id: Optional[str] = None,
+        evidence: str = "",
     ) -> bool:
-        """建立实体之间的关系"""
+        """建立带文章来源和证据的实体关系，并保留可审计 Claim。"""
         if not self._driver:
             await self.connect()
 
         async with self._driver.session() as session:
+            claim_id = build_claim_id(
+                article_id or "legacy",
+                source_entity,
+                rel_type,
+                target_entity,
+                evidence,
+            )
             query = """
             MATCH (s:Entity {name: $source_entity})
             MATCH (t:Entity {name: $target_entity})
-            MERGE (s)-[r:RELATES_TO]->(t)
-            SET r.rel_type = $rel_type,
-                r.confidence = $confidence,
+            MERGE (s)-[r:RELATES_TO {rel_type: $rel_type}]->(t)
+            SET r.confidence = CASE
+                    WHEN r.confidence IS NULL OR $confidence > r.confidence THEN $confidence
+                    ELSE r.confidence
+                END,
+                r.source_articles = CASE
+                    WHEN $article_id IS NULL THEN coalesce(r.source_articles, [])
+                    WHEN $article_id IN coalesce(r.source_articles, []) THEN r.source_articles
+                    ELSE coalesce(r.source_articles, []) + $article_id
+                END,
+                r.evidence_samples = CASE
+                    WHEN $evidence = '' THEN coalesce(r.evidence_samples, [])
+                    WHEN $evidence IN coalesce(r.evidence_samples, []) THEN r.evidence_samples
+                    ELSE (coalesce(r.evidence_samples, []) + $evidence)[-5..]
+                END,
                 r.updated_at = datetime()
+            SET r.support_count = size(coalesce(r.source_articles, []))
+            WITH s, t, r
+            OPTIONAL MATCH (a:Article {id: $article_id})
+            FOREACH (_ IN CASE WHEN a IS NULL THEN [] ELSE [1] END |
+                MERGE (c:Claim {id: $claim_id})
+                SET c.article_id = $article_id,
+                    c.rel_type = $rel_type,
+                    c.evidence = $evidence,
+                    c.confidence = $confidence,
+                    c.status = 'asserted',
+                    c.updated_at = datetime()
+                MERGE (a)-[:ASSERTS]->(c)
+                MERGE (c)-[:SUBJECT]->(s)
+                MERGE (c)-[:OBJECT]->(t)
+            )
             RETURN r
             """
             try:
@@ -245,7 +346,10 @@ class Neo4jService:
                     "source_entity": source_entity,
                     "target_entity": target_entity,
                     "rel_type": rel_type,
-                    "confidence": confidence
+                    "confidence": confidence,
+                    "article_id": article_id,
+                    "evidence": evidence,
+                    "claim_id": claim_id,
                 })
                 return True
             except Exception as e:
@@ -287,7 +391,9 @@ class Neo4jService:
                     source_entity=rel.source,
                     target_entity=rel.target,
                     rel_type=rel.rel_type,
-                    confidence=rel.properties.get("confidence", 1.0) if rel.properties else 1.0
+                    confidence=rel.properties.get("confidence", 1.0) if rel.properties else 1.0,
+                    article_id=article_id,
+                    evidence=rel.properties.get("evidence", "") if rel.properties else "",
                 )
                 if success:
                     stats["relations_created"] += 1
@@ -345,6 +451,120 @@ class Neo4jService:
             except Exception as e:
                 logger.error(f"获取文章实体失败: {e}")
                 return []
+
+    async def get_entity_profile(
+        self,
+        entity_name: str,
+        neighbor_limit: int = 20,
+        evidence_limit: int = 20,
+    ) -> Optional[Dict[str, Any]]:
+        """返回实体属性、跨文档来源、邻居和可审计关系证据。"""
+        if not self._driver:
+            await self.connect()
+
+        async with self._driver.session() as session:
+            entity_result = await session.run(
+                """
+                MATCH (e:Entity {name: $name})
+                OPTIONAL MATCH (a:Article)-[:CONTAINS_ENTITY]->(e)
+                RETURN e, collect(DISTINCT a.id) AS article_ids
+                """,
+                name=entity_name,
+            )
+            entity_record = await entity_result.single()
+            if not entity_record:
+                return None
+
+            neighbor_result = await session.run(
+                """
+                MATCH (e:Entity {name: $name})-[r:RELATES_TO]-(n:Entity)
+                RETURN n.name AS name, n.canonical_id AS canonical_id,
+                       n.entity_type AS entity_type, n.subtype AS subtype,
+                       r.rel_type AS rel_type, r.confidence AS confidence,
+                       coalesce(r.support_count, 0) AS support_count,
+                       coalesce(r.source_articles, []) AS source_articles
+                ORDER BY support_count DESC, confidence DESC
+                LIMIT $limit
+                """,
+                name=entity_name,
+                limit=neighbor_limit,
+            )
+            neighbors = await neighbor_result.data()
+
+            evidence_result = await session.run(
+                """
+                MATCH (c:Claim)-[:SUBJECT|OBJECT]->(e:Entity {name: $name})
+                OPTIONAL MATCH (a:Article)-[:ASSERTS]->(c)
+                OPTIONAL MATCH (c)-[:SUBJECT]->(s:Entity)
+                OPTIONAL MATCH (c)-[:OBJECT]->(t:Entity)
+                RETURN c.id AS claim_id, c.rel_type AS rel_type,
+                       c.evidence AS evidence, c.confidence AS confidence,
+                       c.status AS status, a.id AS article_id,
+                       s.name AS source, t.name AS target
+                ORDER BY c.confidence DESC
+                LIMIT $limit
+                """,
+                name=entity_name,
+                limit=evidence_limit,
+            )
+            evidence = await evidence_result.data()
+
+        return {
+            "entity": dict(entity_record["e"]),
+            "article_ids": entity_record["article_ids"],
+            "article_count": len(entity_record["article_ids"]),
+            "neighbors": neighbors,
+            "evidence": evidence,
+        }
+
+    async def find_shortest_paths(
+        self,
+        source_name: str,
+        target_name: str,
+        max_depth: int = 4,
+        limit: int = 10,
+        relation_types: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """查找受深度和关系类型约束的可解释最短路径。"""
+        if not self._driver:
+            await self.connect()
+
+        max_depth = max(1, min(int(max_depth), 6))
+        limit = max(1, min(int(limit), 20))
+        query = f"""
+        MATCH (source:Entity {{name: $source_name}}),
+              (target:Entity {{name: $target_name}})
+        MATCH path = allShortestPaths((source)-[:RELATES_TO*1..{max_depth}]-(target))
+        WHERE $relation_types = [] OR
+              all(rel IN relationships(path) WHERE rel.rel_type IN $relation_types)
+        RETURN
+            [node IN nodes(path) | {{
+                name: node.name,
+                canonical_id: node.canonical_id,
+                entity_type: node.entity_type,
+                subtype: node.subtype
+            }}] AS nodes,
+            [rel IN relationships(path) | {{
+                source: startNode(rel).name,
+                target: endNode(rel).name,
+                rel_type: rel.rel_type,
+                confidence: rel.confidence,
+                support_count: coalesce(rel.support_count, 0),
+                source_articles: coalesce(rel.source_articles, []),
+                evidence_samples: coalesce(rel.evidence_samples, [])
+            }}] AS relationships,
+            length(path) AS length
+        LIMIT $limit
+        """
+        async with self._driver.session() as session:
+            result = await session.run(
+                query,
+                source_name=source_name,
+                target_name=target_name,
+                relation_types=relation_types or [],
+                limit=limit,
+            )
+            return await result.data()
 
     async def get_entity_neighbors(
         self,
@@ -488,33 +708,64 @@ class Neo4jService:
                 return False
 
     async def delete_article_full(self, article_id: str) -> bool:
-        """彻底删除:Article 节点 + CONTAINS_ENTITY 边 + 不再被引用的 Entity"""
+        """彻底删除文章节点及其实体、Claim 和关系证据贡献。"""
         if not self._driver:
             await self.connect()
 
+        if not await self.clear_article_knowledge(article_id):
+            return False
+
         async with self._driver.session() as session:
-            # 1) 拿到这篇文章关联的实体列表
-            # 2) 删 Article 节点及其 CONTAINS_ENTITY 边
-            # 3) 对每个曾被引用的 Entity,若不再被任何 Article 引用 → 删 Entity
             query = """
             MATCH (a:Article {id: $article_id})
-            OPTIONAL MATCH (a)-[r:CONTAINS_ENTITY]->(e:Entity)
-            WITH a, collect(DISTINCT e) AS entities
             DETACH DELETE a
-            WITH entities
-            UNWIND entities AS e
-            WITH e
-            WHERE e IS NOT NULL
-            SET e.source_articles = [id IN coalesce(e.source_articles, []) WHERE id <> $article_id]
-            WITH e
-            WHERE NOT (e)<-[:CONTAINS_ENTITY]-()
-            DETACH DELETE e
             """
             try:
                 await session.run(query, {"article_id": article_id})
             except Exception as e:
                 logger.error(f"delete_article_full 失败 {article_id}: {e}")
                 return False
+        await self.cleanup_orphan_entities()
+        return True
+
+    async def clear_article_knowledge(self, article_id: str) -> bool:
+        """清除一篇文章产生的知识，保留 Article 元数据节点供安全重抽。"""
+        if not self._driver:
+            await self.connect()
+
+        async with self._driver.session() as session:
+            try:
+                await session.run(
+                    """
+                    MATCH (c:Claim {article_id: $article_id})
+                    DETACH DELETE c
+                    """,
+                    article_id=article_id,
+                )
+                await session.run(
+                    """
+                    MATCH ()-[r:RELATES_TO]->()
+                    WHERE $article_id IN coalesce(r.source_articles, [])
+                    SET r.source_articles = [id IN r.source_articles WHERE id <> $article_id]
+                    SET r.support_count = size(r.source_articles)
+                    WITH r
+                    WHERE r.support_count = 0
+                    DELETE r
+                    """,
+                    article_id=article_id,
+                )
+                await session.run(
+                    """
+                    MATCH (a:Article {id: $article_id})-[r:CONTAINS_ENTITY]->(e:Entity)
+                    DELETE r
+                    SET e.source_articles = [id IN coalesce(e.source_articles, []) WHERE id <> $article_id]
+                    """,
+                    article_id=article_id,
+                )
+            except Exception as e:
+                logger.error(f"clear_article_knowledge 失败 {article_id}: {e}")
+                return False
+
         await self.cleanup_orphan_entities()
         return True
 
