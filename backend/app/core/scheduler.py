@@ -5,7 +5,7 @@
 """
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -29,7 +29,7 @@ def create_scheduler() -> BackgroundScheduler:
     return scheduler
 
 
-def cleanup_stuck_tasks(max_runtime_minutes: int = 60):
+def cleanup_stuck_tasks(max_runtime_minutes: int = 60, reason: str | None = None):
     """清理运行时间过长的卡住任务"""
     from app.core.database import get_session_local
     SessionLocal = get_session_local()
@@ -49,7 +49,7 @@ def cleanup_stuck_tasks(max_runtime_minutes: int = 60):
             for task in stuck_tasks:
                 task.status = TaskStatus.FAILED.value
                 task.finished_at = datetime.utcnow()
-                task.error_message = f"任务超时（运行超过 {max_runtime_minutes} 分钟）自动终止"
+                task.error_message = reason or f"任务超时（运行超过 {max_runtime_minutes} 分钟）自动终止"
             session.commit()
             logger.warning(f"已清理 {len(stuck_tasks)} 个卡住任务")
 
@@ -306,7 +306,7 @@ def _calculate_next_run(schedule_time: str) -> datetime:
     hour, minute = map(int, schedule_time.split(":"))
     next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if next_run <= now:
-        next_run = next_run.replace(day=next_run.day + 1)
+        next_run += timedelta(days=1)
     return next_run
 
 
@@ -378,9 +378,12 @@ def start_scheduler() -> BackgroundScheduler:
     """启动调度器"""
     scheduler = create_scheduler()
 
-    # 启动时先清理卡住的任务（运行超过60分钟）
-    logger.info("启动时检查并清理卡住的任务...")
-    cleanup_stuck_tasks(max_runtime_minutes=60)
+    # 执行线程无法跨后端进程存活，启动时残留的 running 记录一定已经失去执行者。
+    logger.info("启动时检查并清理未完成的历史任务...")
+    cleanup_stuck_tasks(
+        max_runtime_minutes=0,
+        reason="后端服务重启，任务执行已中断",
+    )
 
     # 初始同步
     sync_scheduler_tasks(scheduler)

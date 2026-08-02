@@ -152,7 +152,6 @@ export default function ScrapeSettingsPage() {
   const [isSavingTask, setIsSavingTask] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [activeTab, setActiveTab] = useState("sources");
-  const [runningHistoryIds, setRunningHistoryIds] = useState<Set<string>>(new Set());  // 追踪正在运行的历史记录
   const [expandedHistoryIds, setExpandedHistoryIds] = useState<Set<string>>(new Set());  // 展开的历史记录
   const [runningTasks, setRunningTasks] = useState<RunningTask[]>([]);  // 运行中的任务列表
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);  // 轮询定时器
@@ -213,11 +212,8 @@ export default function ScrapeSettingsPage() {
       const res = await fetch("/api/scheduled/running");
       if (res.ok) {
         const data = await res.json();
-        setRunningTasks(data.running_tasks || []);
-        // 同时检查是否有正在运行的历史记录需要追踪
-        if (data.running_tasks && data.running_tasks.length > 0) {
-          setRunningHistoryIds(new Set(data.running_tasks.map((t: RunningTask) => t.id)));
-        }
+        const activeTasks: RunningTask[] = data.running_tasks || [];
+        setRunningTasks(activeTasks);
       }
     } catch (error) {
       console.error("加载运行中任务失败:", error);
@@ -513,10 +509,6 @@ export default function ScrapeSettingsPage() {
         const res = await fetch(`/api/scheduled/${task.id}/run`, { method: "POST" });
         if (res.ok) {
           const data = await res.json();
-          // 追踪正在运行的历史记录，开始轮询状态
-          if (data.history_id) {
-            setRunningHistoryIds((prev) => new Set([...prev, data.history_id]));
-          }
           await loadHistoryRef.current();
         } else {
           const data = await res.json();

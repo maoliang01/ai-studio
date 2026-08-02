@@ -5,6 +5,8 @@
 """
 import logging
 import json
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Optional, List
 
@@ -19,6 +21,13 @@ from app.models.scheduled_task import (
 from app.models.article import ScrapeSource
 
 logger = logging.getLogger("ai-studio")
+
+IMMEDIATE_TASK_MAX_RUNTIME_SECONDS = 600
+IMMEDIATE_URL_TIMEOUT_SECONDS = 120
+_immediate_executor = ThreadPoolExecutor(
+    max_workers=5,
+    thread_name_prefix="scheduled-immediate",
+)
 
 router = APIRouter(prefix="/api/scheduled", tags=["定时任务"])
 
@@ -532,6 +541,13 @@ async def run_task_now(task_id: str, db: Session = Depends(get_db)):
     if not urls:
         raise HTTPException(status_code=400, detail="任务没有配置爬取URL")
 
+    running_history = db.query(ScrapeHistory).filter(
+        ScrapeHistory.task_id == task_id,
+        ScrapeHistory.status == TaskStatus.RUNNING.value,
+    ).first()
+    if running_history:
+        raise HTTPException(status_code=409, detail="该任务已有实例正在运行")
+
     # 创建历史记录
     history = ScrapeHistory(
         task_id=task_id,
@@ -544,46 +560,67 @@ async def run_task_now(task_id: str, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(history)
 
+    history_id = history.id
+    task_name = task.name
+    scrape_range = task.scrape_range
+    worker_source_ids = list(source_ids)
+    worker_urls = list(urls)
+
     # 独立执行函数（不通过 APScheduler）
     def run_immediately():
         """立即执行函数 - 独立于调度器"""
-        logger.info(f"[立即执行] 任务 {task.name} 开始执行 (history_id={history.id})")
+        logger.info(f"[立即执行] 任务 {task_name} 开始执行 (history_id={history_id})")
 
         from app.core.database import get_session_local
-        db = get_session_local()
+        worker_db = get_session_local()()
+        loop = None
+        start_time = datetime.utcnow()
+        total_articles = 0
+        scraped_articles = []
+        errors = []
+        final_status = TaskStatus.SUCCESS.value
         try:
             from app.services.scraper import get_scraper, ScrapeOptions
-            from app.models.article import ScrapeSource
-            import asyncio
-
-            start_time = datetime.utcnow()
 
             # 获取爬取源的 category_id
             category_id = None
-            source_id = source_ids[0] if source_ids else None
-            if source_ids:
-                source = db.query(ScrapeSource).filter(ScrapeSource.id == source_ids[0]).first()
+            source_id = worker_source_ids[0] if worker_source_ids else None
+            if worker_source_ids:
+                source = worker_db.query(ScrapeSource).filter(
+                    ScrapeSource.id == worker_source_ids[0]
+                ).first()
                 if source:
                     category_id = source.category_id
 
-            total_articles = 0
             scraper = get_scraper()
             options = ScrapeOptions()
-            scraped_articles = []
 
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
-            for url in urls:
+            for url in worker_urls:
+                elapsed = (datetime.utcnow() - start_time).total_seconds()
+                remaining = IMMEDIATE_TASK_MAX_RUNTIME_SECONDS - elapsed
+                if remaining <= 0:
+                    final_status = TaskStatus.FAILED.value
+                    errors.append(
+                        f"任务总超时（超过 {IMMEDIATE_TASK_MAX_RUNTIME_SECONDS} 秒）"
+                    )
+                    break
+
                 logger.info(f"[立即执行] 深度爬取: {url}")
                 try:
+                    timeout_seconds = min(IMMEDIATE_URL_TIMEOUT_SECONDS, remaining)
                     list_page, article_results = loop.run_until_complete(
-                        scraper.deep_scrape(
-                            url=url,
-                            options=options,
-                            max_articles=20,
-                            date_range=task.scrape_range,
-                            scrape_level="deep"
+                        asyncio.wait_for(
+                            scraper.deep_scrape(
+                                url=url,
+                                options=options,
+                                max_articles=20,
+                                date_range=scrape_range,
+                                scrape_level="deep",
+                            ),
+                            timeout=timeout_seconds,
                         )
                     )
                     logger.info(f"  [立即执行] 识别到 {len(article_results)} 篇文章")
@@ -599,54 +636,75 @@ async def run_task_now(task_id: str, db: Session = Depends(get_db)):
                                 scraped_articles.append(title)
                                 logger.info(f"    [立即执行] 已保存: {title[:50]}")
 
+                except asyncio.TimeoutError:
+                    message = f"爬取超时（{int(timeout_seconds)} 秒）: {url}"
+                    logger.error(f"  [立即执行] {message}")
+                    errors.append(message)
+                    if timeout_seconds >= remaining:
+                        final_status = TaskStatus.FAILED.value
+                        errors.append(
+                            f"任务总超时（超过 {IMMEDIATE_TASK_MAX_RUNTIME_SECONDS} 秒）"
+                        )
+                        break
                 except Exception as url_error:
                     logger.error(f"  [立即执行] 爬取失败: {url_error}")
+                    errors.append(f"{url}: {url_error}")
 
-            loop.close()
-
-            # 更新历史记录
-            end_time = datetime.utcnow()
-            duration = (end_time - start_time).total_seconds()
-
-            history_obj = db.query(ScrapeHistory).filter(ScrapeHistory.id == history.id).first()
-            if history_obj:
-                if scraped_articles:
-                    article_list = [f"{i+1}. {t[:40]}" for i, t in enumerate(scraped_articles[:10])]
-                    if len(scraped_articles) > 10:
-                        article_list.append(f"... 还有 {len(scraped_articles) - 10} 篇")
-                    history_obj.article_title = "\n".join(article_list)
-                else:
-                    history_obj.article_title = "无文章"
-
-                history_obj.status = TaskStatus.SUCCESS.value
-                history_obj.finished_at = end_time
-                history_obj.duration = duration
-                history_obj.articles_count = total_articles
-                db.commit()
-
-            logger.info(f"[立即执行] 任务 {task.name} 完成，保存了 {total_articles} 篇文章")
+            if errors and not scraped_articles:
+                final_status = TaskStatus.FAILED.value
 
         except Exception as e:
             logger.error(f"[立即执行] 任务执行失败: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            history_obj = db.query(ScrapeHistory).filter(ScrapeHistory.id == history.id).first()
-            if history_obj:
-                history_obj.status = TaskStatus.FAILED.value
-                history_obj.error_message = str(e)
-                history_obj.finished_at = datetime.utcnow()
-                db.commit()
+            final_status = TaskStatus.FAILED.value
+            errors.append(str(e))
         finally:
-            db.close()
+            if loop is not None:
+                loop.close()
+                asyncio.set_event_loop(None)
+
+            try:
+                history_obj = worker_db.query(ScrapeHistory).filter(
+                    ScrapeHistory.id == history_id
+                ).first()
+                if history_obj:
+                    if scraped_articles:
+                        article_list = [
+                            f"{i+1}. {title[:40]}"
+                            for i, title in enumerate(scraped_articles[:10])
+                        ]
+                        if len(scraped_articles) > 10:
+                            article_list.append(f"... 还有 {len(scraped_articles) - 10} 篇")
+                        history_obj.article_title = "\n".join(article_list)
+                    else:
+                        history_obj.article_title = "无文章"
+                    history_obj.status = final_status
+                    history_obj.error_message = "\n".join(errors)[:4000] if errors else None
+                    history_obj.finished_at = datetime.utcnow()
+                    history_obj.articles_count = total_articles
+                    worker_db.commit()
+            except Exception as status_error:
+                worker_db.rollback()
+                logger.error(f"[立即执行] 更新任务最终状态失败: {status_error}")
+            finally:
+                worker_db.close()
+
+            logger.info(
+                f"[立即执行] 任务 {task_name} 结束，状态={final_status}，"
+                f"保存了 {total_articles} 篇文章"
+            )
 
     # 在独立线程中执行
     try:
-        from concurrent.futures import ThreadPoolExecutor
-        executor = ThreadPoolExecutor(max_workers=5)  # 允许最多5个立即执行并发
-        executor.submit(run_immediately)
-        executor.shutdown(wait=False)
-        logger.info(f"[立即执行] 任务已提交到独立线程池")
+        _immediate_executor.submit(run_immediately)
+        logger.info("[立即执行] 任务已提交到独立线程池")
     except Exception as e:
         logger.error(f"[立即执行] 启动任务失败: {e}")
+        history.status = TaskStatus.FAILED.value
+        history.error_message = f"启动任务失败: {e}"
+        history.finished_at = datetime.utcnow()
+        db.commit()
+        raise HTTPException(status_code=500, detail="启动任务失败") from e
 
-    return {"message": "任务已开始执行", "history_id": history.id}
+    return {"message": "任务已开始执行", "history_id": history_id}
