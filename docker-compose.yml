@@ -81,3 +81,8 @@ volumes:
   postgres_data:
   neo4j_data:
   neo4j_logs:
+
+networks:
+  default:
+    name: ai-studio-network
+    external: true

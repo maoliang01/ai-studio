@@ -122,6 +122,7 @@ def run_wechat_crawl_task(task_id: str):
 def run_scheduled_task(task_id: str):
     """执行单个定时任务"""
     logger.info(f"⏰ [定时执行] 开始执行任务: {task_id}")
+    logger.info(f"⏰ [定时执行] 当前时间: {datetime.utcnow().isoformat()}")
 
     # 创建新的数据库会话确保线程安全
     from app.core.database import get_session_local
@@ -132,6 +133,12 @@ def run_scheduled_task(task_id: str):
         if not task:
             logger.error(f"任务不存在: {task_id}")
             return
+
+        logger.info(f"⏰ [定时执行] 任务名称: {task.name}")
+        logger.info(f"⏰ [定时执行] 任务启用状态: {task.is_enabled}")
+        logger.info(f"⏰ [定时执行] 任务执行时间: {task.schedule_time}")
+        logger.info(f"⏰ [定时执行] 上次执行时间: {task.last_run_at}")
+        logger.info(f"⏰ [定时执行] 下次执行时间: {task.next_run_at}")
 
         # 检查是否有同任务正在运行（防止重复执行）
         running_count = db.query(ScrapeHistory).filter(
@@ -410,10 +417,45 @@ def start_scheduler() -> BackgroundScheduler:
         name="同步定时任务",
     )
 
+    # 启动时立即执行一次同步，确保任务状态正确
+    logger.info("启动时立即同步任务状态...")
+    _update_next_run_times()
+
     scheduler.start()
     logger.info("定时任务调度器已启动")
 
     return scheduler
+
+
+def _update_next_run_times():
+    """更新所有启用任务的下次执行时间"""
+    from app.core.database import get_session_local
+    SessionLocal = get_session_local()
+    db = SessionLocal()
+    try:
+        from datetime import datetime, timedelta
+        tasks = db.query(ScheduledTask).filter(ScheduledTask.is_enabled == True).all()
+        now = datetime.utcnow()
+        updated_count = 0
+
+        for task in tasks:
+            # 如果下次执行时间已过或为空，重新计算
+            if not task.next_run_at or task.next_run_at < now:
+                hour, minute = map(int, task.schedule_time.split(":"))
+                next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if next_run <= now:
+                    next_run += timedelta(days=1)
+                task.next_run_at = next_run
+                updated_count += 1
+
+        if updated_count > 0:
+            db.commit()
+            logger.info(f"已更新 {updated_count} 个任务的下次执行时间")
+
+    except Exception as e:
+        logger.error(f"更新下次执行时间失败: {e}")
+    finally:
+        db.close()
 
 
 # ============ KG 对账定时任务(可选,默认关闭) ============

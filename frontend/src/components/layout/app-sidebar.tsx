@@ -31,6 +31,7 @@ import {
   Database,
   Network,
   Rss,
+  TrendingUp,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useChatStore } from "@/stores/chat-store";
@@ -38,6 +39,7 @@ import { useChatStore } from "@/stores/chat-store";
 const navItems = [
   { href: "/", icon: MessageSquare, label: "对话" },
   { href: "/kg", icon: Network, label: "知识图谱" },
+  { href: "/kg/self-enhancement", icon: TrendingUp, label: "知识自增强" },
   { href: "/prompts", icon: FileText, label: "提示词" },
   { href: "/scrape", icon: Globe, label: "网页爬取" },
   { href: "/wechat", icon: Rss, label: "公众号爬取" },

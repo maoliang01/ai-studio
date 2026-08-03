@@ -421,6 +421,55 @@ async def create_task(request: ScheduledTaskCreate, db: Session = Depends(get_db
     return _task_to_response(task)
 
 
+# ============ 调度器管理路由（必须在 /{task_id} 之前） ============
+
+@router.post("/sync-scheduler")
+async def sync_scheduler_api():
+    """手动同步调度器任务（用于服务重启后或任务状态不一致时）"""
+    try:
+        from app.core.scheduler import get_scheduler, sync_scheduler_tasks, _update_next_run_times
+
+        scheduler = get_scheduler()
+        if not scheduler:
+            return {"status": "error", "message": "调度器未运行"}
+
+        # 更新下次执行时间
+        _update_next_run_times()
+
+        # 同步任务到调度器
+        sync_scheduler_tasks(scheduler)
+
+        return {"status": "success", "message": "调度器已同步"}
+    except Exception as e:
+        logger.error(f"同步调度器失败: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/scheduler-jobs")
+async def get_scheduler_jobs():
+    """获取调度器中当前的任务列表"""
+    try:
+        from app.core.scheduler import get_scheduler
+
+        scheduler = get_scheduler()
+        if not scheduler:
+            return {"status": "error", "message": "调度器未运行"}
+
+        jobs = []
+        for job in scheduler.get_jobs():
+            jobs.append({
+                "id": job.id,
+                "name": job.name,
+                "next_run_time": job.next_run_time.isoformat() if job.next_run_time else None,
+                "trigger": str(job.trigger),
+            })
+
+        return {"status": "success", "jobs": jobs, "total": len(jobs)}
+    except Exception as e:
+        logger.error(f"获取调度器任务失败: {e}")
+        return {"status": "error", "message": str(e)}
+
+
 @router.get("/{task_id}", response_model=ScheduledTaskResponse)
 async def get_task(task_id: str, db: Session = Depends(get_db)):
     """获取单个定时任务"""

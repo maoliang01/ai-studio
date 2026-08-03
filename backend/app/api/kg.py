@@ -8,7 +8,7 @@ import asyncio
 from typing import Optional, List, Dict, Any, Literal
 from datetime import date, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query, status
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 
@@ -24,6 +24,9 @@ from app.services import kg_sync
 logger = logging.getLogger("ai-studio")
 
 router = APIRouter(prefix="/api/kg", tags=["知识图谱"])
+
+# 批量处理进度存储
+_batch_progress = {}
 
 
 # ============ 依赖项 ============
@@ -1503,3 +1506,721 @@ async def get_entity_context(
         }
     finally:
         await neo4j.close()
+
+
+# ==================== 知识自增强循环 API ====================
+
+from app.services.kg.self_enhancement import KnowledgeSelfEnhancement
+from app.schemas.kg import (
+    ProcessArticleRequest,
+    SelfEnhancementResultSchema,
+    EnhancementStatsSchema,
+    KnowledgePointListResponse,
+    AssociationListResponse,
+    TrendPredictionRequest,
+    TrendPredictionResponse,
+)
+
+# 全局自增强循环服务实例
+_self_enhancement_service: Optional[KnowledgeSelfEnhancement] = None
+
+
+async def _get_self_enhancement_service() -> KnowledgeSelfEnhancement:
+    """获取自增强循环服务实例"""
+    global _self_enhancement_service
+    if _self_enhancement_service is None:
+        neo4j = Neo4jService()
+        # 使用LLMService作为LLM客户端
+        from app.core.llm import llm_service
+        _self_enhancement_service = KnowledgeSelfEnhancement(
+            kg_service=neo4j,
+            llm_client=llm_service
+        )
+    return _self_enhancement_service
+
+
+@router.post("/self-enhancement/process-article")
+async def process_article_for_enhancement(
+    request: ProcessArticleRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    处理单篇文章，启动自增强循环
+
+    流程：
+    1. 文章预处理
+    2. LLM 提取知识点
+    3. 发现知识关联
+    4. 生成知识总结
+    5. 存储到图数据库
+
+    请求体：
+    - article_id: 文章 ID
+    - article_content: 文章内容（可选，不提供则从数据库获取）
+
+    返回：
+    - enhancement_id: 增强任务 ID
+    - status: 处理状态
+    - knowledge_points_count: 提取的知识点数量
+    - associations_count: 发现的关联数量
+    - summary: 生成的总结
+    """
+    service = await _get_self_enhancement_service()
+
+    # 如果没有提供内容，从数据库获取
+    article_content = request.article_content
+    if not article_content:
+        article = db.query(Article).filter(Article.id == request.article_id).first()
+        if not article:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"文章不存在: {request.article_id}"
+            )
+        if not article.content:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="文章内容为空"
+            )
+        article_content = article.content
+
+    result = await service.process_new_article(
+        article_id=request.article_id,
+        article_content=article_content
+    )
+
+    # 更新文章的 kg_status
+    article = db.query(Article).filter(Article.id == request.article_id).first()
+    if article:
+        article.kg_status = "success" if result.status == "completed" else "failed"
+        article.kg_processed_at = datetime.now()
+        db.commit()
+
+    return {
+        "enhancement_id": result.enhancement_id,
+        "article_id": result.article_id,
+        "status": result.status,
+        "progress": result.progress,
+        "knowledge_points_count": result.knowledge_points_count,
+        "associations_count": result.associations_count,
+        "summary": result.summary,
+        "error_message": result.error_message,
+        "created_at": result.created_at.isoformat() if result.created_at else None,
+        "completed_at": result.completed_at.isoformat() if result.completed_at else None,
+    }
+
+
+@router.get("/self-enhancement/status/{enhancement_id}")
+async def get_enhancement_status(enhancement_id: str):
+    """
+    获取增强任务状态
+
+    返回：
+    - status: 处理状态 (pending/processing/completed/failed)
+    - progress: 处理进度 (0-100)
+    - result: 处理结果
+    """
+    service = await _get_self_enhancement_service()
+    result = service.get_processing_status(enhancement_id)
+
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Enhancement task not found: {enhancement_id}"
+        )
+
+    return {
+        "enhancement_id": result.enhancement_id,
+        "article_id": result.article_id,
+        "status": result.status,
+        "progress": result.progress,
+        "knowledge_points_count": result.knowledge_points_count,
+        "associations_count": result.associations_count,
+        "summary": result.summary,
+        "error_message": result.error_message,
+        "created_at": result.created_at.isoformat() if result.created_at else None,
+        "completed_at": result.completed_at.isoformat() if result.completed_at else None,
+    }
+
+
+@router.get("/self-enhancement/stats")
+async def get_enhancement_stats(db: Session = Depends(get_db)):
+    """
+    获取增强统计信息
+
+    返回：
+    - total_articles_processed: 已处理文章数
+    - total_knowledge_points: 知识点总数
+    - total_associations: 关联总数
+    - average_points_per_article: 平均知识点/文章
+    - average_associations_per_point: 平均关联/知识点
+    - last_processed_at: 最后处理时间
+    """
+    from app.models.article import Article
+
+    # 从数据库查询已处理文章数
+    processed_count = db.query(Article).filter(
+        Article.kg_status.in_(['success', 'partial'])
+    ).count()
+
+    # 获取最后处理时间
+    last_article = db.query(Article).filter(
+        Article.kg_status.in_(['success', 'partial']),
+        Article.kg_processed_at.isnot(None)
+    ).order_by(Article.kg_processed_at.desc()).first()
+
+    last_processed_at = (
+        last_article.kg_processed_at if last_article else None
+    )
+
+    # 从Neo4j查询知识点和关联数量
+    total_points = 0
+    total_associations = 0
+
+    try:
+        from app.services.kg.graph import Neo4jService
+
+        neo4j = Neo4jService()
+        await neo4j.connect()
+        try:
+            # 查询知识点数量
+            result = await neo4j.execute(
+                'MATCH (n:Entity) WHERE n.entity_type = "KnowledgePoint" RETURN count(n) as count'
+            )
+            total_points = result[0]['count'] if result else 0
+
+            # 查询关联数量
+            result = await neo4j.execute(
+                'MATCH (a:Entity)-[r]->(b:Entity) WHERE a.entity_type = "KnowledgePoint" AND b.entity_type = "KnowledgePoint" RETURN count(r) as count'
+            )
+            total_associations = result[0]['count'] if result else 0
+        finally:
+            await neo4j.close()
+    except Exception as neo4j_error:
+        logger.warning(f"从Neo4j获取统计数据失败: {neo4j_error}")
+
+    # 计算平均值
+    average_points_per_article = (
+        total_points / processed_count if processed_count > 0 else 0
+    )
+    average_associations_per_point = (
+        total_associations / total_points if total_points > 0 else 0
+    )
+
+    return {
+        "total_articles_processed": processed_count,
+        "total_knowledge_points": total_points,
+        "total_associations": total_associations,
+        "average_points_per_article": average_points_per_article,
+        "average_associations_per_point": average_associations_per_point,
+        "last_processed_at": (
+            last_processed_at.isoformat()
+            if last_processed_at
+            else None
+        ),
+    }
+
+
+@router.get("/self-enhancement/knowledge-points")
+async def list_knowledge_points(
+    article_id: Optional[str] = Query(None, description="按文章 ID 筛选"),
+    limit: int = Query(50, ge=1, le=200, description="返回数量限制")
+):
+    """
+    获取知识点列表
+
+    参数：
+    - article_id: 可选，按文章筛选
+    - limit: 返回数量限制
+
+    返回：
+    - knowledge_points: 知识点列表
+    - total: 总数
+    """
+    neo4j = Neo4jService()
+    try:
+        # 查询知识点 (存储为 Entity 节点，entity_type='KnowledgePoint')
+        query = """
+        MATCH (n:Entity)
+        WHERE n.entity_type = 'KnowledgePoint'
+        AND ($article_id IS NULL OR n.article_id = $article_id)
+        RETURN n
+        ORDER BY n.created_at DESC
+        LIMIT $limit
+        """
+        result = await neo4j.execute(query, {"article_id": article_id, "limit": limit})
+
+        knowledge_points = []
+        for record in result:
+            node = record["n"]
+            knowledge_points.append({
+                "id": node.get("id", ""),
+                "article_id": node.get("article_id", ""),
+                "title": node.get("name", ""),
+                "content": node.get("content", ""),
+                "category": node.get("category", "concept"),
+                "confidence": node.get("confidence", 0.5),
+                "keywords": node.get("keywords", []),
+                "created_at": node.get("created_at", ""),
+            })
+
+        # 获取总数
+        count_query = """
+        MATCH (n:Entity)
+        WHERE n.entity_type = 'KnowledgePoint'
+        AND ($article_id IS NULL OR n.article_id = $article_id)
+        RETURN count(n) as total
+        """
+        count_result = await neo4j.execute(count_query, {"article_id": article_id})
+        total = count_result[0]["total"] if count_result else 0
+
+        return {
+            "knowledge_points": knowledge_points,
+            "total": total,
+        }
+    finally:
+        await neo4j.close()
+
+
+@router.get("/self-enhancement/associations")
+async def list_associations(
+    knowledge_point_id: Optional[str] = Query(None, description="按知识点 ID 筛选"),
+    min_strength: float = Query(0.3, ge=0, le=1, description="最小关联强度")
+):
+    """
+    获取知识点关联列表
+
+    参数：
+    - knowledge_point_id: 可选，按知识点筛选
+    - min_strength: 最小关联强度
+
+    返回：
+    - associations: 关联列表
+    - total: 总数
+    """
+    neo4j = Neo4jService()
+    try:
+        # 查询关联 (知识点存储为 Entity 节点，entity_type='KnowledgePoint')
+        query = """
+        MATCH (a:Entity)-[r]->(b:Entity)
+        WHERE a.entity_type = 'KnowledgePoint'
+        AND b.entity_type = 'KnowledgePoint'
+        AND ($kp_id IS NULL OR a.id = $kp_id OR b.id = $kp_id)
+        AND r.strength >= $min_strength
+        RETURN a, b, r
+        LIMIT 100
+        """
+        result = await neo4j.execute(query, {
+            "kp_id": knowledge_point_id,
+            "min_strength": min_strength
+        })
+
+        associations = []
+        for record in result:
+            source = record["a"]
+            target = record["b"]
+            rel = record["r"]
+
+            associations.append({
+                "id": rel.get("id", ""),
+                "source_id": source.get("id", ""),
+                "source_title": source.get("name", ""),
+                "target_id": target.get("id", ""),
+                "target_title": target.get("name", ""),
+                "relation_type": rel.type if hasattr(rel, 'type') else "related_to",
+                "strength": rel.get("strength", 0.5),
+                "evidence": rel.get("evidence", ""),
+                "created_at": rel.get("created_at", ""),
+            })
+
+        return {
+            "associations": associations,
+            "total": len(associations),
+        }
+    finally:
+        await neo4j.close()
+
+
+# ==================== 文章选择 API ====================
+
+@router.get("/self-enhancement/articles")
+async def list_articles_for_enhancement(
+    q: Optional[str] = Query(None, description="搜索关键词"),
+    kg_status: Optional[str] = Query(None, description="知识图谱状态筛选"),
+    page: int = Query(1, ge=1, description="页码"),
+    page_size: int = Query(20, ge=1, le=100, description="每页数量"),
+    db: Session = Depends(get_db)
+):
+    """
+    获取可用于自增强的文章列表
+
+    参数：
+    - q: 可选搜索关键词（匹配标题、摘要）
+    - kg_status: 可选知识图谱状态筛选 (pending/success/failed)
+    - page: 页码
+    - page_size: 每页数量
+
+    返回：
+    - articles: 文章列表
+    - total: 总数
+    - page: 当前页
+    - page_size: 每页数量
+    """
+    from app.models.article import Article, Category
+
+    query = db.query(Article).filter(Article.status.in_(["completed", "success"]))
+
+    # 搜索过滤
+    if q:
+        keyword_pattern = f"%{q}%"
+        query = query.filter(
+            or_(
+                Article.title.ilike(keyword_pattern),
+                Article.summary.ilike(keyword_pattern),
+            )
+        )
+
+    # 知识图谱状态过滤
+    if kg_status:
+        query = query.filter(Article.kg_status == kg_status)
+
+    # 获取总数
+    total = query.count()
+
+    # 分页查询
+    offset = (page - 1) * page_size
+    articles = query.order_by(
+        Article.scraped_at.desc()
+    ).offset(offset).limit(page_size).all()
+
+    # 转换为响应格式
+    items = []
+    for a in articles:
+        category_name = a.category.name if a.category else None
+        items.append({
+            "id": a.id,
+            "title": a.title,
+            "summary": a.summary[:200] if a.summary else "",
+            "word_count": a.word_count,
+            "published_at": a.published_at.isoformat() if a.published_at else None,
+            "scraped_at": a.scraped_at.isoformat() if a.scraped_at else None,
+            "kg_status": a.kg_status,
+            "category_name": category_name,
+            "source_type": a.source_type,
+        })
+
+    return {
+        "articles": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+class BatchProcessRequest(BaseModel):
+    article_ids: List[str] = Field(..., description="要处理的文章ID列表")
+    force_reprocess: bool = Field(default=False, description="是否强制重新处理已处理的文章")
+
+
+@router.post("/self-enhancement/batch-process")
+async def batch_process_articles_enhancement(
+    request: BatchProcessRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """
+    批量处理文章（异步后台任务）
+
+    参数：
+    - article_ids: 要处理的文章ID列表
+    - force_reprocess: 是否强制重新处理已处理的文章
+
+    返回：
+    - task_id: 任务ID，用于查询进度
+    - total: 总文章数
+    - status: 任务状态
+    """
+    import uuid
+
+    # 验证文章存在
+    articles = db.query(Article).filter(
+        Article.id.in_(request.article_ids),
+        Article.status.in_(["completed", "success"])
+    ).all()
+
+    if not articles:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="没有找到有效的文章"
+        )
+
+    # 过滤掉已处理的文章（除非强制重新处理）
+    articles_to_process = []
+    for article in articles:
+        if request.force_reprocess or article.kg_status != "success":
+            articles_to_process.append(article)
+
+    if not articles_to_process:
+        return {
+            "status": "success",
+            "message": "所有文章都已处理完成",
+            "total": 0,
+            "skipped": len(articles)
+        }
+
+    # 创建任务ID
+    task_id = str(uuid.uuid4())
+
+    # 启动后台任务
+    background_tasks.add_task(
+        _process_articles_batch,
+        task_id=task_id,
+        article_ids=[a.id for a in articles_to_process]
+    )
+
+    return {
+        "task_id": task_id,
+        "total": len(articles_to_process),
+        "skipped": len(articles) - len(articles_to_process),
+        "status": "started"
+    }
+
+
+async def _process_articles_batch(task_id: str, article_ids: List[str]):
+    """后台批量处理文章"""
+    from app.core.database import get_session_local
+    from app.services.kg.self_enhancement import KnowledgeSelfEnhancement
+
+    # 初始化进度
+    _batch_progress[task_id] = {
+        "total": len(article_ids),
+        "processed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "current_article": None,
+        "status": "running",
+        "start_time": datetime.now().isoformat(),
+        "errors": []
+    }
+
+    SessionLocal = get_session_local()
+    db = SessionLocal()
+
+    try:
+        # 获取服务实例
+        neo4j = Neo4jService()
+        from app.core.llm import llm_service
+        service = KnowledgeSelfEnhancement(
+            kg_service=neo4j,
+            llm_client=llm_service
+        )
+
+        for idx, article_id in enumerate(article_ids):
+            try:
+                article = db.query(Article).filter(Article.id == article_id).first()
+                if not article:
+                    _batch_progress[task_id]["skipped"] += 1
+                    continue
+
+                # 更新当前处理的文章
+                _batch_progress[task_id]["current_article"] = {
+                    "id": str(article_id),
+                    "title": article.title or f"Article {article_id}",
+                    "index": idx + 1
+                }
+
+                # 更新状态为处理中
+                article.kg_status = "processing"
+                db.commit()
+
+                # 处理文章
+                result = await service.process_new_article(
+                    article_id=article_id,
+                    article_content=article.content
+                )
+
+                # 更新状态
+                if result.status == "completed":
+                    article.kg_status = "success"
+                    _batch_progress[task_id]["processed"] += 1
+                else:
+                    article.kg_status = "failed"
+                    article.kg_error_message = result.error_message
+                    _batch_progress[task_id]["failed"] += 1
+                    _batch_progress[task_id]["errors"].append({
+                        "article_id": str(article_id),
+                        "error": result.error_message
+                    })
+
+                article.kg_processed_at = datetime.now()
+                db.commit()
+
+                # 添加小延迟避免API限流
+                await asyncio.sleep(0.5)
+
+            except Exception as e:
+                logger.error(f"处理文章 {article_id} 失败: {e}")
+                article = db.query(Article).filter(Article.id == article_id).first()
+                if article:
+                    article.kg_status = "failed"
+                    article.kg_error_message = str(e)
+                    db.commit()
+                _batch_progress[task_id]["failed"] += 1
+                _batch_progress[task_id]["errors"].append({
+                    "article_id": str(article_id),
+                    "error": str(e)
+                })
+
+        # 标记任务完成
+        _batch_progress[task_id]["status"] = "completed"
+        _batch_progress[task_id]["end_time"] = datetime.now().isoformat()
+        _batch_progress[task_id]["current_article"] = None
+
+    except Exception as e:
+        logger.error(f"批量处理任务 {task_id} 失败: {e}")
+        _batch_progress[task_id]["status"] = "failed"
+        _batch_progress[task_id]["error"] = str(e)
+    finally:
+        db.close()
+
+
+@router.get("/self-enhancement/batch-status/{task_id}")
+async def get_batch_process_status(task_id: str):
+    """
+    获取批量处理任务状态
+
+    参数：
+    - task_id: 任务ID
+
+    返回：
+    - task_id: 任务ID
+    - status: 任务状态
+    - total: 总文章数
+    - processed: 已处理数
+    - failed: 失败数
+    - current_article: 当前处理的文章
+    - errors: 错误列表
+    """
+    if task_id not in _batch_progress:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="任务不存在"
+        )
+
+    progress = _batch_progress[task_id]
+
+    # 计算进度百分比
+    total = progress["total"]
+    processed = progress["processed"]
+    failed = progress["failed"]
+    completed = processed + failed
+    percentage = round((completed / total) * 100, 1) if total > 0 else 0
+
+    return {
+        "task_id": task_id,
+        "status": progress["status"],
+        "total": total,
+        "processed": processed,
+        "failed": failed,
+        "skipped": progress["skipped"],
+        "percentage": percentage,
+        "current_article": progress["current_article"],
+        "start_time": progress["start_time"],
+        "end_time": progress.get("end_time"),
+        "errors": progress["errors"][:10],  # 只返回前10个错误
+        "error_count": len(progress["errors"])
+    }
+
+
+@router.post("/self-enhancement/auto-detect-pending")
+async def auto_detect_pending_articles(db: Session = Depends(get_db)):
+    """
+    自动检测并返回待处理的文章列表
+
+    返回：
+    - pending_articles: 待处理文章列表
+    - total: 待处理总数
+    - already_processed: 已处理数
+    """
+    from app.models.article import Article, Category
+
+    # 查询所有完成的文章
+    all_articles = db.query(Article).filter(
+        Article.status.in_(["completed", "success"])
+    ).order_by(Article.scraped_at.desc()).all()
+
+    pending_articles = []
+    already_processed = []
+
+    for article in all_articles:
+        # 判断是否已处理
+        is_processed = article.kg_status in ["success", "partial"]
+
+        article_data = {
+            "id": article.id,
+            "title": article.title,
+            "summary": article.summary[:200] if article.summary else "",
+            "word_count": article.word_count,
+            "kg_status": article.kg_status,
+            "category_name": article.category.name if article.category else None,
+            "is_processed": is_processed,
+        }
+
+        if is_processed:
+            already_processed.append(article_data)
+        else:
+            pending_articles.append(article_data)
+
+    return {
+        "pending_articles": pending_articles,
+        "total": len(all_articles),
+        "pending_count": len(pending_articles),
+        "processed_count": len(already_processed),
+    }
+
+
+# ==================== 提示词模板 API ====================
+
+@router.get("/self-enhancement/templates")
+async def list_prompt_templates(
+    category: Optional[str] = Query(None, description="按分类筛选")
+):
+    """
+    获取可用的提示词模板列表
+
+    参数：
+    - category: 可选，按分类筛选 (knowledge_mining/prediction)
+
+    返回：
+    - templates: 模板列表
+    - total: 总数
+    """
+    service = await _get_self_enhancement_service()
+    templates = service.list_prompt_templates(category)
+
+    return {
+        "templates": templates,
+        "total": len(templates),
+    }
+
+
+@router.get("/self-enhancement/templates/{template_id}")
+async def get_prompt_template(template_id: str):
+    """
+    获取指定的提示词模板
+
+    参数：
+    - template_id: 模板 ID
+
+    返回：
+    - 模板详细信息
+    """
+    service = await _get_self_enhancement_service()
+    template = service.get_prompt_template(template_id)
+
+    if template is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Template not found: {template_id}"
+        )
+
+    return template

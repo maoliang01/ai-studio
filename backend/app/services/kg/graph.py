@@ -125,6 +125,27 @@ class Neo4jService:
             self._driver = None
             logger.info("Neo4j 连接已关闭")
 
+    async def execute(self, query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """
+        执行 Cypher 查询并返回结果列表
+
+        参数：
+        - query: Cypher 查询语句
+        - params: 查询参数
+
+        返回：
+        - 结果记录列表
+        """
+        if not self._driver:
+            await self.connect()
+
+        async with self._driver.session() as session:
+            result = await session.run(query, params or {})
+            records = []
+            async for record in result:
+                records.append(dict(record))
+            return records
+
     async def verify_connection(self) -> bool:
         """验证连接是否正常"""
         try:
@@ -307,6 +328,109 @@ class Neo4jService:
                 return True
             except Exception as e:
                 logger.error(f"创建实体节点失败: {e}")
+                return False
+
+    async def create_entity(
+        self,
+        name: str,
+        entity_type: str,
+        properties: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        创建实体节点（支持自定义属性）
+
+        参数：
+        - name: 实体名称
+        - entity_type: 实体类型
+        - properties: 自定义属性字典
+        """
+        if not self._driver:
+            await self.connect()
+
+        canonical_id = build_entity_id(name, entity_type)
+        props = properties or {}
+
+        async with self._driver.session() as session:
+            query = """
+            MERGE (e:Entity {name: $name})
+            SET e.canonical_id = coalesce(e.canonical_id, $canonical_id),
+                e.entity_type = $entity_type,
+                e.updated_at = datetime()
+            """
+            # 动态添加属性
+            for key, value in props.items():
+                query += f"\n            SET e.{key} = ${key}"
+
+            query += "\n            RETURN e"
+
+            params = {
+                "name": name,
+                "canonical_id": canonical_id,
+                "entity_type": entity_type,
+            }
+            params.update(props)
+
+            try:
+                await session.run(query, params)
+                return True
+            except Exception as e:
+                logger.error(f"创建实体节点失败: {e}")
+                return False
+
+    async def create_relationship(
+        self,
+        source_name: str,
+        target_name: str,
+        relationship_type: str,
+        properties: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        创建两个实体之间的关系
+
+        参数：
+        - source_name: 源实体名称或ID
+        - target_name: 目标实体名称或ID
+        - relationship_type: 关系类型
+        - properties: 关系属性
+        """
+        if not self._driver:
+            await self.connect()
+
+        props = properties or {}
+        rel_id = props.get("id", f"rel_{source_name}_{target_name}")
+
+        async with self._driver.session() as session:
+            # 先尝试按 name 匹配，如果没有匹配则按 id 匹配
+            query = f"""
+            MATCH (a:Entity)
+            WHERE a.name = $source_name OR a.id = $source_name
+            WITH a
+            MATCH (b:Entity)
+            WHERE b.name = $target_name OR b.id = $target_name
+            WITH a, b
+            MERGE (a)-[r:{relationship_type}]->(b)
+            SET r.id = $rel_id,
+                r.updated_at = datetime()
+            """
+
+            for key, value in props.items():
+                if key != "id":
+                    query += f"\n            SET r.{key} = ${key}"
+
+            query += "\n            RETURN r"
+
+            params = {
+                "source_name": source_name,
+                "target_name": target_name,
+                "rel_id": rel_id,
+            }
+            params.update({k: v for k, v in props.items() if k != "id"})
+
+            try:
+                await session.run(query, params)
+                return True
+            except Exception as e:
+                logger.error(f"创建关系失败: {e}")
                 return False
 
     async def link_article_to_entity(
