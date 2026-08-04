@@ -2224,3 +2224,92 @@ async def get_prompt_template(template_id: str):
         )
 
     return template
+
+
+# ==================== 趋势预测 API ====================
+
+class TrendPredictionRequest(BaseModel):
+    """趋势预测请求"""
+    topic: str = Field(..., description="预测主题")
+    time_range: int = Field(30, description="预测天数")
+    prediction_type: str = Field("general", description="预测类型")
+
+
+@router.post("/prediction/trend")
+async def predict_trend(request: TrendPredictionRequest):
+    """
+    预测趋势
+
+    参数：
+    - topic: 预测主题
+    - time_range: 预测天数 (默认 30)
+    - prediction_type: 预测类型 (general/technology/sentiment)
+
+    返回：
+    - trend: 趋势方向 (up/down/stable)
+    - confidence: 置信度
+    - factors: 影响因素
+    - timeline: 时间线预测
+    """
+    from app.services.kg.prediction import TrendPredictionEngine
+
+    neo4j = get_neo4j_service()
+    engine = TrendPredictionEngine(kg_service=neo4j)
+
+    result = await engine.predict_trend(
+        topic=request.topic,
+        time_range=request.time_range,
+        prediction_type=request.prediction_type
+    )
+
+    return {
+        "topic": result.topic,
+        "trend": result.trend,
+        "confidence": result.confidence,
+        "factors": result.factors,
+        "timeline": result.timeline,
+        "prediction_type": result.prediction_type,
+        "generated_at": result.generated_at
+    }
+
+
+@router.post("/prediction/sentiment")
+async def predict_sentiment(request: TrendPredictionRequest):
+    """预测舆情趋势"""
+    from app.services.kg.prediction import TrendPredictionEngine
+
+    neo4j = get_neo4j_service()
+    engine = TrendPredictionEngine(kg_service=neo4j)
+
+    result = await engine.predict_sentiment(topic=request.topic)
+
+    return {
+        "topic": result.topic,
+        "trend": result.trend,
+        "confidence": result.confidence,
+        "factors": result.factors,
+        "timeline": result.timeline,
+        "prediction_type": result.prediction_type,
+        "generated_at": result.generated_at
+    }
+
+
+@router.post("/prediction/technology")
+async def predict_technology(request: TrendPredictionRequest):
+    """预测技术趋势"""
+    from app.services.kg.prediction import TrendPredictionEngine
+
+    neo4j = get_neo4j_service()
+    engine = TrendPredictionEngine(kg_service=neo4j)
+
+    result = await engine.predict_technology(topic=request.topic)
+
+    return {
+        "topic": result.topic,
+        "trend": result.trend,
+        "confidence": result.confidence,
+        "factors": result.factors,
+        "timeline": result.timeline,
+        "prediction_type": result.prediction_type,
+        "generated_at": result.generated_at
+    }

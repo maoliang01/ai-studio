@@ -7,6 +7,7 @@ import time
 import json
 import re
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 from urllib.parse import urljoin, urlparse
@@ -158,7 +159,7 @@ class TabAnalyzer:
         """使用crawl4ai爬取页面"""
         config = CrawlerRunConfig(
             word_count_threshold=0,
-            page_timeout=60000,
+            page_timeout=int(os.getenv("CRAWL_PAGE_TIMEOUT_MS", "180000")),
             screenshot=False,
         )
         browser_config = BrowserConfig(headless=True, verbose=False)

@@ -5,6 +5,7 @@
 """
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -14,6 +15,50 @@ from app.models.scheduled_task import ScheduledTask, ScrapeHistory, TaskStatus
 from app.models.wechat import WechatCrawlTask
 
 logger = logging.getLogger("scheduler")
+
+# Scheduled scraping can be tuned without changing code or rebuilding the image.
+SCHEDULED_URL_TIMEOUT_SECONDS = int(os.getenv("SCHEDULED_URL_TIMEOUT_SECONDS", "300"))
+SCHEDULED_URL_RETRIES = int(os.getenv("SCHEDULED_URL_RETRIES", "1"))
+SCHEDULED_RETRY_BACKOFF_SECONDS = float(os.getenv("SCHEDULED_RETRY_BACKOFF_SECONDS", "5"))
+SCHEDULED_TASK_MAX_RUNTIME_SECONDS = int(os.getenv("SCHEDULED_TASK_MAX_RUNTIME_SECONDS", "1200"))
+
+
+async def _scrape_scheduled_url(
+    scraper,
+    url: str,
+    options,
+    max_articles: int,
+    date_range: str | None,
+    timeout_seconds: int,
+):
+    """Run one scheduled URL with bounded retries."""
+    attempts = max(1, SCHEDULED_URL_RETRIES + 1)
+    last_error = None
+
+    for attempt in range(attempts):
+        try:
+            return await asyncio.wait_for(
+                scraper.deep_scrape(
+                    url=url,
+                    options=options,
+                    max_articles=max_articles,
+                    date_range=date_range,
+                    scrape_level="deep",
+                ),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                logger.warning(
+                    "Scheduled URL timed out; retrying %s/%s: %s",
+                    attempt + 1,
+                    attempts,
+                    url,
+                )
+                await asyncio.sleep(SCHEDULED_RETRY_BACKOFF_SECONDS)
+
+    raise last_error or TimeoutError(f"Scheduled URL timed out: {url}")
 
 
 def create_scheduler() -> BackgroundScheduler:
@@ -199,7 +244,7 @@ def run_scheduled_task(task_id: str):
             options = ScrapeOptions()  # 默认值：extract_content=True, fetch_html=False, preserve_format=False, max_depth=0
 
             # 任务最大执行时间（秒），默认 10 分钟，防止任务卡住
-            TASK_MAX_RUNTIME = 600  # 10 分钟
+            task_max_runtime = SCHEDULED_TASK_MAX_RUNTIME_SECONDS
 
             # 创建新的事件循环用于线程中运行
             loop = asyncio.new_event_loop()
@@ -207,32 +252,34 @@ def run_scheduled_task(task_id: str):
 
             # 保存每个爬取的文章信息
             scraped_articles = []
+            errors = []
+            completed_urls = 0
             task_exceeded = False
 
             for url in urls:
                 # 检查是否超过最大执行时间
                 elapsed = (datetime.utcnow() - start_time).total_seconds()
-                if elapsed > TASK_MAX_RUNTIME:
-                    logger.warning(f"任务 '{task.name}' 执行时间超过 {TASK_MAX_RUNTIME} 秒，强制结束")
+                if elapsed > task_max_runtime:
+                    logger.warning(f"任务 '{task.name}' 执行时间超过 {task_max_runtime} 秒，强制结束")
+                    errors.append(f"任务总运行时间超过 {task_max_runtime} 秒")
                     task_exceeded = True
                     break
 
                 logger.info(f"深度爬取 URL: {url}")
                 try:
-                    # 使用 asyncio.wait_for 为每次爬取添加超时保护（120秒）
-                    async def _scrape_with_timeout():
-                        return await asyncio.wait_for(
-                            scraper.deep_scrape(
-                                url=url,
-                                options=options,
-                                max_articles=20,
-                                date_range=task.scrape_range,
-                                scrape_level="deep"
-                            ),
-                            timeout=120  # 单个 URL 最多 2 分钟
+                    remaining = max(1, int(task_max_runtime - elapsed))
+                    timeout_seconds = min(SCHEDULED_URL_TIMEOUT_SECONDS, remaining)
+                    list_page, article_results = loop.run_until_complete(
+                        _scrape_scheduled_url(
+                            scraper=scraper,
+                            url=url,
+                            options=options,
+                            max_articles=20,
+                            date_range=task.scrape_range,
+                            timeout_seconds=timeout_seconds,
                         )
-
-                    list_page, article_results = loop.run_until_complete(_scrape_with_timeout())
+                    )
+                    completed_urls += 1
                     logger.info(f"  列表页: {list_page.title}, 识别到 {len(article_results)} 篇文章")
 
                     # 保存每篇文章到数据库
@@ -250,8 +297,11 @@ def run_scheduled_task(task_id: str):
                             logger.info(f"    内容不足，跳过: {result.url}")
 
                 except asyncio.TimeoutError:
-                    logger.error(f"  爬取超时（120秒）: {url}")
+                    message = f"爬取超时（{timeout_seconds}秒）: {url}"
+                    errors.append(message)
+                    logger.error(f"  {message}")
                 except Exception as url_error:
+                    errors.append(f"{url}: {url_error}")
                     logger.error(f"  爬取失败: {url_error}")
 
             loop.close()
@@ -279,7 +329,12 @@ def run_scheduled_task(task_id: str):
             else:
                 history.article_title = "无文章"
 
-            history.status = TaskStatus.SUCCESS.value
+            history.status = (
+                TaskStatus.FAILED.value
+                if errors and completed_urls == 0
+                else TaskStatus.SUCCESS.value
+            )
+            history.error_message = "\n".join(errors)[:4000] if errors else None
             history.started_at = start_time
             history.finished_at = end_time
             history.duration = duration

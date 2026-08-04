@@ -121,8 +121,9 @@ def get_engine():
         _engine = create_engine(
             config.url,
             poolclass=QueuePool,
-            pool_size=5,
-            max_overflow=10,
+            pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
+            max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
+            pool_timeout=int(os.getenv("DB_POOL_TIMEOUT", "60")),
             pool_pre_ping=True,  # 连接前测试
             echo=os.getenv("SQL_ECHO", "false").lower() == "true",
         )
