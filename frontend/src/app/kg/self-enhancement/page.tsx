@@ -905,6 +905,7 @@ export default function SelfEnhancementPage() {
           <Tabs defaultValue="knowledge_mining">
             <TabsList>
               <TabsTrigger value="knowledge_mining">知识挖掘</TabsTrigger>
+              <TabsTrigger value="extraction_results">提取结果</TabsTrigger>
               <TabsTrigger value="prediction">趋势预测</TabsTrigger>
             </TabsList>
 
@@ -940,6 +941,117 @@ export default function SelfEnhancementPage() {
                       </CardContent>
                     </Card>
                   ))}
+              </div>
+            </TabsContent>
+
+            <TabsContent value="extraction_results" className="mt-4">
+              <div className="space-y-6">
+                {/* 知识点列表 */}
+                <div>
+                  <div className="flex justify-between items-center mb-4">
+                    <h4 className="font-semibold flex items-center gap-2">
+                      <BookOpen className="h-4 w-4" />
+                      提取的知识点
+                      <Badge variant="secondary">{knowledgePoints.length}</Badge>
+                    </h4>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={loadKnowledgePoints}
+                    >
+                      <RefreshCw className="h-4 w-4 mr-1" />
+                      刷新
+                    </Button>
+                  </div>
+
+                  {knowledgePoints.length === 0 ? (
+                    <Card className="p-6 text-center text-gray-500">
+                      <BookOpen className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                      <p>暂无提取的知识点</p>
+                      <p className="text-sm mt-1">请先处理文章以提取知识要点</p>
+                    </Card>
+                  ) : (
+                    <div className="grid gap-3">
+                      {knowledgePoints.map(point => (
+                        <Card key={point.id} className="p-4 hover:bg-gray-50">
+                          <div className="flex justify-between items-start">
+                            <div className="flex-1">
+                              <div className="flex items-center gap-2 mb-1">
+                                <h5 className="font-medium">{point.title}</h5>
+                                <Badge variant="outline" className="text-xs">
+                                  {point.category}
+                                </Badge>
+                                <span className="text-xs text-gray-500">
+                                  置信度: {(point.confidence * 100).toFixed(0)}%
+                                </span>
+                              </div>
+                              <p className="text-sm text-gray-600 line-clamp-2">{point.content}</p>
+                              {point.keywords && point.keywords.length > 0 && (
+                                <div className="flex flex-wrap gap-1 mt-2">
+                                  {point.keywords.map((kw, i) => (
+                                    <Badge key={i} variant="secondary" className="text-xs">
+                                      {kw}
+                                    </Badge>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                            <div className="text-xs text-gray-400 ml-4">
+                              {point.article_id && (
+                                <span>文章: {point.article_id.slice(0, 8)}...</span>
+                              )}
+                            </div>
+                          </div>
+                        </Card>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* 关联列表 */}
+                <div>
+                  <div className="flex justify-between items-center mb-4">
+                    <h4 className="font-semibold flex items-center gap-2">
+                      <Link className="h-4 w-4" />
+                      知识关联
+                      <Badge variant="secondary">{associations.length}</Badge>
+                    </h4>
+                  </div>
+
+                  {associations.length === 0 ? (
+                    <Card className="p-6 text-center text-gray-500">
+                      <Link className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                      <p>暂无发现的关联</p>
+                      <p className="text-sm mt-1">处理更多文章后将自动发现知识关联</p>
+                    </Card>
+                  ) : (
+                    <div className="grid gap-3">
+                      {associations.map(assoc => (
+                        <Card key={assoc.id} className="p-4 hover:bg-gray-50">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-blue-600">
+                              {assoc.source_title}
+                            </span>
+                            <Badge variant="outline" className="text-xs">
+                              {assoc.relation_type}
+                            </Badge>
+                            <span className="font-medium text-green-600">
+                              {assoc.target_title}
+                            </span>
+                            <span className="text-xs text-gray-500 ml-auto">
+                              强度: {(assoc.strength * 100).toFixed(0)}%
+                            </span>
+                          </div>
+                          {assoc.evidence && (
+                            <p className="text-xs text-gray-500 mt-2 line-clamp-1">
+                              证据: {assoc.evidence}
+                            </p>
+                          )}
+                        </Card>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             </TabsContent>
 

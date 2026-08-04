@@ -18,6 +18,7 @@ logger = logging.getLogger("scheduler")
 
 # Scheduled scraping can be tuned without changing code or rebuilding the image.
 SCHEDULED_URL_TIMEOUT_SECONDS = int(os.getenv("SCHEDULED_URL_TIMEOUT_SECONDS", "300"))
+SCHEDULED_PAGE_TIMEOUT_SECONDS = int(os.getenv("SCHEDULED_PAGE_TIMEOUT_SECONDS", "90"))
 SCHEDULED_URL_RETRIES = int(os.getenv("SCHEDULED_URL_RETRIES", "1"))
 SCHEDULED_RETRY_BACKOFF_SECONDS = float(os.getenv("SCHEDULED_RETRY_BACKOFF_SECONDS", "5"))
 SCHEDULED_TASK_MAX_RUNTIME_SECONDS = int(os.getenv("SCHEDULED_TASK_MAX_RUNTIME_SECONDS", "1200"))
@@ -241,7 +242,7 @@ def run_scheduled_task(task_id: str):
             scraper = get_scraper()
 
             # 使用与正常网页爬取 /api/scrape 相同的选项
-            options = ScrapeOptions()  # 默认值：extract_content=True, fetch_html=False, preserve_format=False, max_depth=0
+            options = ScrapeOptions(timeout=SCHEDULED_PAGE_TIMEOUT_SECONDS)
 
             # 任务最大执行时间（秒），默认 10 分钟，防止任务卡住
             task_max_runtime = SCHEDULED_TASK_MAX_RUNTIME_SECONDS
