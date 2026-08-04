@@ -73,6 +73,13 @@ export default function ChatPage() {
     if (sessions.length === 0) {
       addSession();
     }
+
+    // 检查是否有从提示词模板页面传递过来的提示词
+    const pendingPrompt = localStorage.getItem('pending_prompt')
+    if (pendingPrompt) {
+      setInput(pendingPrompt)
+      localStorage.removeItem('pending_prompt')
+    }
   }, []);
 
   const [input, setInput] = useState("");

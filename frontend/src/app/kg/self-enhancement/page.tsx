@@ -68,6 +68,8 @@ export default function SelfEnhancementPage() {
   const [associations, setAssociations] = useState<Association[]>([])
   const [templates, setTemplates] = useState<PromptTemplate[]>([])
   const [selectedTemplate, setSelectedTemplate] = useState<PromptTemplate | null>(null)
+  const [templateVariables, setTemplateVariables] = useState<Record<string, string>>({})
+  const [renderedPrompt, setRenderedPrompt] = useState<string>('')
   const [loading, setLoading] = useState(false)
   const [processingResult, setProcessingResult] = useState<any>(null)
 
@@ -448,6 +450,44 @@ export default function SelfEnhancementPage() {
         {labels[status] || status}
       </Badge>
     )
+  }
+
+  // 模板相关函数
+  const selectTemplateForUse = (template: PromptTemplate) => {
+    setSelectedTemplate(template)
+    // 初始化变量值（使用默认值）
+    const initialVars: Record<string, string> = {}
+    template.variables.forEach(v => {
+      initialVars[v.name] = v.default || ''
+    })
+    setTemplateVariables(initialVars)
+    setRenderedPrompt('')
+  }
+
+  const updateTemplateVariable = (varName: string, value: string) => {
+    setTemplateVariables(prev => ({ ...prev, [varName]: value }))
+  }
+
+  const renderTemplate = () => {
+    if (!selectedTemplate) return
+
+    let rendered = selectedTemplate.content
+    selectedTemplate.variables.forEach(v => {
+      const value = templateVariables[v.name] || v.default || ''
+      rendered = rendered.replace(new RegExp(`\\{\\{${v.name}\\}\\}`, 'g'), value)
+    })
+    setRenderedPrompt(rendered)
+  }
+
+  const useTemplateInChat = () => {
+    if (!renderedPrompt) {
+      renderTemplate()
+    }
+
+    // 使用 localStorage 传递提示词到对话页面
+    const prompt = renderedPrompt || selectedTemplate?.content || ''
+    localStorage.setItem('pending_prompt', prompt)
+    window.location.href = '/'
   }
 
   return (
@@ -880,7 +920,7 @@ export default function SelfEnhancementPage() {
                           ? 'border-primary bg-primary/5'
                           : 'hover:bg-gray-50'
                       }`}
-                      onClick={() => setSelectedTemplate(template)}
+                      onClick={() => selectTemplateForUse(template)}
                     >
                       <CardContent className="p-4">
                         <div className="flex justify-between items-start mb-2">
@@ -915,7 +955,7 @@ export default function SelfEnhancementPage() {
                           ? 'border-primary bg-primary/5'
                           : 'hover:bg-gray-50'
                       }`}
-                      onClick={() => setSelectedTemplate(template)}
+                      onClick={() => selectTemplateForUse(template)}
                     >
                       <CardContent className="p-4">
                         <div className="flex justify-between items-start mb-2">
@@ -947,32 +987,76 @@ export default function SelfEnhancementPage() {
                   <h4 className="font-semibold">{selectedTemplate.title}</h4>
                   <p className="text-sm text-gray-500">{selectedTemplate.description}</p>
                 </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => copyToClipboard(selectedTemplate.content)}
-                >
-                  <Copy className="h-4 w-4 mr-1" />
-                  复制
-                </Button>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => copyToClipboard(selectedTemplate.content)}
+                  >
+                    <Copy className="h-4 w-4 mr-1" />
+                    复制
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => { setSelectedTemplate(null); setRenderedPrompt('') }}
+                  >
+                    ✕
+                  </Button>
+                </div>
               </div>
               <div className="mb-3">
-                <h5 className="text-sm font-medium mb-2">变量说明：</h5>
-                <div className="flex flex-wrap gap-2">
+                <h5 className="text-sm font-medium mb-2">填写变量：</h5>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   {selectedTemplate.variables.map(v => (
-                    <div key={v.name} className="text-xs bg-white p-2 rounded border">
-                      <code className="font-mono">{`{{${v.name}}}`}</code>
-                      <span className="text-gray-500 ml-2">{v.description}</span>
-                      {v.required === 'true' && (
-                        <Badge variant="destructive" className="ml-2 text-xs">必填</Badge>
-                      )}
+                    <div key={v.name} className="flex flex-col">
+                      <label className="text-xs text-gray-600 mb-1">
+                        <code className="font-mono bg-gray-100 px-1 rounded">{`{{${v.name}}}`}</code>
+                        <span className="ml-1">{v.description}</span>
+                        {v.required === 'true' && (
+                          <Badge variant="destructive" className="ml-1 text-xs">必填</Badge>
+                        )}
+                      </label>
+                      <Input
+                        type="text"
+                        placeholder={v.default || `请输入${v.description}`}
+                        value={templateVariables[v.name] || ''}
+                        onChange={(e) => updateTemplateVariable(v.name, e.target.value)}
+                        className="h-8 text-sm"
+                      />
                     </div>
                   ))}
                 </div>
               </div>
-              <pre className="text-xs whitespace-pre-wrap bg-white p-3 rounded border font-mono max-h-64 overflow-y-auto">
-                {selectedTemplate.content}
-              </pre>
+
+              {/* 操作按钮 */}
+              <div className="flex gap-2 mb-3">
+                <Button size="sm" onClick={renderTemplate}>
+                  预览渲染结果
+                </Button>
+                <Button size="sm" variant="default" onClick={useTemplateInChat}>
+                  <FileText className="h-4 w-4 mr-1" />
+                  使用此模板对话
+                </Button>
+              </div>
+
+              {/* 渲染结果预览 */}
+              {renderedPrompt && (
+                <div className="mb-3">
+                  <h5 className="text-sm font-medium mb-2">渲染结果预览：</h5>
+                  <pre className="text-xs whitespace-pre-wrap bg-green-50 p-3 rounded border font-mono max-h-40 overflow-y-auto">
+                    {renderedPrompt}
+                  </pre>
+                </div>
+              )}
+
+              {/* 原始模板 */}
+              <details className="text-xs text-gray-500">
+                <summary className="cursor-pointer hover:text-gray-700">查看原始模板</summary>
+                <pre className="mt-2 whitespace-pre-wrap bg-white p-3 rounded border font-mono max-h-40 overflow-y-auto">
+                  {selectedTemplate.content}
+                </pre>
+              </details>
             </div>
           )}
         </CardContent>
