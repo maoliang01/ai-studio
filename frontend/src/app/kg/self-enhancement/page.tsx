@@ -79,6 +79,13 @@ export default function SelfEnhancementPage() {
   const [articlesLoading, setArticlesLoading] = useState(false)
   const [articleStatusFilter, setArticleStatusFilter] = useState<string>('all')
 
+  // 趋势预测相关状态
+  const [predictionTopic, setPredictionTopic] = useState('')
+  const [predictionType, setPredictionType] = useState<string>('general')
+  const [predictionDays, setPredictionDays] = useState(30)
+  const [predictionResult, setPredictionResult] = useState<any>(null)
+  const [predictionLoading, setPredictionLoading] = useState(false)
+
   // 批量处理相关状态
   const [batchProcessing, setBatchProcessing] = useState(false)
   const [batchProgress, setBatchProgress] = useState<{
@@ -317,6 +324,49 @@ export default function SelfEnhancementPage() {
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text)
+  }
+
+  const runPrediction = async () => {
+    if (!predictionTopic.trim()) {
+      alert('请输入预测主题')
+      return
+    }
+
+    setPredictionLoading(true)
+    setPredictionResult(null)
+
+    try {
+      const response = await fetch(`/api/kg/prediction/${predictionType}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topic: predictionTopic,
+          time_range: predictionDays
+        })
+      })
+
+      if (response.ok) {
+        const result = await response.json()
+        setPredictionResult(result)
+      } else {
+        const error = await response.json()
+        alert(`预测失败: ${error.detail || '未知错误'}`)
+      }
+    } catch (error) {
+      console.error('Prediction failed:', error)
+      alert('预测失败，请检查网络连接')
+    } finally {
+      setPredictionLoading(false)
+    }
+  }
+
+  const getTrendLabel = (trend: string) => {
+    const labels: Record<string, { text: string; color: string }> = {
+      up: { text: '上升', color: 'text-green-600' },
+      down: { text: '下降', color: 'text-red-600' },
+      stable: { text: '稳定', color: 'text-gray-600' }
+    }
+    return labels[trend] || { text: trend, color: 'text-gray-600' }
   }
 
   const processArticle = async () => {
@@ -1010,6 +1060,118 @@ export default function SelfEnhancementPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* 趋势预测 */}
+      <Card className="mt-6">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <TrendingUp className="h-5 w-5" />
+            趋势预测
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-4">
+            {/* 预测输入 */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              <div className="md:col-span-2">
+                <label className="text-sm font-medium text-gray-700 mb-1 block">预测主题</label>
+                <Input
+                  placeholder="例如：人工智能、大语言模型、新能源汽车..."
+                  value={predictionTopic}
+                  onChange={(e) => setPredictionTopic(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium text-gray-700 mb-1 block">预测类型</label>
+                <select
+                  className="w-full h-10 px-3 rounded-md border border-input bg-background text-sm"
+                  value={predictionType}
+                  onChange={(e) => setPredictionType(e.target.value)}
+                >
+                  <option value="general">一般趋势</option>
+                  <option value="technology">技术趋势</option>
+                  <option value="sentiment">舆情预测</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-sm font-medium text-gray-700 mb-1 block">预测天数</label>
+                <Input
+                  type="number"
+                  min={7}
+                  max={90}
+                  value={predictionDays}
+                  onChange={(e) => setPredictionDays(parseInt(e.target.value) || 30)}
+                />
+              </div>
+            </div>
+
+            <Button onClick={runPrediction} disabled={predictionLoading}>
+              {predictionLoading ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  预测中...
+                </>
+              ) : (
+                <>
+                  <TrendingUp className="mr-2 h-4 w-4" />
+                  开始预测
+                </>
+              )}
+            </Button>
+
+            {/* 预测结果 */}
+            {predictionResult && (
+              <div className="mt-4 p-4 bg-gray-50 rounded-lg">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h4 className="font-semibold text-lg">{predictionResult.topic}</h4>
+                    <p className="text-sm text-gray-500">
+                      预测类型: {predictionResult.prediction_type} | 生成时间: {new Date(predictionResult.generated_at).toLocaleString()}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <div className={`text-2xl font-bold ${getTrendLabel(predictionResult.trend).color}`}>
+                      {getTrendLabel(predictionResult.trend).text}
+                    </div>
+                    <div className="text-sm text-gray-500">
+                      置信度: {(predictionResult.confidence * 100).toFixed(0)}%
+                    </div>
+                  </div>
+                </div>
+
+                {/* 影响因素 */}
+                {predictionResult.factors && predictionResult.factors.length > 0 && (
+                  <div className="mb-4">
+                    <h5 className="text-sm font-medium mb-2">影响因素：</h5>
+                    <div className="flex flex-wrap gap-2">
+                      {predictionResult.factors.map((factor: any, idx: number) => (
+                        <Badge key={idx} variant="outline">
+                          {factor.name || factor.type}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* 时间线预览 */}
+                {predictionResult.timeline && predictionResult.timeline.length > 0 && (
+                  <div>
+                    <h5 className="text-sm font-medium mb-2">趋势预测（前7天）：</h5>
+                    <div className="grid grid-cols-7 gap-2 text-center text-xs">
+                      {predictionResult.timeline.slice(0, 7).map((item: any, idx: number) => (
+                        <div key={idx} className="p-2 bg-white rounded border">
+                          <div className="text-gray-500">{item.date.slice(5)}</div>
+                          <div className="font-semibold">{item.predicted_value}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
 
       {/* 刷新按钮 */}
       <div className="mt-6 flex justify-center">

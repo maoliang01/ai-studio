@@ -457,8 +457,13 @@ def get_self_enhancement_service():
     if _self_enhancement_service is None:
         try:
             from app.services.kg.self_enhancement import KnowledgeSelfEnhancement
+            from app.core.llm import LLMService
             neo4j = Neo4jService()
-            _self_enhancement_service = KnowledgeSelfEnhancement(kg_service=neo4j)
+            llm_service = LLMService()
+            _self_enhancement_service = KnowledgeSelfEnhancement(
+                kg_service=neo4j,
+                llm_client=llm_service
+            )
         except Exception as e:
             logger.warning(f"初始化自增强服务失败: {e}")
     return _self_enhancement_service
