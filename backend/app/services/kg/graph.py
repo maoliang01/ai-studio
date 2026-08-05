@@ -2108,6 +2108,7 @@ class Neo4jService:
                 "articles": "MATCH (a:Article) RETURN count(a) as count",
                 "entities": "MATCH (e:Entity) RETURN count(e) as count",
                 "orphan_entities": "MATCH (e:Entity) WHERE NOT (e)<-[:CONTAINS_ENTITY]-(:Article) RETURN count(e) as count",
+                "entities_without_relations": "MATCH (e:Entity) WHERE NOT (e)-[:RELATES_TO]-(:Entity) RETURN count(e) as count",
                 "article_entity_links": "MATCH ()-[r:CONTAINS_ENTITY]->() RETURN count(r) as count",
                 "entity_relations": "MATCH ()-[r:RELATES_TO]->() RETURN count(r) as count",
             }
@@ -2352,23 +2353,40 @@ class Neo4jService:
         async with self._driver.session() as session:
             # 导出节点(同时取 entity_type 和 subtype)
             nodes_query = """
-            MATCH (n) WHERE 'Article' IN labels(n) OR 'Entity' IN labels(n)
-            RETURN n, labels(n) as labels
+            MATCH (n)
+            WHERE ('Article' IN labels(n) OR 'Entity' IN labels(n))
+              AND coalesce(n.subtype, '') <> 'KEYWORD_FALLBACK'
+            OPTIONAL MATCH (n)-[r]-(neighbor)
+            WHERE type(r) IN ['CONTAINS_ENTITY', 'RELATES_TO']
+              AND ('Article' IN labels(neighbor) OR 'Entity' IN labels(neighbor))
+              AND coalesce(neighbor.subtype, '') <> 'KEYWORD_FALLBACK'
+            WITH n, labels(n) AS labels, count(r) AS degree
+            WHERE degree > 0
+            RETURN n, labels, elementId(n) AS element_id, degree
+            ORDER BY degree DESC, coalesce(n.updated_at, n.created_at) DESC
             LIMIT $limit
             """
-            # 导出边
             edges_query = """
-            MATCH ()-[r]->()
+            MATCH (source)-[r]->(target)
             WHERE type(r) IN ['CONTAINS_ENTITY', 'RELATES_TO']
-            RETURN r, startNode(r) as source, endNode(r) as target
-            LIMIT $limit
+              AND elementId(source) IN $node_ids
+              AND elementId(target) IN $node_ids
+            RETURN r, source, target, type(r) AS rel_type
+            ORDER BY CASE type(r) WHEN 'RELATES_TO' THEN 0 ELSE 1 END,
+                     coalesce(r.support_count, 0) DESC
+            LIMIT $edge_limit
             """
 
             try:
                 nodes_result = await session.run(nodes_query, {"limit": limit})
                 nodes_records = await nodes_result.data()
 
-                edges_result = await session.run(edges_query, {"limit": limit})
+                node_ids = [record["element_id"] for record in nodes_records]
+                edge_limit = min(max(limit * 6, limit), 30000)
+                edges_result = await session.run(
+                    edges_query,
+                    {"node_ids": node_ids, "edge_limit": edge_limit},
+                )
                 edges_records = await edges_result.data()
 
                 nodes = []
@@ -2395,14 +2413,9 @@ class Neo4jService:
 
                 edges = []
                 for record in edges_records:
-                    # Neo4j 返回的关系格式: (start_node, type, end_node) 元组
-                    rel_tuple = record["r"]
-                    if isinstance(rel_tuple, tuple) and len(rel_tuple) == 3:
-                        source_dict, rel_type, target_dict = rel_tuple
-                    else:
-                        source_dict = record.get("source", {})
-                        target_dict = record.get("target", {})
-                        rel_type = rel_tuple.get("type", "RELATES_TO") if isinstance(rel_tuple, dict) else "RELATES_TO"
+                    source_dict = record.get("source", {})
+                    target_dict = record.get("target", {})
+                    rel_type = record.get("rel_type", "RELATES_TO")
 
                     edges.append({
                         "source": str(source_dict.get("id", "")) or source_dict.get("name", ""),
@@ -2411,6 +2424,12 @@ class Neo4jService:
                         "data": {"type": rel_type}
                     })
 
+                connected_ids = {
+                    endpoint
+                    for edge in edges
+                    for endpoint in (edge["source"], edge["target"])
+                }
+                nodes = [node for node in nodes if node["id"] in connected_ids]
                 return {"nodes": nodes, "edges": edges}
             except Exception as e:
                 logger.error(f"导出图谱数据失败: {e}")

@@ -18,7 +18,6 @@ from sqlalchemy.orm import Session
 from app.core.database import get_session_local
 from app.models.article import Article
 from app.services.kg import Neo4jService, EntityExtractor
-from app.services.kg.graph import EntityNode
 
 logger = logging.getLogger("ai-studio")
 
@@ -55,39 +54,6 @@ def get_sync_state() -> dict:
     """供前端轮询:取同步进度快照"""
     with _sync_state_lock:
         return dict(_sync_state)
-
-
-def build_keyword_fallback_entities(article: Article, limit: int = 12) -> list[EntityNode]:
-    """Build entity-only fallback data from persisted article keywords."""
-    organization_suffixes = ("院", "所", "中心", "大学", "公司", "集团", "实验室")
-    technology_terms = ("技术", "系统", "平台", "模型", "算法", "遥感", "卫星", "人工智能")
-    entities = []
-    seen = set()
-    keyword_links = sorted(
-        article.keywords or [],
-        key=lambda item: item.priority or 0,
-        reverse=True,
-    )
-    for link in keyword_links:
-        name = (link.keyword.name or "").strip() if link.keyword else ""
-        if len(name) < 2 or name in seen:
-            continue
-        seen.add(name)
-        entity_type = "CONCEPT"
-        if name.endswith(organization_suffixes):
-            entity_type = "ORGANIZATION"
-        elif any(term in name for term in technology_terms):
-            entity_type = "TECHNOLOGY"
-        entities.append(EntityNode(
-            name=name,
-            entity_type=entity_type,
-            description="文章关键词降级提取",
-            subtype="KEYWORD_FALLBACK",
-            source_articles=[str(article.id)],
-        ))
-        if len(entities) >= limit:
-            break
-    return entities
 
 
 def recover_interrupted_articles(db: Session) -> int:
@@ -210,13 +176,10 @@ async def _extract_and_link_entities_inner(article_id: str) -> bool:
 
         is_partial = extraction_error is not None
         if is_partial:
-            entities = build_keyword_fallback_entities(article)
+            # Keywords are metadata, not verified graph entities. On extraction
+            # failure keep the existing graph intact and expose a retryable state.
+            entities = []
             relations = []
-            if not entities:
-                article.kg_status = "failed"
-                article.kg_error_message = extraction_error
-                session.commit()
-                return False
         else:
             entities = extractor.deduplicate_entities(result.entities)
             relations = result.relations
@@ -225,8 +188,6 @@ async def _extract_and_link_entities_inner(article_id: str) -> bool:
         async with _kg_rebuild_lock:
             neo4j = build_neo4j()
             try:
-                if not await neo4j.clear_article_knowledge(article.id):
-                    raise RuntimeError("清理文章旧知识失败")
                 await neo4j.upsert_article_metadata(
                     article_id=article.id,
                     title=article.title or "",
@@ -236,12 +197,15 @@ async def _extract_and_link_entities_inner(article_id: str) -> bool:
                     kg_status="partial" if is_partial else "success"
                 )
 
-                # 图替换必须串行，避免并发清理把共享实体误判为孤立实体。
-                await neo4j.batch_create_entities_and_relations(
-                    article_id=article.id,
-                    entities=entities,
-                    relations=relations
-                )
+                if not is_partial:
+                    if not await neo4j.clear_article_knowledge(article.id):
+                        raise RuntimeError("清理文章旧知识失败")
+                    # 图替换必须串行，避免并发清理把共享实体误判为孤立实体。
+                    await neo4j.batch_create_entities_and_relations(
+                        article_id=article.id,
+                        entities=entities,
+                        relations=relations
+                    )
             finally:
                 await neo4j.close()
 
@@ -249,7 +213,7 @@ async def _extract_and_link_entities_inner(article_id: str) -> bool:
         article.kg_processed_at = datetime.utcnow()
         article.kg_content_hash = article.content_hash
         article.kg_error_message = (
-            f"模型抽取未完成，已使用关键词降级：{extraction_error}"[:500]
+            f"模型抽取未完成，已保留原有图谱并等待重试：{extraction_error}"[:500]
             if is_partial else None
         )
         session.commit()

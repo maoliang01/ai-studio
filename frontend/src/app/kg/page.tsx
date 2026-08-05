@@ -323,7 +323,9 @@ function KnowledgeGraphPageContent() {
   const [exploreLoading, setExploreLoading] = useState(false);
 
   const svgRef = useRef<SVGSVGElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const simulationRef = useRef<any>(null);
+  const positionedNodesRef = useRef<Array<GraphNode & d3.SimulationNodeDatum>>([]);
 
   // 获取 URL 参数
   const searchParams = useSearchParams();
@@ -762,38 +764,47 @@ function KnowledgeGraphPageContent() {
 
   // D3.js 可视化渲染
   useEffect(() => {
-    if (!svgRef.current || graphData.nodes.length === 0) return;
+    if (!svgRef.current || !canvasRef.current || graphData.nodes.length === 0) return;
 
-    const svg = d3.select(svgRef.current);
-    const width = svgRef.current.clientWidth;
-    const height = svgRef.current.clientHeight;
+    const svgElement = svgRef.current;
+    const canvas = canvasRef.current;
+    const svg = d3.select(svgElement);
+    const width = svgElement.clientWidth;
+    const height = svgElement.clientHeight;
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+    const context = canvas.getContext("2d");
+    if (!context || width === 0 || height === 0) return;
+
+    canvas.width = Math.round(width * pixelRatio);
+    canvas.height = Math.round(height * pixelRatio);
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
 
     // 清空已有内容
     svg.selectAll("*").remove();
 
     // 创建缩放容器
-    const g = svg.append("g");
+    const g = svg.append("g").attr("class", "kg-root");
+    let currentTransform = d3.zoomIdentity;
+    let frameId: number | null = null;
+    let framePending = false;
 
-    // 添加缩放功能
-    const zoom = d3.zoom<SVGSVGElement, unknown>()
-      .scaleExtent([0.1, 4])
-      .on("zoom", (event) => {
-        g.attr("transform", event.transform);
-      });
-
-    svg.call(zoom);
-
-    // 过滤节点
-    let nodes = graphData.nodes;
-    let edges = graphData.edges;
+    // D3 会把边的端点改成节点对象，克隆数据以避免污染 React state。
+    let nodes: Array<GraphNode & d3.SimulationNodeDatum> = graphData.nodes.map((node) => ({
+      ...node,
+      data: { ...node.data },
+    }));
+    let edges: Array<GraphEdge & d3.SimulationLinkDatum<GraphNode & d3.SimulationNodeDatum>> =
+      graphData.edges.map((edge) => ({ ...edge, data: { ...edge.data } }));
 
     if (entityTypeFilter) {
       nodes = nodes.filter((n) => n.type === entityTypeFilter);
       const nodeIds = new Set(nodes.map((n) => n.id));
       edges = edges.filter(
-        (e) => nodeIds.has(e.source) && nodeIds.has(e.target)
+        (e) => nodeIds.has(String(e.source)) && nodeIds.has(String(e.target))
       );
     }
+    positionedNodesRef.current = nodes;
 
     // 节点颜色映射
     // - 顶层用 entity_type 区分(PERSON/TECHNOLOGY 等)
@@ -842,25 +853,89 @@ function KnowledgeGraphPageContent() {
       return base;
     };
 
-    // 力导向模拟
-    const simulation = d3.forceSimulation(nodes as any)
-      .force("link", d3.forceLink(edges as any).id((d: any) => d.id).distance(100))
-      .force("charge", d3.forceManyBody().strength(-300))
+    const degree = new Map<string, number>();
+    edges.forEach((edge) => {
+      const source = String(edge.source);
+      const target = String(edge.target);
+      degree.set(source, (degree.get(source) || 0) + 1);
+      degree.set(target, (degree.get(target) || 0) + 1);
+    });
+    const labelledNodeIds = new Set(
+      [...nodes]
+        .sort((left, right) => (degree.get(right.id) || 0) - (degree.get(left.id) || 0))
+        .slice(0, Math.min(90, nodes.length))
+        .map((node) => node.id)
+    );
+
+    // 连线用 Canvas 一次性绘制，节点保留 SVG 交互。
+    const drawEdges = () => {
+      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+      context.clearRect(0, 0, width, height);
+      context.save();
+      context.translate(currentTransform.x, currentTransform.y);
+      context.scale(currentTransform.k, currentTransform.k);
+      context.beginPath();
+      for (const edge of edges) {
+        const source = edge.source as GraphNode & d3.SimulationNodeDatum;
+        const target = edge.target as GraphNode & d3.SimulationNodeDatum;
+        if (source.x == null || source.y == null || target.x == null || target.y == null) continue;
+        context.moveTo(source.x, source.y);
+        context.lineTo(target.x, target.y);
+      }
+      context.strokeStyle = "rgba(148, 163, 184, 0.55)";
+      context.lineWidth = 1.25 / Math.max(currentTransform.k, 0.5);
+      context.stroke();
+      context.restore();
+    };
+
+    let drawNodePositions = () => undefined;
+    const scheduleFrame = () => {
+      if (framePending) return;
+      framePending = true;
+      frameId = window.requestAnimationFrame(() => {
+        framePending = false;
+        drawEdges();
+        drawNodePositions();
+      });
+    };
+
+    const zoom = d3.zoom<SVGSVGElement, unknown>()
+      .scaleExtent([0.1, 4])
+      .on("zoom", (event) => {
+        currentTransform = event.transform;
+        g.attr("transform", currentTransform.toString());
+        scheduleFrame();
+      });
+    svg.call(zoom);
+
+    const simulation = d3.forceSimulation(nodes)
+      .alphaDecay(0.055)
+      .alphaMin(0.025)
+      .velocityDecay(0.48)
+      .force(
+        "link",
+        d3.forceLink<GraphNode & d3.SimulationNodeDatum, typeof edges[number]>(edges)
+          .id((node) => node.id)
+          .distance(82)
+          .strength(0.14)
+      )
+      .force(
+        "charge",
+        d3.forceManyBody<GraphNode & d3.SimulationNodeDatum>()
+          .strength(nodes.length > 350 ? -115 : -170)
+          .distanceMax(900)
+          .theta(0.9)
+      )
       .force("center", d3.forceCenter(width / 2, height / 2))
-      .force("collision", d3.forceCollide().radius(40));
+      .force(
+        "collision",
+        d3.forceCollide<GraphNode & d3.SimulationNodeDatum>()
+          .radius((node) => node.type === "Article" ? 19 : 14)
+          .strength(0.65)
+          .iterations(1)
+      );
 
     simulationRef.current = simulation;
-
-    // 绘制边
-    const link = g
-      .append("g")
-      .selectAll("line")
-      .data(edges)
-      .enter()
-      .append("line")
-      .attr("stroke", "#94a3b8")
-      .attr("stroke-opacity", 0.6)
-      .attr("stroke-width", 1.5);
 
     // 绘制节点
     const node = g
@@ -869,6 +944,7 @@ function KnowledgeGraphPageContent() {
       .data(nodes)
       .enter()
       .append("circle")
+      .attr("class", "kg-node")
       .attr("r", (d: GraphNode) => d.type === "Article" ? 12 : 8)
       .attr("fill", (d: GraphNode) => nodeFill(d))
       .attr("stroke", "#fff")
@@ -881,15 +957,19 @@ function KnowledgeGraphPageContent() {
         handleNodeClick(d);
       });
 
+    node.append("title").text((node) => node.label);
+
     // 添加标签(实体节点带 subtype 时,后面括号标注中文)
     const label = g
       .append("g")
+      .attr("class", "kg-labels")
       .selectAll("text")
-      .data(nodes)
+      .data(nodes.filter((node) => labelledNodeIds.has(node.id)))
       .enter()
       .append("text")
+      .attr("class", "kg-label")
       .text((d: GraphNode) => {
-        const st = (d.data as any)?.subtype;
+        const st = d.data?.subtype as string | undefined;
         if (st && d.type !== "Article") {
           const stLabel = SUBTYPE_LABELS[st] || st;
           return `${d.label.substring(0, 12)}[${stLabel}]`;
@@ -899,43 +979,84 @@ function KnowledgeGraphPageContent() {
       .attr("font-size", 10)
       .attr("fill", "#475569")
       .attr("text-anchor", "middle")
-      .attr("dy", 20);
+      .attr("dy", 20)
+      .style("pointer-events", "none")
+      .style("opacity", 0);
+
+    g.append("g").attr("class", "kg-highlight-labels");
 
     // 拖拽事件
-    const drag = d3.drag<SVGCircleElement, GraphNode>()
-      .on("start", (event, d: any) => {
-        if (!event.active) simulation.alphaTarget(0.3).restart();
+    const drag = d3.drag<SVGCircleElement, GraphNode & d3.SimulationNodeDatum>()
+      .on("start", (event, d) => {
+        if (!event.active) simulation.alpha(0.16).alphaTarget(0.06).restart();
         d.fx = d.x;
         d.fy = d.y;
       })
-      .on("drag", (event, d: any) => {
+      .on("drag", (event, d) => {
         d.fx = event.x;
         d.fy = event.y;
       })
-      .on("end", (event, d: any) => {
+      .on("end", (event, d) => {
         if (!event.active) simulation.alphaTarget(0);
         d.fx = null;
         d.fy = null;
       });
 
-    node.call(drag as any);
+    node.call(drag);
 
-    // 更新位置
+    drawNodePositions = () => {
+      node.attr("cx", (d) => d.x || 0).attr("cy", (d) => d.y || 0);
+      label.attr("x", (d) => d.x || 0).attr("y", (d) => d.y || 0);
+      g.select<SVGGElement>(".kg-highlight-labels")
+        .selectAll<SVGTextElement, GraphNode & d3.SimulationNodeDatum>("text")
+        .attr("x", (node) => node.x || 0)
+        .attr("y", (node) => node.y || 0);
+    };
+
     simulation.on("tick", () => {
-      link
-        .attr("x1", (d: any) => d.source.x)
-        .attr("y1", (d: any) => d.source.y)
-        .attr("x2", (d: any) => d.target.x)
-        .attr("y2", (d: any) => d.target.y);
-
-      node.attr("cx", (d: any) => d.x).attr("cy", (d: any) => d.y);
-      label.attr("x", (d: any) => d.x).attr("y", (d: any) => d.y);
+      scheduleFrame();
+    });
+    simulation.on("end", () => {
+      scheduleFrame();
+      label.style("opacity", 1);
     });
 
     return () => {
       simulation.stop();
+      if (frameId !== null) window.cancelAnimationFrame(frameId);
+      context.setTransform(1, 0, 0, 1, 0, 0);
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      positionedNodesRef.current = [];
     };
-  }, [graphData, entityTypeFilter, highlightedNodeIds]);
+  }, [graphData, entityTypeFilter]);
+
+  // 高亮只更新样式和少量标签，不销毁布局或重启模拟。
+  useEffect(() => {
+    if (!svgRef.current) return;
+    const svg = d3.select(svgRef.current);
+    svg.selectAll<SVGCircleElement, GraphNode>("circle.kg-node")
+      .attr("stroke-width", (node) => highlightedNodeIds.has(node.id) ? 4 : 2)
+      .attr("stroke-opacity", (node) => highlightedNodeIds.has(node.id) ? 1 : 0.6)
+      .style("filter", (node) => highlightedNodeIds.has(node.id)
+        ? "drop-shadow(0 0 8px rgba(79, 70, 229, 0.8))"
+        : "none");
+
+    const highlightedNodes = positionedNodesRef.current.filter((node) => highlightedNodeIds.has(node.id));
+    svg.select<SVGGElement>("g.kg-highlight-labels")
+      .selectAll<SVGTextElement, GraphNode & d3.SimulationNodeDatum>("text")
+      .data(highlightedNodes, (node) => node.id)
+      .join("text")
+      .attr("class", "kg-highlight-label")
+      .attr("x", (node) => node.x || 0)
+      .attr("y", (node) => node.y || 0)
+      .attr("dy", -15)
+      .attr("text-anchor", "middle")
+      .attr("font-size", 11)
+      .attr("font-weight", 600)
+      .attr("fill", "#312e81")
+      .style("pointer-events", "none")
+      .text((node) => node.label.substring(0, 24));
+  }, [highlightedNodeIds]);
 
   // 实体类型中英文映射
   const ENTITY_TYPE_LABELS: Record<string, string> = {
@@ -1947,11 +2068,16 @@ function KnowledgeGraphPageContent() {
               <p className="text-sm">点击“批量处理文章”开始构建知识图谱</p>
             </div>
           ) : (
-            <svg
-              ref={svgRef}
-              className="w-full h-full"
-              style={{ background: "#f8fafc" }}
-            />
+            <>
+              <canvas
+                ref={canvasRef}
+                className="pointer-events-none absolute inset-0 h-full w-full bg-slate-50"
+              />
+              <svg
+                ref={svgRef}
+                className="absolute inset-0 h-full w-full"
+              />
+            </>
           )}
         </div>
 

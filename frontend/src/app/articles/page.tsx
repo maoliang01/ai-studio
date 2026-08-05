@@ -39,8 +39,67 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Loader2, Search, Trash2, Eye, ChevronLeft, ChevronRight, RefreshCw, Database, Filter, X, FileText, Download, AlertTriangle, Network, Sparkles } from "lucide-react";
+import { Loader2, Search, Trash2, Eye, ChevronLeft, ChevronRight, RefreshCw, Database, Filter, X, FileText, Download, AlertTriangle, Network, Sparkles, ArrowUp, ArrowDown, ArrowUpDown, MoreHorizontal } from "lucide-react";
 import { toast } from "sonner";
+
+type ArticleSortKey =
+  | "title"
+  | "source_name"
+  | "source_type"
+  | "url"
+  | "category_name"
+  | "style"
+  | "published_at"
+  | "summary"
+  | "kg_status";
+
+type SortDirection = "asc" | "desc";
+
+interface SortableTableHeadProps {
+  label: string;
+  sortKey: ArticleSortKey;
+  activeKey: ArticleSortKey;
+  direction: SortDirection;
+  onSort: (key: ArticleSortKey) => void;
+  className?: string;
+}
+
+function SortableTableHead({
+  label,
+  sortKey,
+  activeKey,
+  direction,
+  onSort,
+  className,
+}: SortableTableHeadProps) {
+  const isActive = sortKey === activeKey;
+  const nextDirection = isActive && direction === "asc" ? "倒序" : "正序";
+
+  return (
+    <TableHead
+      className={className}
+      aria-sort={isActive ? (direction === "asc" ? "ascending" : "descending") : "none"}
+    >
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className="-ml-2 inline-flex h-9 items-center gap-1.5 rounded px-2 font-medium whitespace-nowrap hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        title={`按${label}${nextDirection}排列`}
+      >
+        <span>{label}</span>
+        {isActive ? (
+          direction === "asc" ? (
+            <ArrowUp className="h-3.5 w-3.5" aria-hidden="true" />
+          ) : (
+            <ArrowDown className="h-3.5 w-3.5" aria-hidden="true" />
+          )
+        ) : (
+          <ArrowUpDown className="h-3.5 w-3.5 opacity-45" aria-hidden="true" />
+        )}
+      </button>
+    </TableHead>
+  );
+}
 
 // 格式化数字
 function formatNumber(num: number | undefined | null): string {
@@ -87,6 +146,10 @@ function ArticlesPageContent() {
   const [stats, setStats] = useState<ArticleStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
+  const [sortConfig, setSortConfig] = useState<{
+    key: ArticleSortKey;
+    direction: SortDirection;
+  }>({ key: "published_at", direction: "desc" });
 
   function clearHighlight() {
     const body = document.querySelector("[data-article-body]");
@@ -280,12 +343,18 @@ function ArticlesPageContent() {
   ];
 
   // 加载文章列表
-  const loadArticles = async (pageNum: number = 1) => {
+  const loadArticles = async (
+    pageNum: number = 1,
+    sortKey: ArticleSortKey = sortConfig.key,
+    sortDirection: SortDirection = sortConfig.direction
+  ) => {
     setLoading(true);
     try {
       const params = new URLSearchParams({
         page: String(pageNum),
         page_size: "20",
+        sort_by: sortKey,
+        sort_order: sortDirection,
       });
       if (searchQuery.trim()) params.set("q", searchQuery);
       if (categoryFilter) params.set("category_id", categoryFilter);
@@ -328,6 +397,14 @@ function ArticlesPageContent() {
     }
   };
 
+  const handleSort = (key: ArticleSortKey) => {
+    const direction: SortDirection =
+      sortConfig.key === key && sortConfig.direction === "asc" ? "desc" : "asc";
+    setSortConfig({ key, direction });
+    setSelectedIds(new Set());
+    loadArticles(1, key, direction);
+  };
+
   const backfillMetadata = async () => {
     if (!confirm("补全缺失的摘要、作者、关键词和字数？已有内容不会被覆盖。")) return;
     setIsBackfillingMetadata(true);
@@ -363,6 +440,8 @@ function ArticlesPageContent() {
       const params = new URLSearchParams({
         q: searchQuery,
         page_size: "50",
+        sort_by: sortConfig.key,
+        sort_order: sortConfig.direction,
       });
       if (categoryFilter) params.set("category_id", categoryFilter);
       if (styleFilter) params.set("style", styleFilter);
@@ -397,6 +476,11 @@ function ArticlesPageContent() {
 
   // 是否有筛选条件
   const hasFilters = categoryFilter || styleFilter || sourceTypeFilter || searchQuery.trim();
+  const displayedSearchTerms = searchQuery
+    .trim()
+    .split(/[\s,，、;；]+/)
+    .filter(Boolean)
+    .filter((term, index, terms) => terms.findIndex((item) => item.toLocaleLowerCase() === term.toLocaleLowerCase()) === index);
 
   // 删除文章
   const handleDelete = async (article: Article) => {
@@ -580,7 +664,7 @@ function ArticlesPageContent() {
   };
 
   return (
-    <div className="container mx-auto p-6 space-y-6">
+    <div className="w-full max-w-none space-y-6 p-4 lg:p-6">
       {/* 头部 */}
       <div className="flex items-center justify-between">
         <div>
@@ -648,14 +732,14 @@ function ArticlesPageContent() {
       )}
 
       {/* 搜索和筛选栏 */}
-      <Card>
+      <Card className="min-w-0">
         <CardContent className="pt-6">
           <div className="flex flex-wrap gap-2 items-center">
             {/* 搜索框 */}
             <div className="relative flex-1 min-w-[200px]">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
               <Input
-                placeholder="搜索标题、内容、摘要、关键词..."
+                placeholder="搜索标题、关键词..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && applyFilters()}
@@ -797,19 +881,19 @@ function ArticlesPageContent() {
                   <X className="w-3 h-3 cursor-pointer" onClick={() => setSourceTypeFilter("")} />
                 </Badge>
               )}
-              {searchQuery && (
-                <Badge variant="secondary" className="gap-1">
-                  关键词: {searchQuery}
-                  <X className="w-3 h-3 cursor-pointer" onClick={() => setSearchQuery("")} />
+              {displayedSearchTerms.map((term) => (
+                <Badge key={term.toLocaleLowerCase()} variant="secondary" className="gap-1">
+                  关键词: {term}
+                  <X className="w-3 h-3 cursor-pointer" onClick={() => setSearchQuery(displayedSearchTerms.filter((item) => item !== term).join(" "))} />
                 </Badge>
-              )}
+              ))}
             </div>
           )}
         </CardContent>
       </Card>
 
       {/* 文章列表 */}
-      <Card>
+      <Card className="min-w-0">
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
             <div>
@@ -846,17 +930,17 @@ function ArticlesPageContent() {
             )}
           </div>
           </CardHeader>
-        <CardContent>
+        <CardContent className="px-3 sm:px-4">
           {loading ? (
             <div className="flex items-center justify-center h-40">
               <Loader2 className="w-8 h-8 animate-spin" />
             </div>
           ) : (
             <>
-              <Table className="min-w-[1480px]">
+              <Table className="min-w-[1624px] table-fixed">
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="w-10">
+                    <TableHead className="w-[52px]">
                       <Checkbox
                         checked={allSelected}
                         indeterminate={someSelected}
@@ -864,22 +948,22 @@ function ArticlesPageContent() {
                         aria-label="全选"
                       />
                     </TableHead>
-                    <TableHead className="w-[250px]">标题</TableHead>
-                    <TableHead className="w-[clamp(160px,12vw,220px)] min-w-[160px] whitespace-nowrap">来源</TableHead>
-                    <TableHead>信源</TableHead>
-                    <TableHead className="w-[200px]">发布链接</TableHead>
-                    <TableHead>分类</TableHead>
-                    <TableHead>文体</TableHead>
-                    <TableHead className="w-[120px]">发布时间</TableHead>
-                    <TableHead className="w-[200px]">原文信息</TableHead>
-                    <TableHead className="w-[130px]">KG 状态</TableHead>
-                    <TableHead className="text-right">操作</TableHead>
+                    <SortableTableHead label="标题" sortKey="title" activeKey={sortConfig.key} direction={sortConfig.direction} onSort={handleSort} className="w-[280px]" />
+                    <SortableTableHead label="来源" sortKey="source_name" activeKey={sortConfig.key} direction={sortConfig.direction} onSort={handleSort} className="w-[180px]" />
+                    <SortableTableHead label="信源" sortKey="source_type" activeKey={sortConfig.key} direction={sortConfig.direction} onSort={handleSort} className="w-[100px]" />
+                    <SortableTableHead label="发布链接" sortKey="url" activeKey={sortConfig.key} direction={sortConfig.direction} onSort={handleSort} className="w-[220px]" />
+                    <SortableTableHead label="分类" sortKey="category_name" activeKey={sortConfig.key} direction={sortConfig.direction} onSort={handleSort} className="w-[110px]" />
+                    <SortableTableHead label="文体" sortKey="style" activeKey={sortConfig.key} direction={sortConfig.direction} onSort={handleSort} className="w-[110px]" />
+                    <SortableTableHead label="发布时间" sortKey="published_at" activeKey={sortConfig.key} direction={sortConfig.direction} onSort={handleSort} className="w-[130px]" />
+                    <SortableTableHead label="原文信息" sortKey="summary" activeKey={sortConfig.key} direction={sortConfig.direction} onSort={handleSort} className="w-[220px]" />
+                    <SortableTableHead label="KG 状态" sortKey="kg_status" activeKey={sortConfig.key} direction={sortConfig.direction} onSort={handleSort} className="w-[150px]" />
+                    <TableHead className="sticky right-0 z-20 w-[72px] bg-muted/95 text-right shadow-[-8px_0_12px_-12px_rgba(0,0,0,0.45)]">操作</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {articles.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={10} className="text-center text-muted-foreground">
+                      <TableCell colSpan={11} className="text-center text-muted-foreground">
                         暂无文章
                       </TableCell>
                     </TableRow>
@@ -887,7 +971,7 @@ function ArticlesPageContent() {
                     articles.map((article) => {
                       const isSelected = selectedIds.has(article.id);
                       return (
-                      <TableRow key={article.id} className={isSelected ? "bg-primary/5" : undefined}>
+                      <TableRow key={article.id} className={`group ${isSelected ? "bg-primary/5" : ""}`}>
                         <TableCell>
                           <Checkbox
                             checked={isSelected}
@@ -920,7 +1004,7 @@ function ArticlesPageContent() {
                             )}
                           </div>
                         </TableCell>
-                        <TableCell className="w-[clamp(160px,12vw,220px)] min-w-[160px] max-w-[220px] text-sm">
+                        <TableCell className="w-[180px] text-sm">
                           {article.sourceName ? (
                             <span className="block truncate whitespace-nowrap font-medium" title={article.sourceName}>{article.sourceName}</span>
                           ) : (
@@ -1014,11 +1098,15 @@ function ArticlesPageContent() {
                             )}
                           </div>
                         </TableCell>
-                        <TableCell className="text-right">
+                        <TableCell className={`sticky right-0 z-10 w-[72px] text-right shadow-[-8px_0_12px_-12px_rgba(0,0,0,0.45)] group-hover:bg-muted ${isSelected ? "bg-primary/5" : "bg-card"}`}>
                           <DropdownMenu>
-                            <DropdownMenuTrigger className="inline-flex items-center justify-center rounded-md text-sm font-medium hover:bg-accent hover:text-accent-foreground h-9 w-9 p-0">
-                                ...
-                              </DropdownMenuTrigger>
+                            <DropdownMenuTrigger
+                              className="inline-flex h-9 w-9 items-center justify-center rounded-md hover:bg-accent hover:text-accent-foreground"
+                              aria-label={`打开 ${article.title || "无标题"} 的操作菜单`}
+                              title="更多操作"
+                            >
+                              <MoreHorizontal className="h-4 w-4" />
+                            </DropdownMenuTrigger>
                             <DropdownMenuContent align="end">
                               <DropdownMenuItem onClick={() => setSelectedArticle(article)}>
                                 <Eye className="w-4 h-4 mr-2" />

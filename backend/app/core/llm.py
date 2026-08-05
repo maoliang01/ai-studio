@@ -137,6 +137,11 @@ class LLMService:
         """发送对话请求，返回流式响应"""
         # 如果前端传递了配置，直接使用它
         config = model_config
+        if not config and model_id:
+            config = self.get_model_config(model_id)
+            if not config:
+                yield f"[错误] 模型不存在: {model_id}"
+                return
         if not config:
             global_config = get_llm_config()
             default_id = global_config.default_llm
@@ -204,6 +209,10 @@ class LLMService:
         """发送对话请求，返回完整响应（非流式）"""
         # 优先使用前端传递的配置
         config = model_config
+        if not config and model_id:
+            config = self.get_model_config(model_id)
+            if not config:
+                return f"[错误] 模型不存在: {model_id}"
         if not config:
             global_config = get_llm_config()
             default_id = global_config.default_llm
@@ -213,8 +222,6 @@ class LLMService:
 
         api_key = config.get("api_key", "")
         base_url = config.get("base_url", "")
-        model_name = config.get("model_name", "gpt-4o")
-
         if not api_key:
             return "[错误] API Key 未配置，请先在设置中配置模型"
 
@@ -232,9 +239,12 @@ class LLMService:
             if response.choices and response.choices[0].message.content:
                 content = response.choices[0].message.content
             # 处理 reasoning_content (如果有)
-            if hasattr(response.choices[0].message, 'reasoning_content') and response.choices[0].message.reasoning_content:
-                reasoning = response.choices[0].message.reasoning_content
-                content = f"**思考过程:**\n{reasoning}\n\n**回答:**\n{content}"
+            if (
+                not content
+                and hasattr(response.choices[0].message, 'reasoning_content')
+                and response.choices[0].message.reasoning_content
+            ):
+                content = response.choices[0].message.reasoning_content
 
             return content
 

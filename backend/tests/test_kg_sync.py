@@ -14,9 +14,9 @@ from app.services.kg_sync import (
     on_article_updated,
     on_article_deleted,
     extract_and_link_entities,
+    _extract_and_link_entities_inner,
     reconcile,
     recover_interrupted_articles,
-    build_keyword_fallback_entities,
 )
 
 
@@ -81,22 +81,24 @@ def test_recover_interrupted_articles_marks_processing_pending():
     db.commit.assert_called_once()
 
 
-def test_keyword_fallback_builds_entities_without_relations():
-    article = MagicMock()
-    article.id = "article-1"
-    article.keywords = []
-    for priority, name in [(10, "空天院"), (8, "遥感技术"), (1, "空天院")]:
-        link = MagicMock()
-        link.priority = priority
-        link.keyword.name = name
-        article.keywords.append(link)
+@pytest.mark.asyncio
+async def test_extraction_failure_preserves_existing_graph(article, mock_neo4j):
+    session = MagicMock()
+    session.query.return_value.filter.return_value.first.return_value = article
+    failed_result = MagicMock(error="invalid JSON")
 
-    entities = build_keyword_fallback_entities(article)
+    with patch("app.services.kg_sync.get_session_local", return_value=lambda: session), \
+         patch("app.services.kg_sync.EntityExtractor") as extractor_class, \
+         patch("app.services.knowledge_jobs.enqueue_article_enhancement"):
+        extractor_class.return_value.extract = AsyncMock(return_value=failed_result)
+        success = await _extract_and_link_entities_inner(article.id)
 
-    assert [entity.name for entity in entities] == ["空天院", "遥感技术"]
-    assert entities[0].entity_type == "ORGANIZATION"
-    assert entities[1].entity_type == "TECHNOLOGY"
-    assert all(entity.subtype == "KEYWORD_FALLBACK" for entity in entities)
+    assert success is True
+    assert article.kg_status == "partial"
+    assert "保留原有图谱" in article.kg_error_message
+    mock_neo4j.upsert_article_metadata.assert_awaited_once()
+    mock_neo4j.clear_article_knowledge.assert_not_awaited()
+    mock_neo4j.batch_create_entities_and_relations.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -1,18 +1,33 @@
-"""把交叉分析结果转换为用户可理解的事件解读。"""
+"""把多来源事件证据转换为可审核、可行动的影响推演。"""
 
+import asyncio
 import json
 import logging
-import asyncio
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("ai-studio.event_interpretation")
 
 
 class EventInterpretationService:
-    """基于证据生成事件阶段、后续走势和决策关注点。"""
+    """基于来源正文、知识点和关系生成具体的跨领域情景推演。"""
 
-    def __init__(self, llm_client=None):
+    GENERIC_TITLES = {
+        "出现后续公开报道或官方进展",
+        "事件进入具体执行或反馈阶段",
+        "持续关注后续进展",
+        "等待官方进一步消息",
+    }
+    INDICATOR_MARKERS = (
+        "数量", "比例", "金额", "价格", "成本", "利润", "收入", "订单", "产能", "库存",
+        "开工率", "覆盖率", "参与率", "缴费率", "收益率", "名单", "文件", "细则", "通报",
+        "许可", "预算", "投资", "处罚", "发布日期", "实施日期", "数据",
+    )
+    VAGUE_PHRASES = ("产生影响", "行为变化", "政策变化", "持续关注", "进一步发展", "带来机遇")
+    CAUSAL_MARKERS = ("->", "→", "=>", "导致", "进而", "从而", "因此", "推动", "促使", "传导", "使得")
+
+    def __init__(self, llm_client=None, timeout_seconds: int = 90):
         self.llm_client = llm_client
+        self.timeout_seconds = timeout_seconds
 
     async def interpret(
         self,
@@ -20,84 +35,302 @@ class EventInterpretationService:
         prediction: Dict[str, Any],
     ) -> Dict[str, Any]:
         evidence = event.get("evidence_articles") or []
-        fallback = self._fallback(event, prediction)
+        model_id = prediction.get("model_id") or None
         if not self.llm_client:
-            return fallback
+            return {**self._unavailable("深度推演模型未配置，系统未生成模板化结论。"), "analysis_model": model_id or "系统默认模型"}
+
         source_text = "\n\n".join(
-            f"来源{i + 1}: {item.get('title', '')}\n{item.get('summary', '')[:800]}"
-            for i, item in enumerate(evidence)
+            self._format_source(index, item)
+            for index, item in enumerate(evidence)
         )
+        knowledge_points = prediction.get("knowledge_point_details") or []
+        relations = prediction.get("relation_details") or []
+        knowledge_text = "\n".join(
+            f"- {item.get('title', '')}: {item.get('content', '')}；原文依据：{item.get('evidence', '')}"
+            for item in knowledge_points[:30]
+        ) or "无结构化知识点"
+        relation_text = "\n".join(
+            f"- {item.get('source', '')} --{item.get('type', 'related_to')}--> {item.get('target', '')}；依据：{item.get('evidence', '')}"
+            for item in relations[:30]
+        ) or "无已审核关系"
+
         prompt = f"""
-你是事件研判分析师。请只依据下方来源和交叉分析结果，生成可审核的事件解读。
-不要把“上升/下降”解释成股价或确定事实，不要补造来源没有的信息。
-输出严格 JSON：
+你是一名战略情报与政策产业分析师。请对多来源材料做因果推演，而不是复述新闻或预测“还会有后续报道”。
+
+分析规则：
+1. 只能把来源中明确出现的事实写成事实；由事实推到未来影响时，必须明确写出推演链条和不确定性。
+2. “出现后续报道”“官方进一步进展”“持续受到关注”“进入执行阶段”不能单独作为结论。
+3. 至少分析经济、政策/监管两个维度，并根据材料补充产业、技术、市场或社会维度。
+4. 后续变化必须具体到：谁会采取什么动作、影响谁、通过什么机制发生、预计时间范围、什么信号可验证或推翻。
+5. 机会必须说明潜在受益者和进入条件；挑战必须说明风险暴露对象和预警信号。不要写“存在机遇与挑战”之类空话。
+6. 不要把内部方向代码 up/down/stable 解释为股价、概率或确定结果。它仅是材料中推进词与约束词的粗略计数，可质疑或修正。
+7. 若材料不足以支持某个维度，明确写“证据不足”，不得编造政策名称、金额、企业行动或统计数据。
+8. 不要为了增加数量补写空泛条目；宁可输出 2-3 条完整推演，也不要输出没有主体、机制或验证信号的条目。
+
+输出严格 JSON，不要输出 Markdown：
 {{
-  "event_summary": "当前发生了什么",
-  "current_phase": "已发生/扩散中/推进中/转折风险/证据不足",
-  "next_developments": [{{"title":"可能的下一步", "likelihood":"高/中/低", "basis":"依据", "watch_for":"观察信号"}}],
-  "drivers": ["推动事件发展的因素"],
-  "risks": ["不确定性或反向因素"],
-  "watch_indicators": ["未来需要继续跟踪的指标或事件"],
-  "decision_value": {{"category":"舆情/科技/商机/风险/综合", "explanation":"对用户的价值"}}
+  "analysis_status": "complete",
+  "executive_judgment": "一段可直接给决策者阅读的核心判断，说明最可能发生的实质变化及原因",
+  "event_summary": "多来源共同确认了什么，哪些仍只是观点或推断",
+  "current_phase": "议题形成/政策酝酿/商业验证/规模扩张/调整分化/风险暴露/证据不足",
+  "signal_assessment": {{
+    "label": "推进增强/约束增强/信号分化/方向未明",
+    "meaning": "用自然语言解释这个方向在本事件中具体代表什么，不使用 up/down",
+    "evidence": "支持该判断的跨来源事实及分歧"
+  }},
+  "impact_assessments": [
+    {{
+      "dimension": "经济/政策/产业/技术/市场/社会",
+      "conclusion": "该维度可能发生的具体变化",
+      "mechanism": "事实A -> 主体行为变化B -> 结果C",
+      "affected_parties": ["具体受影响主体类型"],
+      "horizon": "短期（0-6个月）/中期（6-24个月）/长期（2年以上）",
+      "likelihood": "高/中/低",
+      "evidence_basis": "引用来源中的事实，不得只写多来源关注"
+    }}
+  ],
+  "next_developments": [
+    {{
+      "dimension": "经济/政策/产业/技术/市场/社会",
+      "title": "可验证的具体变化",
+      "likelihood": "高/中/低",
+      "timeframe": "预计时间范围",
+      "mechanism": "为什么会发生的因果链",
+      "affected_parties": ["受影响主体"],
+      "basis": "对应的来源事实",
+      "watch_for": "能够验证或推翻该推断的具体指标"
+    }}
+  ],
+  "opportunities": [
+    {{"title": "具体机会", "beneficiaries": ["潜在受益者"], "rationale": "价值如何产生", "entry_condition": "机会成立的前提", "horizon": "时间范围"}}
+  ],
+  "challenges": [
+    {{"title": "具体挑战", "exposed_parties": ["风险暴露对象"], "rationale": "风险如何传导", "warning_signal": "预警指标", "horizon": "时间范围"}}
+  ],
+  "drivers": ["关键推动因素及其作用"],
+  "risks": ["可能使推演失效的反向因素"],
+  "watch_indicators": ["可量化或可核验的跟踪指标"],
+  "decision_value": {{"category": "政策/产业/投资/经营/风险/综合", "explanation": "用户现在可以据此采取什么准备动作"}}
 }}
 
-事件：{event.get('title', '')}
-交叉分析趋势：{prediction.get('trend', 'stable')}
+候选事件：{event.get('title', '')}
+内部粗略方向代码：{prediction.get('trend', 'stable')}（仅供参考，不得原样输出）
 证据文档数：{len(evidence)}
-知识点数：{prediction.get('knowledge_points', 0)}
-正式关系数：{prediction.get('cross_document_relations', 0)}
-来源：
-{source_text[:10000]}
+结构化知识点数：{prediction.get('knowledge_points', 0)}
+已审核关系数：{prediction.get('cross_document_relations', 0)}
+
+来源材料：
+{source_text[:14000]}
+
+结构化知识点：
+{knowledge_text[:6000]}
+
+已审核关系：
+{relation_text[:4000]}
 """
         try:
             response = await asyncio.wait_for(
                 self.llm_client.non_stream_chat(
-                    model_id=None,
+                    model_id=model_id,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.15,
-                    max_tokens=1800,
+                    temperature=0.2,
+                    max_tokens=4200,
                 ),
-                timeout=10,
+                timeout=self.timeout_seconds,
             )
-            parsed = self._parse(response)
+            parsed, validation_error = self._parse_with_reason(response)
             if parsed:
-                return {**fallback, **parsed, "generated_by": "llm"}
+                if parsed.get("quality_warnings"):
+                    logger.info("事件深度推演已剔除弱项: %s", "；".join(parsed["quality_warnings"]))
+                return {**parsed, "generated_by": "llm", "analysis_model": model_id or "系统默认模型"}
+            logger.warning(
+                "事件深度推演未通过校验: %s；响应长度=%s",
+                validation_error,
+                len(str(response or "")),
+            )
+            return {
+                **self._unavailable(
+                    f"模型输出未通过分析校验：{validation_error}。系统已拒绝展示模板化推断。"
+                ),
+                "analysis_model": model_id or "系统默认模型",
+            }
+        except asyncio.TimeoutError:
+            logger.warning("事件深度推演超过 %s 秒", self.timeout_seconds)
+            return {**self._unavailable(f"深度推演超过 {self.timeout_seconds} 秒，请稍后重试。"), "analysis_model": model_id or "系统默认模型"}
         except Exception as exc:
-            logger.warning("事件进一步解读生成失败，使用保守解读: %s", exc)
-        return fallback
+            logger.warning("事件深度推演生成失败: %s", exc)
+            return {**self._unavailable("深度推演调用失败，系统未使用通用模板替代。"), "analysis_model": model_id or "系统默认模型"}
 
     @staticmethod
-    def _fallback(event: Dict[str, Any], prediction: Dict[str, Any]) -> Dict[str, Any]:
-        evidence = event.get("evidence_articles") or []
-        trend = prediction.get("trend", "stable")
-        marker_text = " ".join(event.get("signal_reasons") or [])
-        phase = "扩散中" if len(evidence) >= 3 else "证据不足"
-        if any(marker in marker_text for marker in ("完成", "获批", "上线", "建成")):
-            phase = "推进中"
+    def _format_source(index: int, item: Dict[str, Any]) -> str:
+        body = item.get("analysis_text") or item.get("summary") or ""
+        return (
+            f"来源{index + 1}: {item.get('title', '')}\n"
+            f"发布时间: {item.get('published_at') or '未知'}\n"
+            f"摘要: {(item.get('summary') or '')[:500]}\n"
+            f"正文摘录: {body[:2000]}"
+        )
+
+    @staticmethod
+    def _unavailable(reason: str) -> Dict[str, Any]:
         return {
-            "event_summary": f"当前有 {len(evidence)} 篇来源文档指向同一事件或主题，信号方向为{trend}。",
-            "current_phase": phase,
-            "next_developments": [
-                {"title": "出现后续公开报道或官方进展", "likelihood": "中", "basis": "当前已有多来源关注", "watch_for": "新增来源、正式通知或执行结果"},
-                {"title": "事件进入具体执行或反馈阶段", "likelihood": "中", "basis": "事件已出现明确动作信号", "watch_for": "时间表、参与主体和结果数据"},
-            ],
-            "drivers": ["来源数量和近期关注度", "事件标题中的动作信号"],
-            "risks": ["当前知识点或正式关系不足，无法确认更深层因果", "来源可能存在同源转载，需核验独立性"],
-            "watch_indicators": ["是否出现新的独立来源", "是否出现可验证的结果或数据", "是否出现相反信息"],
-            "decision_value": {"category": "综合", "explanation": "适合作为后续跟踪线索，不应单独作为确定性决策依据。"},
-            "generated_by": "rule",
+            "analysis_status": "unavailable",
+            "analysis_error": reason,
+            "executive_judgment": "",
+            "event_summary": "",
+            "current_phase": "待分析",
+            "signal_assessment": {
+                "label": "未形成有效判断",
+                "meaning": "内部方向代码不作为面向用户的结论。",
+                "evidence": "",
+            },
+            "impact_assessments": [],
+            "next_developments": [],
+            "opportunities": [],
+            "challenges": [],
+            "drivers": [],
+            "risks": [],
+            "watch_indicators": [],
+            "decision_value": {
+                "category": "暂无",
+                "explanation": "请重试深度分析；系统不会用固定话术冒充研判结果。",
+            },
+            "generated_by": "none",
         }
 
+    @classmethod
+    def _parse(cls, response: Any) -> Optional[Dict[str, Any]]:
+        parsed, _ = cls._parse_with_reason(response)
+        return parsed
+
     @staticmethod
-    def _parse(response: str) -> Optional[Dict[str, Any]]:
+    def _as_list(value: Any) -> List[Any]:
+        if isinstance(value, list):
+            return value
+        if value in (None, ""):
+            return []
+        return [value]
+
+    @classmethod
+    def _parse_with_reason(cls, response: Any) -> tuple[Optional[Dict[str, Any]], str]:
         if not response:
-            return None
-        text = response[response.find("{"): response.rfind("}") + 1] if "{" in response and "}" in response else response
-        try:
-            data = json.loads(text)
-        except (TypeError, json.JSONDecodeError):
-            return None
-        required = {"event_summary", "current_phase", "next_developments", "drivers", "risks", "watch_indicators", "decision_value"}
-        if not required.issubset(data):
-            return None
-        return data
+            return None, "模型未返回内容"
+        if isinstance(response, dict):
+            data = response
+        else:
+            text = str(response)
+            if "{" not in text or "}" not in text:
+                return None, "模型未返回 JSON 对象，可能输出被截断"
+            text = text[text.find("{"): text.rfind("}") + 1]
+            try:
+                data = json.loads(text)
+            except (TypeError, json.JSONDecodeError) as exc:
+                return None, f"JSON 解析失败（{exc.msg}，位置 {exc.pos}），可能输出被截断"
+
+        required = {
+            "executive_judgment", "event_summary", "current_phase", "signal_assessment",
+            "impact_assessments", "next_developments", "opportunities", "challenges",
+            "drivers", "risks", "watch_indicators", "decision_value",
+        }
+        if not isinstance(data, dict):
+            return None, "JSON 顶层不是对象"
+        missing = sorted(required.difference(data))
+        if missing:
+            return None, f"缺少字段：{', '.join(missing)}"
+
+        for key in ("impact_assessments", "next_developments", "opportunities", "challenges", "drivers", "risks", "watch_indicators"):
+            data[key] = cls._as_list(data.get(key))
+        if len(str(data.get("executive_judgment", "")).strip()) < 15:
+            return None, "核心研判过短"
+
+        quality_warnings: List[str] = []
+        valid_next_developments: List[Dict[str, Any]] = []
+        for index, item in enumerate(data["next_developments"], start=1):
+            if not isinstance(item, dict):
+                quality_warnings.append(f"未来变化第 {index} 条格式无效")
+                continue
+            if str(item.get("title", "")).strip() in cls.GENERIC_TITLES:
+                quality_warnings.append(f"未来变化第 {index} 条为通用后续话术")
+                continue
+            mechanism = str(item.get("mechanism", "")).strip()
+            if len(mechanism) < 16 or not any(marker in mechanism for marker in cls.CAUSAL_MARKERS):
+                quality_warnings.append(f"未来变化第 {index} 条缺少明确因果机制")
+                continue
+            item["affected_parties"] = cls._as_list(item.get("affected_parties"))
+            if not item.get("timeframe") or not item["affected_parties"] or not item.get("watch_for"):
+                quality_warnings.append(f"未来变化第 {index} 条缺少时间、影响对象或验证指标")
+                continue
+            watch_for = str(item.get("watch_for", ""))
+            has_named_indicator = any(marker in watch_for for marker in cls.INDICATOR_MARKERS)
+            is_vague_indicator = any(phrase in watch_for for phrase in cls.VAGUE_PHRASES)
+            if len(watch_for) < 8 or (is_vague_indicator and not has_named_indicator):
+                quality_warnings.append(f"未来变化第 {index} 条验证指标不够具体")
+                continue
+            valid_next_developments.append(item)
+        if len(valid_next_developments) < 2:
+            detail = "；".join(quality_warnings[-3:]) or "模型返回条目不足"
+            return None, f"未来变化合格内容少于 2 条（{detail}）"
+        data["next_developments"] = valid_next_developments
+
+        valid_impacts: List[Dict[str, Any]] = []
+        for index, item in enumerate(data["impact_assessments"], start=1):
+            if not isinstance(item, dict):
+                quality_warnings.append(f"影响分析第 {index} 条格式无效")
+                continue
+            conclusion = str(item.get("conclusion", ""))
+            mechanism = str(item.get("mechanism", ""))
+            item["affected_parties"] = cls._as_list(item.get("affected_parties"))
+            if len(conclusion.strip()) < 8:
+                quality_warnings.append(f"影响分析第 {index} 条结论过短")
+                continue
+            if len(mechanism) < 18 or not any(marker in mechanism for marker in cls.CAUSAL_MARKERS):
+                quality_warnings.append(f"影响分析第 {index} 条缺少明确因果链")
+                continue
+            if any(conclusion.strip().endswith(phrase) for phrase in cls.VAGUE_PHRASES):
+                quality_warnings.append(f"影响分析第 {index} 条结论仍然模糊")
+                continue
+            valid_impacts.append(item)
+        dimensions = {str(item.get("dimension", "")) for item in valid_impacts}
+        if len(valid_impacts) < 2:
+            return None, "影响分析合格内容少于 2 个维度"
+        if not any("经济" in item or "市场" in item for item in dimensions):
+            return None, "合格内容中缺少经济或市场影响"
+        if not any("政策" in item or "监管" in item for item in dimensions):
+            return None, "合格内容中缺少政策或监管影响"
+        data["impact_assessments"] = valid_impacts
+
+        valid_opportunities: List[Dict[str, Any]] = []
+        for index, item in enumerate(data["opportunities"], start=1):
+            if not isinstance(item, dict) or not item.get("beneficiaries") or not item.get("entry_condition"):
+                quality_warnings.append(f"机会第 {index} 条缺少受益者或成立条件")
+                continue
+            item["beneficiaries"] = cls._as_list(item.get("beneficiaries"))
+            combined = f"{item.get('title', '')}{item.get('rationale', '')}{item.get('entry_condition', '')}"
+            if len(combined) < 24 or all(phrase in combined for phrase in ("产生影响", "行为变化")):
+                quality_warnings.append(f"机会第 {index} 条不够具体")
+                continue
+            valid_opportunities.append(item)
+        if not valid_opportunities:
+            return None, "没有合格的具体机会"
+        data["opportunities"] = valid_opportunities
+
+        valid_challenges: List[Dict[str, Any]] = []
+        for index, item in enumerate(data["challenges"], start=1):
+            if not isinstance(item, dict) or not item.get("exposed_parties") or not item.get("warning_signal"):
+                quality_warnings.append(f"挑战第 {index} 条缺少风险对象或预警指标")
+                continue
+            item["exposed_parties"] = cls._as_list(item.get("exposed_parties"))
+            warning_signal = str(item.get("warning_signal", ""))
+            has_named_indicator = any(marker in warning_signal for marker in cls.INDICATOR_MARKERS)
+            is_vague_indicator = any(phrase in warning_signal for phrase in cls.VAGUE_PHRASES)
+            if len(warning_signal) < 8 or (is_vague_indicator and not has_named_indicator):
+                quality_warnings.append(f"挑战第 {index} 条预警指标不够具体")
+                continue
+            valid_challenges.append(item)
+        if not valid_challenges:
+            return None, "没有合格的具体挑战"
+        data["challenges"] = valid_challenges
+
+        data["analysis_status"] = "complete"
+        data["quality_warnings"] = quality_warnings
+        return data, ""

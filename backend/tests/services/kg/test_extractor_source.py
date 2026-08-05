@@ -74,3 +74,39 @@ def test_extract_json_object_handles_fenced_output():
     )
 
     assert payload == '{"entities": [], "relations": []}'
+
+
+def test_relation_endpoints_accept_case_and_spacing_variants():
+    payload = {
+        "entities": [
+            {"name": "OpenAI", "type": "ORGANIZATION"},
+            {"name": "GPT-5", "type": "TECHNOLOGY"},
+        ],
+        "relations": [
+            {
+                "source": "open ai",
+                "target": "GPT 5",
+                "rel_type": "developed",
+                "evidence": "OpenAI developed GPT-5",
+            }
+        ],
+    }
+
+    result = EntityExtractor()._parse_llm_response(payload, article_id="article-1")
+
+    assert len(result.relations) == 1
+    assert result.relations[0].source == "OpenAI"
+    assert result.relations[0].target == "GPT-5"
+
+
+def test_entity_deduplication_uses_same_normalization_as_relations():
+    extractor = EntityExtractor()
+    result = extractor._parse_llm_response({
+        "entities": [
+            {"name": "OpenAI", "type": "ORGANIZATION"},
+            {"name": "open ai", "type": "ORGANIZATION"},
+        ],
+        "relations": [],
+    })
+
+    assert len(extractor.deduplicate_entities(result.entities)) == 1

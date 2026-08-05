@@ -402,12 +402,18 @@ async def scrape_deep(request: ScrapeDeepRequest):
 
                     api_logger.info(f"✅ [自动保存] 共保存 {saved_count} 篇文章到数据库")
 
+                complete_count = sum(1 for result in article_results if result.status == "success")
+                metadata_only_count = sum(1 for result in article_results if result.status == "metadata_only")
+                result_summary = f"完整正文 {complete_count} 篇"
+                if metadata_only_count:
+                    result_summary += f"，不允许公开爬取且未保存 {metadata_only_count} 篇"
+
                 # 保存结果到进度管理器
                 progress_manager.set_progress(scrape_id, {
                     "status": "completed",
                     "stage": 5,
                     "stage_name": "已完成" + ("，已保存到数据库" if saved_count > 0 else ""),
-                    "stage_detail": f"成功爬取 {len(article_results)} 篇文章" + (f"，保存 {saved_count} 篇" if request.save_to_db else ""),
+                    "stage_detail": result_summary + (f"，保存 {saved_count} 篇" if request.save_to_db else ""),
                     "current": len(article_results),
                     "total": len(article_results),
                     "saved_to_db": saved_count,
@@ -415,13 +421,23 @@ async def scrape_deep(request: ScrapeDeepRequest):
                     "results": {
                         "list_page": _result_to_response(list_page_result).__dict__ if list_page_result else None,
                         "articles": [_result_to_response(r).__dict__ for r in article_results],
-                        "total_articles": len(article_results),
+                        "total_articles": complete_count,
+                        "metadata_only_articles": metadata_only_count,
                     }
                 })
+                history_status = (
+                    TaskStatus.FAILED.value
+                    if complete_count == 0 and metadata_only_count > 0
+                    else TaskStatus.SUCCESS.value
+                )
                 update_history(
-                    TaskStatus.SUCCESS.value,
-                    len(article_results),
-                    "\n".join(r.title for r in article_results if r.title),
+                    history_status,
+                    complete_count,
+                    "\n".join(r.title for r in article_results if r.status == "success" and r.title),
+                    error_message=(
+                        "详情页不允许公开爬取或未提供公开正文，未向文档管理保存任何记录"
+                        if history_status == TaskStatus.FAILED.value else None
+                    ),
                 )
 
             finally:

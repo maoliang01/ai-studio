@@ -9,14 +9,16 @@
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
+import time
 from collections import Counter
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta
-from urllib.parse import urlparse, urljoin, urlunparse
+from urllib.parse import parse_qs, urlparse, urljoin, urlunparse
 from zoneinfo import ZoneInfo
 import httpx
 
@@ -892,6 +894,11 @@ class ScrapeOptions:
     extract_metadata: bool = True
     cookies: Optional[str] = None  # Cookie 字符串，用于绕过反爬
 
+    @classmethod
+    def for_background_task(cls, timeout: int) -> "ScrapeOptions":
+        """Background crawls must stay deterministic and never wait on per-page LLM calls."""
+        return cls(timeout=timeout, extract_metadata=False)
+
 
 @dataclass
 class ScrapedResult:
@@ -918,6 +925,24 @@ class ScrapedResult:
             self.keywords = []
         if self.scraped_at is None:
             self.scraped_at = datetime.now().isoformat()
+
+
+LIST_METADATA_PLACEHOLDER = "详情页受访问限制；以上为来源网站栏目列表公开信息"
+LIST_METADATA_ONLY_ERROR = "该详情页不允许公开爬取或未提供公开正文，未保存到文档管理"
+
+
+def mark_result_as_metadata_only(result: ScrapedResult, list_title: str) -> ScrapedResult:
+    """Keep verifiable list metadata without fabricating article content."""
+    result.status = "metadata_only"
+    result.title = list_title
+    result.content = ""
+    result.html = ""
+    result.word_count = 0
+    result.summary = None
+    result.keywords = []
+    result.style = None
+    result.error_message = LIST_METADATA_ONLY_ERROR
+    return result
 
 
 def merge_scraped_result_into_article(
@@ -1131,7 +1156,7 @@ class DateExtractor:
 
     @classmethod
     def extract_thepaper_list_dates(cls, html: str, base_url: str) -> Dict[str, str]:
-        """读取澎湃频道页 Next.js 数据中的文章发布时间。"""
+        """读取澎湃列表页 Next.js 数据中的文章发布时间。"""
         if not html or 'thepaper.cn' not in base_url.lower():
             return {}
         result: Dict[str, str] = {}
@@ -1147,6 +1172,52 @@ class DateExtractor:
             if cls._validate_date(published):
                 result[urljoin(base_url, f"/newsDetail_forward_{match.group(1)}")] = published
         return result
+
+    @classmethod
+    def extract_thepaper_list_items(
+        cls, html: str, base_url: str
+    ) -> Tuple[List[str], Dict[str, str], Dict[str, str]]:
+        """Extract ordered article URLs and metadata from The Paper Next.js data."""
+        if not html or "thepaper.cn" not in base_url.lower():
+            return [], {}, {}
+        try:
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(html, "lxml")
+            data_node = soup.find("script", id="__NEXT_DATA__")
+            payload = json.loads(data_node.string or data_node.get_text()) if data_node else {}
+            items = payload.get("props", {}).get("pageProps", {}).get("data", {}).get("list", [])
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+            return [], {}, {}
+
+        links: List[str] = []
+        dates: Dict[str, str] = {}
+        titles: Dict[str, str] = {}
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            cont_id = str(item.get("contId") or "").strip()
+            external_link = str(item.get("link") or "").strip()
+            article_url = external_link if external_link.startswith(("http://", "https://")) else ""
+            if not article_url and cont_id.isdigit():
+                article_url = urljoin(base_url, f"/newsDetail_forward_{cont_id}")
+            if not article_url:
+                continue
+            article_url = article_url.split("#", 1)[0]
+            links.append(article_url)
+
+            title = str(item.get("name") or "").strip()
+            if title:
+                titles[article_url] = title
+            try:
+                timestamp = int(item.get("pubTimeLong"))
+                published = datetime.fromtimestamp(timestamp / 1000).strftime("%Y-%m-%d")
+            except (TypeError, ValueError, OSError, OverflowError):
+                published = ""
+            if published and cls._validate_date(published):
+                dates[article_url] = published
+
+        return list(dict.fromkeys(links)), dates, titles
 
     @classmethod
     def extract_list_item_titles(cls, html: str, base_url: str) -> Dict[str, str]:
@@ -1863,6 +1934,340 @@ class WebScraper:
         # 保持网站 DOM 顺序；后续会按候选上限截断，不能使用 set 打乱顺序。
         return list(dict.fromkeys(links))
 
+    def _is_thepaper_url(self, url: str) -> bool:
+        parsed = urlparse(url or "")
+        hostname = (parsed.hostname or "").lower()
+        return hostname == "thepaper.cn" or hostname.endswith(".thepaper.cn")
+
+    def _is_thepaper_listing_url(self, url: str) -> bool:
+        if not self._is_thepaper_url(url):
+            return False
+        return re.search(r"/(?:channel|list)_\d+/?$", urlparse(url).path, re.IGNORECASE) is not None
+
+    def _thepaper_mobile_url(self, url: str) -> str:
+        parsed = urlparse(url or "")
+        match = re.search(r"/newsDetail_forward_(\d+)", parsed.path, re.IGNORECASE)
+        if not match:
+            return url
+        return f"https://m.thepaper.cn/newsDetail_forward_{match.group(1)}"
+
+    @staticmethod
+    def _html_fragment_to_text(fragment: str) -> str:
+        """Convert a trusted API HTML fragment into clean paragraph text."""
+        if not fragment:
+            return ""
+        try:
+            from bs4 import BeautifulSoup
+
+            soup = BeautifulSoup(fragment, "lxml")
+            for tag in soup(["script", "style", "noscript", "svg", "video", "audio"]):
+                tag.decompose()
+            paragraphs = [
+                node.get_text(" ", strip=True)
+                for node in soup.find_all(["p", "section"])
+                if node.get_text(" ", strip=True)
+            ]
+            text = "\n".join(paragraphs) if paragraphs else soup.get_text("\n", strip=True)
+            return clean_content_light(text)
+        except Exception:
+            return clean_content_light(re.sub(r"<[^>]+>", " ", fragment))
+
+    @staticmethod
+    def _normalize_api_date(value: Any) -> Optional[str]:
+        if value in (None, ""):
+            return None
+        if isinstance(value, (int, float)) or str(value).isdigit():
+            try:
+                timestamp = int(value)
+                if timestamp > 10_000_000_000:
+                    timestamp //= 1000
+                return datetime.fromtimestamp(timestamp, APP_TIMEZONE).strftime("%Y-%m-%d")
+            except (OSError, OverflowError, ValueError):
+                return None
+        match = re.search(r"(20\d{2})[-/年](\d{1,2})[-/月](\d{1,2})", str(value))
+        if not match:
+            return None
+        return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
+
+    @staticmethod
+    def _extract_javascript_json(value: Any) -> Dict[str, Any]:
+        """Read JSON wrapped as `var Name = {...};` by legacy news APIs."""
+        if isinstance(value, dict):
+            return value
+        if not isinstance(value, str):
+            return {}
+        start = value.find("{")
+        end = value.rfind("}")
+        if start < 0 or end <= start:
+            return {}
+        try:
+            parsed = json.loads(value[start:end + 1])
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    async def _scrape_known_external_fast(
+        self, url: str, options: ScrapeOptions, cookies: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch public structured data used by JS-only article share pages."""
+        parsed = urlparse(url or "")
+        host = (parsed.hostname or "").lower()
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+            ),
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        if cookies:
+            headers["Cookie"] = cookies
+        timeout = max(5, min(getattr(options, "timeout", 30), 20))
+
+        if (
+            host == "content-static.cctvnews.cctv.com"
+            and parsed.path.startswith("/snow-book/")
+            and parse_qs(parsed.query).get("item_id")
+        ):
+            # This share page intentionally exposes only an app-download shell.
+            # Treat it as terminal so the generic renderer chain does not spend
+            # tens of seconds retrying content the publisher does not expose.
+            return {
+                "success": False,
+                "terminal": True,
+                "error": "publisher_app_only",
+                "error_detail": "发布方仅在央视新闻客户端提供正文，公开分享页未提供正文内容",
+            }
+
+        people_match = re.search(r"/h5/detail/[^/]+/(\d+)", parsed.path, re.IGNORECASE)
+        if host == "app.people.cn" and people_match:
+            api_url = f"https://api-app.people.cn/api/v2/articles/detail/{people_match.group(1)}"
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
+                response = await client.get(api_url)
+                response.raise_for_status()
+            payload = response.json()
+            item = payload.get("item", {}) if isinstance(payload, dict) else {}
+            content_html = str(item.get("content") or "")
+            content = self._html_fragment_to_text(content_html)
+            if payload.get("code") != 0 or len(content.replace("\n", "").replace(" ", "")) < 20:
+                return {"success": False, "error": "people_api_empty"}
+            published_at = self._normalize_api_date(item.get("date"))
+            return {
+                "success": True,
+                "content": content,
+                "markdown": content,
+                "title": str(item.get("title") or item.get("listTitle") or "").strip(),
+                "links": [],
+                "html": content_html,
+                "metadata": {
+                    "published_at": published_at,
+                    "author": str(item.get("source") or "").strip(),
+                },
+            }
+
+        xinhua_match = re.search(r"/(?:share|detail)/(\d+)", parsed.path, re.IGNORECASE)
+        if host == "h.xinhuaxmt.com" and xinhua_match:
+            article_id = xinhua_match.group(1)
+            request_query = ""
+            timestamp = int(time.time() * 1000)
+            try:
+                sm3 = lambda value: hashlib.new("sm3", value.encode("utf-8")).hexdigest()
+                public_key = sm3("H5")
+                signature = sm3(
+                    f"Key={public_key}&Timestamp={timestamp}&Token=&Request={request_query}"
+                )
+            except (ValueError, TypeError):
+                return {"success": False, "error": "xinhua_sm3_unavailable"}
+            api_headers = {
+                **headers,
+                "Referer": f"{parsed.scheme}://{parsed.netloc}/",
+                "Timestamp": str(timestamp),
+                "Signature": signature,
+                "Device-Access-Id": "",
+            }
+            api_url = f"https://h.xinhuaxmt.com/1017/n/newsapi/h5/news-detail/{article_id}"
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=api_headers) as client:
+                response = await client.get(api_url)
+                response.raise_for_status()
+            payload = response.json()
+            item = self._extract_javascript_json(payload.get("data") if isinstance(payload, dict) else None)
+            content_html = str(item.get("content") or "")
+            content = self._html_fragment_to_text(content_html)
+            if str(payload.get("code")) != "0" or len(content.replace("\n", "").replace(" ", "")) < 20:
+                return {"success": False, "error": "xinhua_api_empty"}
+            published_at = self._normalize_api_date(
+                item.get("releaseTimestamp")
+                or item.get("relaseDateTimeStamp")
+                or item.get("releasedate")
+            )
+            return {
+                "success": True,
+                "content": content,
+                "markdown": content,
+                "title": str(item.get("topic") or item.get("shortTopic") or "").strip(),
+                "links": [],
+                "html": content_html,
+                "metadata": {
+                    "published_at": published_at,
+                    "author": str(item.get("authors") or item.get("docSource") or "").strip(),
+                },
+            }
+
+        return None
+
+    def _extract_thepaper_detail_content(self, html: str) -> tuple[str, str, Optional[str], str]:
+        """Extract The Paper detail pages without invoking a browser renderer."""
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, "lxml")
+        except Exception:
+            return "", "", None, ""
+
+        for tag in soup(["script", "style", "noscript", "svg"]):
+            tag.decompose()
+
+        title = ""
+        title_node = soup.find("h1")
+        if title_node:
+            title = title_node.get_text(" ", strip=True)
+        if not title:
+            meta_title = soup.find("meta", attrs={"property": "og:title"}) or soup.find("meta", attrs={"name": "title"})
+            title = meta_title.get("content", "").strip() if meta_title else ""
+        if not title and soup.title:
+            title = re.sub(r"[_-].*$", "", soup.title.get_text(" ", strip=True)).strip()
+
+        text = soup.get_text("\n", strip=True)
+        date_match = re.search(r"(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\s+\d{1,2}:\d{2}", text)
+        published_at = None
+        if date_match:
+            published_at = (
+                f"{int(date_match.group(1)):04d}-"
+                f"{int(date_match.group(2)):02d}-"
+                f"{int(date_match.group(3)):02d}"
+            )
+
+        author = ""
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if title and title in lines:
+            title_index = lines.index(title)
+            for line in lines[title_index + 1:title_index + 5]:
+                if re.search(r"20\d{2}[-/]\d{1,2}[-/]\d{1,2}", line):
+                    break
+                if len(line) >= 2 and line not in {"下载APP", "听全文", "字号"}:
+                    author = line
+                    break
+
+        selectors = [
+            "article",
+            ".news_part",
+            ".news_txt",
+            ".newsdetail_content",
+            ".article_content",
+            ".detail_content",
+            "[class*=article]",
+            "[class*=content]",
+        ]
+        candidates: List[str] = []
+        for selector in selectors:
+            for node in soup.select(selector):
+                parts = [
+                    p.get_text(" ", strip=True)
+                    for p in node.find_all(["p", "section"])
+                    if p.get_text(" ", strip=True)
+                ]
+                if parts:
+                    candidates.append("\n".join(parts))
+                else:
+                    candidate = node.get_text("\n", strip=True)
+                    if candidate:
+                        candidates.append(candidate)
+
+        content = max(candidates, key=len, default="")
+        if len(content) < 50 and lines:
+            start = 0
+            if title and title in lines:
+                start = lines.index(title) + 1
+            body_lines = []
+            noise = {
+                "下载APP", "听全文", "字号", "责任编辑", "图片编辑", "我要举报",
+                "特别声明", "澎湃新闻APP下载", "登录",
+            }
+            for line in lines[start:]:
+                if any(marker in line for marker in noise):
+                    if body_lines:
+                        break
+                    continue
+                if published_at and re.search(r"20\d{2}[-/]\d{1,2}[-/]\d{1,2}", line):
+                    continue
+                if author and line == author:
+                    continue
+                if len(line) <= 1:
+                    continue
+                body_lines.append(line)
+            content = "\n".join(body_lines)
+
+        return title, clean_content_light(content), published_at, author
+
+    async def _scrape_thepaper_fast(self, url: str, options: ScrapeOptions, cookies: Optional[str] = None) -> Dict[str, Any]:
+        parsed = urlparse(url or "")
+        path = parsed.path.lower()
+        if not self._is_thepaper_url(url):
+            return {"success": False, "error": "not_thepaper"}
+
+        fetch_url = self._thepaper_mobile_url(url) if "/newsdetail_forward_" in path else url
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/126.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        }
+        if cookies:
+            headers["Cookie"] = cookies
+
+        timeout = max(5, min(getattr(options, "timeout", 30), 20))
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
+            response = await client.get(fetch_url)
+            response.raise_for_status()
+
+        html = response.text or ""
+        links = self._extract_links_from_html(html, url)
+        if self._is_thepaper_listing_url(url):
+            structured_links, _, _ = DateExtractor.extract_thepaper_list_items(html, url)
+            return {
+                "success": bool(html),
+                "content": "",
+                "markdown": "",
+                "title": "",
+                "links": list(dict.fromkeys(structured_links + links)),
+                "html": html,
+                "metadata": {},
+            }
+
+        if "/newsdetail_forward_" not in path:
+            return {"success": False, "error": "unsupported_thepaper_url"}
+
+        title, content, published_at, author = self._extract_thepaper_detail_content(html)
+        if len(content.replace("\n", "").replace(" ", "")) < 20:
+            return {"success": False, "error": "thepaper_fast_empty"}
+
+        metadata: Dict[str, Any] = {}
+        if published_at:
+            metadata["published_at"] = published_at
+        if author:
+            metadata["author"] = author
+
+        return {
+            "success": True,
+            "content": content,
+            "markdown": content,
+            "title": title,
+            "links": links,
+            "html": html,
+            "metadata": metadata,
+        }
+
     async def scrape(self, url: str, options: Optional[ScrapeOptions] = None) -> ScrapedResult:
         """
         爬取单个网页
@@ -1884,7 +2289,38 @@ class WebScraper:
 
         try:
             # 1. 优先使用已成功的爬取方式
-            if self._use_alternate:
+            scrape_result = None
+            try:
+                scrape_result = await self._scrape_known_external_fast(url, options, cookies)
+                if scrape_result and scrape_result.get("success"):
+                    logger.info("外部新闻结构化抓取成功: %s", url)
+                elif scrape_result and scrape_result.get("terminal"):
+                    result.status = "access_restricted"
+                    result.error_message = scrape_result.get("error_detail") or scrape_result.get("error")
+                    logger.warning("外部新闻正文不可公开抓取，停止重试: %s, %s", url, result.error_message)
+                    return result
+                elif scrape_result:
+                    logger.warning("外部新闻结构化抓取未命中，回退通用链路: %s, %s", url, scrape_result.get("error"))
+                    scrape_result = None
+            except Exception as external_error:
+                logger.warning("外部新闻结构化抓取异常，回退通用链路: %s, %s", url, external_error)
+                scrape_result = None
+
+            if scrape_result is None and self._is_thepaper_url(url):
+                try:
+                    scrape_result = await self._scrape_thepaper_fast(url, options, cookies)
+                    if scrape_result.get("success"):
+                        logger.info(f"澎湃快速抓取成功: {url}")
+                    else:
+                        logger.warning(f"澎湃快速抓取未命中，回退通用链路: {url}, {scrape_result.get('error')}")
+                        scrape_result = None
+                except Exception as fast_error:
+                    logger.warning(f"澎湃快速抓取异常，回退通用链路: {url}, {fast_error}")
+                    scrape_result = None
+
+            if scrape_result is not None:
+                pass
+            elif self._use_alternate:
                 # 使用内置备用爬取方案
                 scrape_result = await self._scrape_with_alternate(url, options, cookies)
             elif self._use_crawl4ai:
@@ -1966,8 +2402,11 @@ class WebScraper:
             if not result.title:
                 result.title = extract_title_from_content(result.content)
 
-            # 提取链接（同时从 HTML 和 markdown 内容）
-            result.links = self._extract_links_from_html(raw_html, url, markdown)
+            # Preserve links supplied by structured/renderer adapters. Dynamic pages
+            # often expose only a small subset as literal HTML anchors.
+            adapter_links = scrape_result.get("links", []) or []
+            html_links = self._extract_links_from_html(raw_html, url, markdown)
+            result.links = list(dict.fromkeys(adapter_links + html_links))
             result.word_count = len(result.content.replace("\n", "").replace(" ", ""))
 
             # 6. 检测是否为列表页（通过内容判断）
@@ -1980,7 +2419,8 @@ class WebScraper:
 
             # 7. 发布日期只接受网站明确标注的字段。正文事件日期、URL
             # 归档日期和 LLM 推断均不得作为 published_at。
-            result.published_at = DateExtractor.extract_from_html(raw_html)
+            fast_metadata = scrape_result.get("metadata", {}) or {}
+            result.published_at = fast_metadata.get("published_at") or DateExtractor.extract_from_html(raw_html)
             _, content_author = extract_date_from_content(result.content, url)
             if result.published_at:
                 logger.debug(f"网站发布日期: {result.published_at}")
@@ -1988,12 +2428,17 @@ class WebScraper:
                 logger.info(f"详情页未找到明确发布日期: {url}")
 
             # 同时提取作者
+            result.author = fast_metadata.get("author") or result.author
             if content_author and not result.author:
                 result.author = content_author
                 logger.debug(f"内容作者: {content_author}")
 
+            # 澎湃已有稳定的结构化解析。逐篇调用 LLM 会让后台深爬稳定撞上
+            # 总超时，因此即使调用方误开 extract_metadata 也必须走本地元数据提取。
+            use_llm_metadata = options.extract_metadata and not self._is_thepaper_url(url)
+
             # 8. 大模型提取元信息（如需要）
-            if options.extract_metadata and result.content and result.word_count >= 50:
+            if use_llm_metadata and result.content and result.word_count >= 50:
                 metadata = await self._extract_metadata_with_llm(result.title, result.content, result.url)
                 logger.info(f"LLM 元信息提取结果: title={len(metadata.get('title', ''))}字, summary={len(metadata.get('summary', ''))}字, keywords={len(metadata.get('keywords', []))}个")
 
@@ -2017,7 +2462,7 @@ class WebScraper:
                     result.keywords = extract_keywords_locally(result.title, result.content)
 
             # 9. 文体分析（可选，在摘要提取后进行）
-            if options.extract_metadata and result.content and result.word_count >= 50 and not result.style:
+            if use_llm_metadata and result.content and result.word_count >= 50 and not result.style:
                 result.style = await self._extract_style_with_llm(result.title, result.content)
                 if result.style:
                     logger.info(f"文体已识别: {result.style}")
@@ -2083,6 +2528,10 @@ class WebScraper:
         Returns:
             Tuple[bool, str]: (是否成功, 文章ID 或 错误信息)
         """
+        if result.status == "metadata_only" or LIST_METADATA_PLACEHOLDER in (result.content or ""):
+            logger.warning("拒绝保存仅含栏目元数据的记录: %s", result.url)
+            return False, LIST_METADATA_ONLY_ERROR
+
         try:
             from app.core.database import get_session_local
             from app.models.article import (
@@ -2665,11 +3114,17 @@ class WebScraper:
 
         # 列表页显示日期仅作为详情页明确发布日期缺失时的站点级兜底。
         list_item_dates = DateExtractor.extract_list_item_dates(list_page.html, url)
-        if 'thepaper.cn/channel_' in url.lower():
+        list_item_titles = DateExtractor.extract_list_item_titles(list_page.html, url)
+        is_thepaper_listing = self._is_thepaper_listing_url(url)
+        if is_thepaper_listing:
             list_item_dates.update(
                 DateExtractor.extract_thepaper_list_dates(list_page.html, url)
             )
-        list_item_titles = DateExtractor.extract_list_item_titles(list_page.html, url)
+            _, structured_dates, structured_titles = DateExtractor.extract_thepaper_list_items(
+                list_page.html, url
+            )
+            list_item_dates.update(structured_dates)
+            list_item_titles.update(structured_titles)
 
         # 2. 识别文章链接（基于 URL 模式）
         article_links = self._filter_article_links(
@@ -2684,9 +3139,6 @@ class WebScraper:
 
         if not article_links:
             return list_page, []
-
-        # 限制数量
-        article_links = article_links[:max_articles * 2]
 
         # 3. 计算日期范围。URL 中的日期可能是建页/更新/归档时间，
         # 不能据此提前丢弃文章；正文抓取后再按 published_at 最终过滤。
@@ -2707,23 +3159,26 @@ class WebScraper:
                 start_date, end_date = None, None
 
             if start_date and end_date:
-                # 列表条目明确显示的日期属于网站发布信息，可用于安全预筛；
-                # 未显示日期的候选仍保留，交由详情页的发布字段最终判断。
                 before_count = len(article_links)
                 if list_item_dates:
-                    # 该栏目采用统一的“标题 + 发布日期”列表结构时，只抓取
-                    # 能与日期条目精确配对的链接，避免页脚/推荐链接混入候选。
-                    article_links = [
-                        link for link in article_links
-                        if list_item_dates.get(link.split("#", 1)[0])
-                        and self._date_in_range(
-                            list_item_dates[link.split("#", 1)[0]], start_date, end_date
-                        )
-                    ]
+                    article_links = self._prefilter_links_by_list_dates(
+                        article_links,
+                        list_item_dates,
+                        start_date,
+                        end_date,
+                    )
                 logger.info(
                     f"网站列表发布日期预筛: {before_count} -> {len(article_links)} 篇 "
                     f"[{start_date} ~ {end_date}]"
                 )
+
+        if is_thepaper_listing:
+            # 澎湃列表日期可信且详情解析稳定，不需要额外抓取 2 倍候选后再截断。
+            article_links = article_links[:max_articles]
+        else:
+            # 必须在日期预筛之后限制候选，避免排在前 2N 之外的有效日期文章
+            # 尚未参与筛选就被提前丢弃。
+            article_links = article_links[:max_articles * 2]
 
         # 3. 批量爬取文章（逐个爬取并更新进度）
         if not article_links:
@@ -2742,19 +3197,14 @@ class WebScraper:
                 if list_date:
                     result.published_at = list_date
                     logger.info(f"使用列表页发布日期: {article_url} -> {list_date}")
-            # 微信等受限外链可能只能拿到拦截/列表页面。该链接已由来源网站
-            # 明确列出标题和发布日期时，保留这些可验证字段，但不伪造正文。
+            # 受限外链只保留列表页可验证元数据，不得伪造成抓取成功的正文。
             list_key = article_url.split("#", 1)[0]
             list_title = list_item_titles.get(list_key)
             if list_item_dates.get(list_key) and list_title and (
                 result.status != "success" or result.word_count <= 0
             ):
-                result.status = "success"
-                result.title = list_title
-                result.content = f"{list_title}\n\n（详情页受访问限制；以上为来源网站栏目列表公开信息）"
-                result.word_count = len(list_title)
-                result.error_message = None
-                logger.info(f"使用栏目列表信息保留受限文章: {article_url}")
+                mark_result_as_metadata_only(result, list_title)
+                logger.warning(f"详情页不允许公开爬取，未保存到文档管理: {article_url}")
             article_results.append(result)
             # 每爬取一篇更新一次进度
             if cb:
@@ -2762,12 +3212,17 @@ class WebScraper:
 
         # 4. 处理结果
         valid_results = [r for r in article_results if r.status == "success" and r.word_count > 0]
-        logger.info(f"有效文章: {len(valid_results)} 篇")
+        metadata_only_results = [r for r in article_results if r.status == "metadata_only"]
+        output_results = valid_results + metadata_only_results
+        logger.info(
+            "文章结果: 完整正文 %s 篇，仅栏目元数据 %s 篇",
+            len(valid_results),
+            len(metadata_only_results),
+        )
 
         if (date_range or custom_date_range) and start_date and end_date:
-            is_thepaper_channel = 'thepaper.cn/channel_' in url.lower()
-            if is_thepaper_channel:
-                for item in valid_results:
+            if is_thepaper_listing:
+                for item in output_results:
                     if not item.published_at:
                         item.published_at = list_item_dates.get(item.url.split("#", 1)[0])
                         if not item.published_at:
@@ -2776,22 +3231,22 @@ class WebScraper:
                                 item.published_at = list_item_dates.get(
                                     urljoin(url, f"/newsDetail_forward_{match.group(1)}")
                                 )
-            before_count = len(valid_results)
-            if not is_thepaper_channel:
-                valid_results = [
-                    r for r in valid_results
+            before_count = len(output_results)
+            if not is_thepaper_listing:
+                output_results = [
+                    r for r in output_results
                     if r.published_at and self._date_in_range(r.published_at, start_date, end_date)
                 ]
-            logger.info(f"正文发布日期过滤: {before_count} -> {len(valid_results)} 篇")
+            logger.info(f"发布日期过滤: {before_count} -> {len(output_results)} 篇")
 
         # 5. 按日期排序（最新的在前）
-        valid_results = self._sort_by_date(valid_results)
+        output_results = self._sort_by_date(output_results)
 
         # 6. 限制最终数量
-        valid_results = valid_results[:max_articles]
+        output_results = output_results[:max_articles]
 
-        logger.info(f"深度爬取完成: {len(valid_results)} 篇文章")
-        return list_page, valid_results
+        logger.info(f"深度爬取完成: {len(output_results)} 条结果")
+        return list_page, output_results
 
     def _filter_article_links(
         self,
@@ -2855,25 +3310,39 @@ class WebScraper:
 
             parsed = urlparse(link)
             link_lower = link.lower()
+            list_key = link.split("#", 1)[0]
+            is_trusted_list_url = list_key in trusted_list_urls
+            is_external = bool(parsed.netloc and parsed.netloc != domain)
+
+            # Structured list data is the source site's explicit article feed.
+            # Accept its external targets before generic index/share navigation rules.
+            if is_trusted_list_url and is_external:
+                article_links.append(link)
+                logger.debug(f"  接受(列表页已标日期的外链): {link}")
+                continue
 
             # 栏目分页不是文章，不能占用候选文章配额。
             if re.search(r'/index(?:_\d+)?\.(?:html?|shtml)$', parsed.path, re.IGNORECASE):
                 continue
 
-            # 跳过模式
-            if any(p in link_lower for p in skip_patterns):
+            # 栏目、频道、标签等导航页常以 .html 结尾，不能仅凭扩展名
+            # 当作文章。真实详情页通常具有明确的语义路径段。
+            is_listing_navigation = re.search(
+                r'/(?:list|lists|channel|category|categories|topics?|tags?)/[^/]+\.(?:html?|shtml)$',
+                parsed.path,
+                re.IGNORECASE,
+            ) is not None
+            if is_listing_navigation:
                 continue
 
-            is_external = parsed.netloc and parsed.netloc != domain
+            # 跳过模式
+            if not is_trusted_list_url and any(p in link_lower for p in skip_patterns):
+                continue
 
             # 外部链接检查
             if is_external:
                 # 栏目列表自身列出的文章（且同一条目明确显示发布日期）
                 # 可能跳转到微信公众号等外站，仍属于该栏目的有效文章。
-                if link.split("#", 1)[0] in trusted_list_urls:
-                    article_links.append(link)
-                    logger.debug(f"  接受(列表页已标日期的外链): {link}")
-                    continue
                 # 热榜/聚合类页面：允许特定外部链接
                 if is_aggregation_page:
                     # 检查是否是允许的外部域名
@@ -2901,6 +3370,11 @@ class WebScraper:
                 domain.endswith('thepaper.cn')
                 and re.search(r'/newsDetail_forward_\d+', parsed.path, re.IGNORECASE) is not None
             )
+            is_explicit_article_path = re.search(
+                r'/(?:article|articles|news|detail|content|post)/[^/]+(?:\.(?:html?|shtml|php))?$',
+                parsed.path,
+                re.IGNORECASE,
+            ) is not None
 
             # 栏目检查：只接受主栏目路径下的文章
             is_same_category = len(link_parts) > 1 and link_parts[0] == main_category
@@ -2920,6 +3394,9 @@ class WebScraper:
             if is_thepaper_detail:
                 article_links.append(link)
                 logger.debug(f"  接受(澎湃详情页): {link}")
+            elif is_explicit_article_path:
+                article_links.append(link)
+                logger.debug(f"  接受(明确详情路径): {link}")
             elif has_file_ext and is_same_category:
                 article_links.append(link)
                 logger.debug(f"  接受(栏目匹配): {link}")
@@ -2945,6 +3422,62 @@ class WebScraper:
             return start <= parsed <= end
         except (ValueError, TypeError):
             return False
+
+    def _prefilter_links_by_list_dates(
+        self,
+        article_links: List[str],
+        list_item_dates: Dict[str, str],
+        start: date,
+        end: date,
+        strict_coverage: float = 0.8,
+    ) -> List[str]:
+        """Use list dates only when their URL mapping is reliable enough."""
+        if not article_links or not list_item_dates:
+            return article_links
+
+        matched_in_range: List[str] = []
+        matched_out_of_range: List[str] = []
+        undated: List[str] = []
+
+        for link in article_links:
+            key = link.split("#", 1)[0]
+            list_date = list_item_dates.get(key)
+            if not list_date:
+                undated.append(link)
+            elif self._date_in_range(list_date, start, end):
+                matched_in_range.append(link)
+            else:
+                matched_out_of_range.append(link)
+
+        matched_count = len(matched_in_range) + len(matched_out_of_range)
+        coverage = matched_count / len(article_links)
+
+        if matched_count == 0:
+            logger.warning(
+                "列表日期与候选文章 URL 无交集，跳过日期预筛: 候选=%s，日期映射=%s",
+                len(article_links),
+                len(list_item_dates),
+            )
+            return article_links
+
+        if coverage >= strict_coverage:
+            logger.info(
+                "列表日期映射可靠，执行严格预筛: 覆盖=%s/%s (%.0f%%)",
+                matched_count,
+                len(article_links),
+                coverage * 100,
+            )
+            return matched_in_range
+
+        logger.warning(
+            "列表日期映射覆盖不足，保留未标日期候选: 覆盖=%s/%s (%.0f%%)，范围内=%s，明确超范围=%s",
+            matched_count,
+            len(article_links),
+            coverage * 100,
+            len(matched_in_range),
+            len(matched_out_of_range),
+        )
+        return matched_in_range + undated
 
     def _sort_by_date(self, results: List[ScrapedResult]) -> List[ScrapedResult]:
         """按日期排序（最新的在前）"""

@@ -430,7 +430,7 @@ export const useSettingsStore = create<SettingsStore>()(
 
       updateModel: async (id, updates) => {
         try {
-          const res = await fetch(`/api/models?id=${id}`, {
+          const res = await fetch(`/api/models/${encodeURIComponent(id)}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -451,7 +451,7 @@ export const useSettingsStore = create<SettingsStore>()(
 
       deleteModel: async (id) => {
         try {
-          const res = await fetch(`/api/models?id=${id}`, {
+          const res = await fetch(`/api/models/${encodeURIComponent(id)}`, {
             method: "DELETE",
           });
           if (res.ok) {
@@ -518,7 +518,7 @@ export const useSettingsStore = create<SettingsStore>()(
 
       updateScrapeSource: async (id, updates) => {
         try {
-          const res = await fetch(`/api/settings/scrape?id=${id}`, {
+          const res = await fetch(`/api/settings/scrape/${encodeURIComponent(id)}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -539,7 +539,7 @@ export const useSettingsStore = create<SettingsStore>()(
 
       deleteScrapeSource: async (id) => {
         try {
-          const res = await fetch(`/api/settings/scrape?id=${id}`, {
+          const res = await fetch(`/api/settings/scrape/${encodeURIComponent(id)}`, {
             method: "DELETE",
           });
           if (res.ok) {

@@ -18,9 +18,9 @@ from app.models.wechat import WechatCrawlTask
 logger = logging.getLogger("scheduler")
 
 # Scheduled scraping can be tuned without changing code or rebuilding the image.
-SCHEDULED_URL_TIMEOUT_SECONDS = int(os.getenv("SCHEDULED_URL_TIMEOUT_SECONDS", "300"))
-SCHEDULED_PAGE_TIMEOUT_SECONDS = int(os.getenv("SCHEDULED_PAGE_TIMEOUT_SECONDS", "90"))
-SCHEDULED_URL_RETRIES = int(os.getenv("SCHEDULED_URL_RETRIES", "1"))
+SCHEDULED_URL_TIMEOUT_SECONDS = int(os.getenv("SCHEDULED_URL_TIMEOUT_SECONDS", "180"))
+SCHEDULED_PAGE_TIMEOUT_SECONDS = int(os.getenv("SCHEDULED_PAGE_TIMEOUT_SECONDS", "60"))
+SCHEDULED_URL_RETRIES = int(os.getenv("SCHEDULED_URL_RETRIES", "0"))
 SCHEDULED_RETRY_BACKOFF_SECONDS = float(os.getenv("SCHEDULED_RETRY_BACKOFF_SECONDS", "5"))
 SCHEDULED_TASK_MAX_RUNTIME_SECONDS = int(os.getenv("SCHEDULED_TASK_MAX_RUNTIME_SECONDS", "1200"))
 SCHEDULED_MAX_ARTICLES = int(os.getenv("SCHEDULED_MAX_ARTICLES", "10"))
@@ -40,7 +40,19 @@ async def _scrape_scheduled_url(
     attempts = max(1, SCHEDULED_URL_RETRIES + 1)
     last_error = None
 
+    def progress(step, message, detail, current=None, total=None):
+        position = f" ({current}/{total})" if current is not None and total else ""
+        logger.info("[定时爬取进度] %s%s: %s", message, position, detail)
+
     for attempt in range(attempts):
+        logger.info(
+            "[定时爬取] 开始来源: %s，单来源上限=%s秒，页面上限=%s秒，尝试=%s/%s",
+            url,
+            timeout_seconds,
+            getattr(options, "timeout", "unknown"),
+            attempt + 1,
+            attempts,
+        )
         try:
             return await asyncio.wait_for(
                 scraper.deep_scrape(
@@ -49,11 +61,17 @@ async def _scrape_scheduled_url(
                     max_articles=max_articles,
                     date_range=date_range,
                     scrape_level="deep",
+                    progress_callback=progress,
                 ),
                 timeout=timeout_seconds,
             )
         except asyncio.TimeoutError as exc:
             last_error = exc
+            logger.error(
+                "[定时爬取超时] 来源=%s，已达到单来源上限=%s秒；请结合前面的进度日志判断是列表页还是具体文章卡住",
+                url,
+                timeout_seconds,
+            )
             if attempt + 1 < attempts:
                 logger.warning(
                     "Scheduled URL timed out; retrying %s/%s: %s",
@@ -172,7 +190,7 @@ def run_wechat_crawl_task(task_id: str):
 def run_scheduled_task(task_id: str):
     """执行单个定时任务"""
     logger.info(f"⏰ [定时执行] 开始执行任务: {task_id}")
-    logger.info(f"⏰ [定时执行] 当前时间: {datetime.utcnow().isoformat()}")
+    logger.info(f"⏰ [定时执行] 当前时间(北京时间): {beijing_now().isoformat()}")
 
     # 创建新的数据库会话确保线程安全
     from app.core.database import get_session_local
@@ -246,7 +264,7 @@ def run_scheduled_task(task_id: str):
             scraper = get_scraper()
 
             # 使用与正常网页爬取 /api/scrape 相同的选项
-            options = ScrapeOptions(timeout=SCHEDULED_PAGE_TIMEOUT_SECONDS)
+            options = ScrapeOptions.for_background_task(SCHEDULED_PAGE_TIMEOUT_SECONDS)
 
             # 任务最大执行时间（秒），默认 10 分钟，防止任务卡住
             task_max_runtime = SCHEDULED_TASK_MAX_RUNTIME_SECONDS
@@ -289,6 +307,11 @@ def run_scheduled_task(task_id: str):
 
                     # 保存每篇文章到数据库
                     for result in article_results:
+                        if result.status == "metadata_only":
+                            message = f"详情页不允许公开爬取，未保存到文档管理: {result.url}"
+                            errors.append(message)
+                            logger.warning(f"    {message}")
+                            continue
                         if result.content and result.word_count > 50:
                             saved, article_id = scraper.save_to_database(
                                 result, category_id=category_id, source_id=source_id
@@ -496,16 +519,17 @@ def _update_next_run_times():
         from datetime import datetime, timedelta
         tasks = db.query(ScheduledTask).filter(ScheduledTask.is_enabled == True).all()
         now = datetime.utcnow()
+        local_now = beijing_now()
         updated_count = 0
 
         for task in tasks:
             # 如果下次执行时间已过或为空，重新计算
             if not task.next_run_at or task.next_run_at < now:
                 hour, minute = map(int, task.schedule_time.split(":"))
-                next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-                if next_run <= now:
+                next_run = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if next_run <= local_now:
                     next_run += timedelta(days=1)
-                task.next_run_at = next_run
+                task.next_run_at = local_to_utc_naive(next_run)
                 updated_count += 1
 
         if updated_count > 0:

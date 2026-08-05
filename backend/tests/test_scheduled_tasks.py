@@ -45,9 +45,11 @@ async def test_run_now_timeout_always_finishes_history(monkeypatch):
     worker_db = MagicMock()
     worker_db.query.return_value.filter.return_value.first.return_value = history_obj
     session_factory = MagicMock(return_value=worker_db)
+    received_options = []
 
     class SlowScraper:
         async def deep_scrape(self, **kwargs):
+            received_options.append(kwargs["options"])
             await asyncio.sleep(0.05)
 
         def save_to_database(self, *args, **kwargs):
@@ -71,5 +73,6 @@ async def test_run_now_timeout_always_finishes_history(monkeypatch):
     assert history_obj.status == TaskStatus.FAILED.value
     assert history_obj.finished_at is not None
     assert "超时" in history_obj.error_message
+    assert received_options and received_options[0].extract_metadata is False
     worker_db.commit.assert_called_once()
     worker_db.close.assert_called_once()

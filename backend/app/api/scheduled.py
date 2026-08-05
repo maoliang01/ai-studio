@@ -6,6 +6,7 @@
 import logging
 import json
 import asyncio
+import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Optional, List
@@ -15,6 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.time_utils import beijing_iso, beijing_now, local_to_utc_naive
 from app.models.scheduled_task import (
     ScheduledTask, ScrapeHistory, TaskStatus
 )
@@ -22,8 +24,18 @@ from app.models.article import ScrapeSource
 
 logger = logging.getLogger("ai-studio")
 
-IMMEDIATE_TASK_MAX_RUNTIME_SECONDS = 600
-IMMEDIATE_URL_TIMEOUT_SECONDS = 120
+# Manual runs must use the same limits as scheduled runs; otherwise the UI can
+# report a different timeout than the scheduler for the same source.
+IMMEDIATE_TASK_MAX_RUNTIME_SECONDS = int(
+    os.getenv("SCHEDULED_TASK_MAX_RUNTIME_SECONDS", "1200")
+)
+IMMEDIATE_URL_TIMEOUT_SECONDS = int(
+    os.getenv("SCHEDULED_URL_TIMEOUT_SECONDS", "180")
+)
+IMMEDIATE_PAGE_TIMEOUT_SECONDS = int(
+    os.getenv("SCHEDULED_PAGE_TIMEOUT_SECONDS", "60")
+)
+IMMEDIATE_MAX_ARTICLES = int(os.getenv("SCHEDULED_MAX_ARTICLES", "10"))
 _immediate_executor = ThreadPoolExecutor(
     max_workers=5,
     thread_name_prefix="scheduled-immediate",
@@ -37,11 +49,11 @@ router = APIRouter(prefix="/api/scheduled", tags=["定时任务"])
 def _calculate_next_run(schedule_time: str) -> datetime:
     """计算下次执行时间"""
     hour, minute = map(int, schedule_time.split(":"))
-    now = datetime.now()
+    now = beijing_now()
     next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if next_run <= now:
         next_run += timedelta(days=1)
-    return next_run
+    return local_to_utc_naive(next_run)
 
 
 def _sync_scheduler():
@@ -111,10 +123,10 @@ def _task_to_response(task: ScheduledTask) -> dict:
         "schedule_time": task.schedule_time,
         "scrape_range": task.scrape_range,
         "is_enabled": task.is_enabled,
-        "last_run_at": task.last_run_at.isoformat() if task.last_run_at else None,
-        "next_run_at": task.next_run_at.isoformat() if task.next_run_at else None,
-        "created_at": task.created_at.isoformat() if task.created_at else None,
-        "updated_at": task.updated_at.isoformat() if task.updated_at else None,
+        "last_run_at": beijing_iso(task.last_run_at),
+        "next_run_at": beijing_iso(task.next_run_at),
+        "created_at": beijing_iso(task.created_at),
+        "updated_at": beijing_iso(task.updated_at),
     }
 
 
@@ -151,11 +163,11 @@ def _history_to_response(history: ScrapeHistory) -> dict:
         "article_id": history.article_id,
         "status": history.status,
         "error_message": history.error_message,
-        "started_at": history.started_at.isoformat() if history.started_at else None,
-        "finished_at": history.finished_at.isoformat() if history.finished_at else None,
+        "started_at": beijing_iso(history.started_at),
+        "finished_at": beijing_iso(history.finished_at),
         "duration": duration,
         "articles_count": history.articles_count,
-        "created_at": history.created_at.isoformat() if history.created_at else None,
+        "created_at": beijing_iso(history.created_at),
     }
 
 
@@ -247,7 +259,7 @@ async def get_stats(db: Session = Depends(get_db)):
     enabled_tasks = db.query(ScheduledTask).filter(ScheduledTask.is_enabled == True).count()
 
     # 今日统计
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today = local_to_utc_naive(beijing_now().replace(hour=0, minute=0, second=0, microsecond=0))
     today_histories = db.query(ScrapeHistory).filter(
         ScrapeHistory.started_at >= today
     ).all()
@@ -288,7 +300,7 @@ async def get_running_tasks(db: Session = Depends(get_db)):
             "task_id": h.task_id,
             "task_name": _history_to_response(h).get("task_name"),
             "url": h.url,
-            "started_at": h.started_at.isoformat() if h.started_at else None,
+            "started_at": beijing_iso(h.started_at),
             "elapsed_seconds": elapsed,
         })
 
@@ -325,7 +337,7 @@ async def list_history(
 @router.get("/history/summary")
 async def get_history_summary(db: Session = Depends(get_db)):
     """获取每日爬取汇总（最近7天）"""
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today = local_to_utc_naive(beijing_now().replace(hour=0, minute=0, second=0, microsecond=0))
     week_ago = today - timedelta(days=7)
 
     histories = db.query(ScrapeHistory).filter(
@@ -642,10 +654,14 @@ async def run_task_now(task_id: str, db: Session = Depends(get_db)):
                     category_id = source.category_id
 
             scraper = get_scraper()
-            options = ScrapeOptions()
+            options = ScrapeOptions.for_background_task(IMMEDIATE_PAGE_TIMEOUT_SECONDS)
 
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+
+            def progress(step, message, detail, current=None, total=None):
+                position = f" ({current}/{total})" if current is not None and total else ""
+                logger.info("[立即执行进度] %s%s: %s", message, position, detail)
 
             for url in worker_urls:
                 elapsed = (datetime.utcnow() - start_time).total_seconds()
@@ -665,9 +681,10 @@ async def run_task_now(task_id: str, db: Session = Depends(get_db)):
                             scraper.deep_scrape(
                                 url=url,
                                 options=options,
-                                max_articles=20,
+                                max_articles=IMMEDIATE_MAX_ARTICLES,
                                 date_range=scrape_range,
                                 scrape_level="deep",
+                                progress_callback=progress,
                             ),
                             timeout=timeout_seconds,
                         )
@@ -675,6 +692,11 @@ async def run_task_now(task_id: str, db: Session = Depends(get_db)):
                     logger.info(f"  [立即执行] 识别到 {len(article_results)} 篇文章")
 
                     for result in article_results:
+                        if result.status == "metadata_only":
+                            message = f"详情页不允许公开爬取，未保存到文档管理: {result.url}"
+                            errors.append(message)
+                            logger.warning(f"    [立即执行] {message}")
+                            continue
                         if result.content and result.word_count > 50:
                             saved, article_id = scraper.save_to_database(
                                 result, category_id=category_id, source_id=source_id

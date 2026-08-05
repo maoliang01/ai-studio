@@ -89,6 +89,7 @@ class TrendPredictionEngine:
         event: Dict[str, Any],
         time_range: int = 30,
         prediction_type: str = "general",
+        model_id: Optional[str] = None,
     ) -> PredictionResult:
         """基于候选事件的多篇证据文档和知识点进行交叉预测。"""
         evidence = event.get("evidence_articles") or []
@@ -211,6 +212,9 @@ class TrendPredictionEngine:
                 "knowledge_points": len(points),
                 "cross_document_relations": relation_count,
                 "confidence": confidence,
+                "model_id": model_id,
+                "knowledge_point_details": basis["knowledge_point_details"],
+                "relation_details": relation_details,
             },
         )
         return prediction

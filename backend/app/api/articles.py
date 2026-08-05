@@ -4,8 +4,9 @@
 提供文章的增删改查和全文搜索功能
 """
 import logging
+import re
 from datetime import datetime, date
-from typing import Optional, List
+from typing import Optional, List, Literal
 from math import ceil
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Body, BackgroundTasks
@@ -159,6 +160,40 @@ class ArticleStatsResponse:
 
 # ============ 辅助函数 ============
 
+def _split_article_search_terms(search_text: str) -> List[str]:
+    """Split a query into unique OR terms while preserving user spelling."""
+    terms = []
+    seen = set()
+    for value in re.split(r"[\s,，、;；]+", (search_text or "").strip()):
+        term = value.strip()
+        normalized = term.casefold()
+        if not term or normalized in seen:
+            continue
+        seen.add(normalized)
+        terms.append(term)
+    return terms[:20]
+
+
+def _article_search_condition(search_text: str):
+    """OR-match every query term against titles and extracted keyword names."""
+    conditions = []
+    for search_term in _split_article_search_terms(search_text):
+        escaped = (
+            search_term
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        pattern = f"%{escaped}%"
+        conditions.extend((
+            Article.title.ilike(pattern, escape="\\"),
+            Article.keywords.any(
+                ArticleKeyword.keyword.has(Keyword.name.ilike(pattern, escape="\\"))
+            ),
+        ))
+    return or_(*conditions)
+
+
 def _get_or_create_keywords(db: Session, keyword_names: List[str]) -> List[Keyword]:
     """获取或创建关键词"""
     if not keyword_names:
@@ -225,7 +260,8 @@ def _scrape_result_to_article(
 @router.get("/stats")
 async def get_article_stats(db: Session = Depends(get_db)):
     """获取文章统计信息"""
-    total = db.query(func.count(Article.id)).scalar() or 0
+    visible_articles = Article.status != "metadata_only"
+    total = db.query(func.count(Article.id)).filter(visible_articles).scalar() or 0
     success = db.query(func.count(Article.id)).filter(
         Article.status == "success"
     ).scalar() or 0
@@ -242,7 +278,7 @@ async def get_article_stats(db: Session = Depends(get_db)):
         func.count(Article.id)
     ).join(
         Article, Article.category_id == Category.id
-    ).group_by(Category.name).all()
+    ).filter(visible_articles).group_by(Category.name).all()
 
     return ArticleStatsResponse.from_query(
         total, success, pending, error, category_stats
@@ -251,7 +287,7 @@ async def get_article_stats(db: Session = Depends(get_db)):
 
 @router.get("")
 async def list_articles(
-    q: Optional[str] = Query(None, description="搜索关键词（匹配标题、内容、摘要、关键词）"),
+    q: Optional[str] = Query(None, description="搜索关键词，多个词按 OR 匹配标题和提取关键词"),
     category_id: Optional[str] = Query(None, description="按分类过滤 (government/business/academic)"),
     source_id: Optional[str] = Query(None, description="按来源过滤"),
     source_type: Optional[str] = Query(None, description="按信源类型过滤 (web/wechat)"),
@@ -259,35 +295,22 @@ async def list_articles(
     status: Optional[str] = Query(None, description="按状态过滤"),
     start_date: Optional[str] = Query(None, description="开始日期 (YYYY-MM-DD)"),
     end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
+    sort_by: Literal[
+        "title", "source_name", "source_type", "url", "category_name",
+        "style", "published_at", "summary", "kg_status"
+    ] = Query("published_at", description="排序字段"),
+    sort_order: Literal["asc", "desc"] = Query("desc", description="排序方向"),
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=1, le=100, description="每页数量"),
     db: Session = Depends(get_db)
 ):
-    """获取文章列表（支持分页和过滤，含标题/内容/摘要/关键词模糊搜索）"""
-    query = db.query(Article)
+    """获取文章列表（支持多关键词 OR 模糊匹配标题或提取关键词）。"""
+    # 无正文的爬取结果只出现在任务日志中，永远不属于文档管理。
+    query = db.query(Article).filter(Article.status != "metadata_only")
 
     # 应用过滤器
-    if q:
-        # 模糊匹配：标题、内容、摘要、关键词
-        keyword_pattern = f"%{q}%"
-        query = query.outerjoin(
-            ArticleKeyword, Article.id == ArticleKeyword.article_id
-        ).outerjoin(
-            Keyword, ArticleKeyword.keyword_id == Keyword.id
-        ).outerjoin(
-            ScrapeSource, Article.source_id == ScrapeSource.id
-        ).filter(
-            or_(
-                Article.title.ilike(keyword_pattern),
-                Article.content.ilike(keyword_pattern),
-                Article.summary.ilike(keyword_pattern),
-                Article.author.ilike(keyword_pattern),
-                Article.url.ilike(keyword_pattern),
-                Article.style.ilike(keyword_pattern),
-                Keyword.name.ilike(keyword_pattern),
-                ScrapeSource.name.ilike(keyword_pattern),
-            )
-        ).distinct()
+    if q and q.strip():
+        query = query.filter(_article_search_condition(q))
     if category_id:
         query = query.filter(Article.category_id == category_id)
     if source_id:
@@ -315,11 +338,32 @@ async def list_articles(
     # 获取总数
     total = query.count()
 
+    sort_columns = {
+        "title": Article.title,
+        "source_type": Article.source_type,
+        "url": Article.url,
+        "style": Article.style,
+        "published_at": Article.published_at,
+        "summary": Article.summary,
+        "kg_status": Article.kg_status,
+    }
+    if sort_by == "source_name":
+        query = query.outerjoin(ScrapeSource, Article.source_id == ScrapeSource.id)
+        sort_column = ScrapeSource.name
+    elif sort_by == "category_name":
+        query = query.outerjoin(Category, Article.category_id == Category.id)
+        sort_column = Category.name
+    else:
+        sort_column = sort_columns[sort_by]
+
+    primary_order = sort_column.asc() if sort_order == "asc" else sort_column.desc()
+
     # 分页查询
     offset = (page - 1) * page_size
     articles = query.order_by(
-        Article.published_at.desc().nullslast(),
-        Article.scraped_at.desc()
+        primary_order.nullslast(),
+        Article.scraped_at.desc(),
+        Article.id.asc()
     ).offset(offset).limit(page_size).all()
 
     # 转换为响应格式
@@ -766,9 +810,10 @@ async def batch_save_articles(
     }
 
 
+@router.get("/search")
 @router.post("/search")
 async def search_articles(
-    q: str = Query(..., min_length=1, description="搜索关键词（全文搜索 + 关键词匹配）"),
+    q: str = Query(..., min_length=1, description="搜索关键词（标题 + 提取关键词）"),
     category_id: Optional[str] = Query(None, description="按分类过滤 (government/business/academic)"),
     source_id: Optional[str] = Query(None, description="按来源过滤"),
     source_type: Optional[str] = Query(None, description="按信源类型过滤 (web/wechat)"),
@@ -778,9 +823,8 @@ async def search_articles(
     page_size: int = Query(20, ge=1, le=100, description="每页数量"),
     db: Session = Depends(get_db)
 ):
-    """全文搜索文章（标题/内容/摘要 + 关键词模糊匹配）"""
-    # 使用 PostgreSQL 全文搜索 + 关键词匹配
-    search_query = q.replace("'", "''")
+    """按文章标题或提取关键词搜索文章。"""
+    search_query = q.strip()
     keyword_pattern = f"%{search_query}%"
 
     # 构建基本查询
@@ -806,23 +850,26 @@ async def search_articles(
     if status:
         query = query.filter(Article.status == status)
 
-    # 执行全文搜索
+    # 与文档列表保持同一语义：仅匹配标题和已提取关键词。
     fts_query = text("""
         SELECT id FROM articles
-        WHERE search_vector @@ plainto_tsquery('chinese', :query)
-        ORDER BY ts_rank(search_vector, plainto_tsquery('chinese', :query)) DESC
+        WHERE title ILIKE :pattern ESCAPE '\\'
+        ORDER BY published_at DESC NULLS LAST, scraped_at DESC
     """)
 
-    result = db.execute(fts_query, {"query": search_query})
+    escaped_search_query = (
+        search_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    )
+    result = db.execute(fts_query, {"pattern": f"%{escaped_search_query}%"})
     article_ids = [row[0] for row in result.fetchall()]
 
     # 添加关键词模糊匹配（独立查询）
     keyword_query = text("""
         SELECT DISTINCT ak.article_id FROM article_keywords ak
         JOIN keywords k ON ak.keyword_id = k.id
-        WHERE k.name ILIKE :pattern
+        WHERE k.name ILIKE :pattern ESCAPE '\\'
     """)
-    keyword_result = db.execute(keyword_query, {"pattern": keyword_pattern})
+    keyword_result = db.execute(keyword_query, {"pattern": f"%{escaped_search_query}%"})
     keyword_article_ids = [row[0] for row in keyword_result.fetchall()]
 
     # 合并全文搜索和关键词搜索结果

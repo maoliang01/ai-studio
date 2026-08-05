@@ -2556,6 +2556,7 @@ class DiscoveredEventPredictionRequest(BaseModel):
     event_id: str = Field(..., min_length=1, max_length=100)
     time_range: int = Field(30, ge=1, le=365)
     prediction_type: str = Field("general")
+    model_id: Optional[str] = Field(None, min_length=1, max_length=200)
 
 
 class PredictionFeedbackRequest(BaseModel):
@@ -2709,12 +2710,30 @@ async def predict_discovered_event(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="候选事件已过期，请刷新候选事件")
     if len(event.get("evidence_articles") or []) < 2:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="该候选事件只有单篇证据，暂不进行交叉预测")
+    evidence_ids = [item.get("id") for item in event.get("evidence_articles") or [] if item.get("id")]
+    article_rows = db.query(Article).filter(Article.id.in_(evidence_ids)).all() if evidence_ids else []
+    articles_by_id = {str(article.id): article for article in article_rows}
+    analysis_event = {
+        **event,
+        "evidence_articles": [
+            {
+                **item,
+                "analysis_text": (
+                    articles_by_id[str(item.get("id"))].content
+                    or articles_by_id[str(item.get("id"))].summary
+                    or ""
+                )[:4000] if str(item.get("id")) in articles_by_id else item.get("summary", ""),
+            }
+            for item in event.get("evidence_articles") or []
+        ],
+    }
     neo4j = get_neo4j_service()
     try:
         result = await TrendPredictionEngine(neo4j, llm_client=llm_service).predict_discovered_event(
-            event=event,
+            event=analysis_event,
             time_range=request.time_range,
             prediction_type=request.prediction_type,
+            model_id=request.model_id,
         )
         record_request = TrendPredictionRequest(
             topic=result.topic,

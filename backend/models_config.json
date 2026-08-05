@@ -27,7 +27,7 @@
       "name": "deepseek-v4-flash",
       "type": "llm",
       "base_url": "https://uni-api.cstcloud.cn/v1",
-      "api_key": "c37fd396c3f2da91e6fe7ac162e8af45fcaee11cc8aaa80c0e40a63479f5f36e",
+      "api_key": "c37fd396c3f2da91e6fe7ac162e8af45fcaee11cc8aab80c0e40a63479f5f36e",
       "model_name": "deepseek-v4-flash",
       "is_connected": false,
       "latency": null,

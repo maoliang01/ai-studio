@@ -52,9 +52,9 @@ if ($LASTEXITCODE -ne 0) {
 
 $backendReady = $false
 for ($i = 0; $i -lt 60; $i++) {
-  if (Test-Port 8000) {
+  if (Test-Port 8500) {
     try {
-      $response = Invoke-WebRequest "http://localhost:8000/docs" -UseBasicParsing -TimeoutSec 3
+      $response = Invoke-WebRequest "http://localhost:8500/docs" -UseBasicParsing -TimeoutSec 3
       if ($response.StatusCode -eq 200) {
         $backendReady = $true
         break
@@ -103,5 +103,5 @@ if (-not $frontendReady) {
 Write-Host ""
 Write-Host "AI Studio is ready." -ForegroundColor Green
 Write-Host "Frontend: http://localhost:3000"
-Write-Host "Backend:  http://localhost:8000/docs"
+Write-Host "Backend:  http://localhost:8500/docs"
 Write-Host "Neo4j:    http://localhost:7474"

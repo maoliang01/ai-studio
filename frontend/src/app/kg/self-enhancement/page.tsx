@@ -5,6 +5,7 @@ import { AlertCircle, CheckCircle2, FileText, Loader2, RefreshCw, TrendingUp } f
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 interface EventEvidence {
@@ -36,9 +37,36 @@ interface PredictionResult {
   factors: Array<{ type: string; name: string; evidence?: string }>
   scenarios: Array<{ name: string; trend: string; probability: number; basis: string }>
   interpretation?: {
+    analysis_status?: 'complete' | 'unavailable'
+    analysis_error?: string
+    quality_warnings?: string[]
+    analysis_model?: string
+    generated_by?: string
+    executive_judgment?: string
     event_summary: string
     current_phase: string
-    next_developments: Array<{ title: string; likelihood: string; basis: string; watch_for: string }>
+    signal_assessment?: { label: string; meaning: string; evidence: string }
+    impact_assessments?: Array<{
+      dimension: string
+      conclusion: string
+      mechanism: string
+      affected_parties: string[]
+      horizon: string
+      likelihood: string
+      evidence_basis: string
+    }>
+    next_developments: Array<{
+      dimension?: string
+      title: string
+      likelihood: string
+      timeframe?: string
+      mechanism?: string
+      affected_parties?: string[]
+      basis: string
+      watch_for: string
+    }>
+    opportunities?: Array<{ title: string; beneficiaries: string[]; rationale: string; entry_condition: string; horizon: string }>
+    challenges?: Array<{ title: string; exposed_parties: string[]; rationale: string; warning_signal: string; horizon: string }>
     drivers: string[]
     risks: string[]
     watch_indicators: string[]
@@ -55,6 +83,14 @@ interface PredictionResult {
     knowledge_point_details?: Array<{ title: string; content: string; category: string; evidence?: string; source_url?: string | null }>
     relation_details?: Array<{ source: string; target: string; type: string; strength: number; evidence?: string }>
   }
+}
+
+interface AnalysisModel {
+  id: string
+  name: string
+  type: string
+  model_name: string
+  latency?: number
 }
 
 interface Synthesis {
@@ -93,7 +129,7 @@ interface Stats {
   }
 }
 
-const trendLabels: Record<string, string> = { up: '上升', down: '下降', stable: '稳定' }
+const trendLabels: Record<string, string> = { up: '推进信号较多', down: '约束信号较多', stable: '信号相对均衡' }
 
 function trendLabel(value: string) {
   return trendLabels[value] || value
@@ -129,6 +165,10 @@ export default function SelfEnhancementPage() {
   const [loadingEvents, setLoadingEvents] = useState(false)
   const [loadingEventId, setLoadingEventId] = useState<string | null>(null)
   const [loadingSynthesis, setLoadingSynthesis] = useState(false)
+  const [analysisModels, setAnalysisModels] = useState<AnalysisModel[]>([])
+  const [selectedAnalysisModel, setSelectedAnalysisModel] = useState('')
+  const [modelLatencies, setModelLatencies] = useState<Record<string, number>>({})
+  const [benchmarkingModels, setBenchmarkingModels] = useState(false)
 
   const loadStats = async () => {
     const response = await fetch('/api/kg/self-enhancement/stats')
@@ -158,29 +198,78 @@ export default function SelfEnhancementPage() {
     if (response.ok) setHistory((await response.json()).predictions || [])
   }
 
+  const benchmarkAnalysisModels = async (candidates = analysisModels) => {
+    if (!candidates.length || benchmarkingModels) return
+    setBenchmarkingModels(true)
+    try {
+      const results = await Promise.all(candidates.map(async (model) => {
+        const startedAt = performance.now()
+        try {
+          const response = await fetch(`/api/models/${encodeURIComponent(model.id)}/test`, { method: 'POST' })
+          const result = await response.json()
+          if (!response.ok || !result.success) return null
+          return { id: model.id, latency: Number(result.latency) || Math.round(performance.now() - startedAt) }
+        } catch {
+          return null
+        }
+      }))
+      const successful = results.filter((item): item is { id: string; latency: number } => item !== null)
+      if (!successful.length) return
+      const latencies = Object.fromEntries(successful.map((item) => [item.id, item.latency]))
+      const fastest = [...successful].sort((left, right) => left.latency - right.latency)[0]
+      setModelLatencies(latencies)
+      setSelectedAnalysisModel(fastest.id)
+      localStorage.setItem('kg-analysis-model', fastest.id)
+      localStorage.setItem('kg-analysis-model-latencies', JSON.stringify(latencies))
+    } finally {
+      setBenchmarkingModels(false)
+    }
+  }
+
+  const loadAnalysisModels = async () => {
+    try {
+      const response = await fetch('/api/models')
+      const data = await readJson(response)
+      const candidates = (Array.isArray(data) ? data : []).filter((model: AnalysisModel) => model.type !== 'embedding')
+      setAnalysisModels(candidates)
+      const cachedLatencies = JSON.parse(localStorage.getItem('kg-analysis-model-latencies') || '{}') as Record<string, number>
+      setModelLatencies(cachedLatencies)
+      const cachedSelection = localStorage.getItem('kg-analysis-model') || ''
+      const validCachedSelection = candidates.some((model: AnalysisModel) => model.id === cachedSelection)
+      if (validCachedSelection) {
+        setSelectedAnalysisModel(cachedSelection)
+      } else if (candidates.length) {
+        void benchmarkAnalysisModels(candidates)
+      }
+    } catch (error) {
+      console.error('加载分析模型失败:', error)
+    }
+  }
+
   const reload = async () => {
     await Promise.all([loadStats(), loadEvents(), loadSyntheses(), loadHistory()])
   }
 
   useEffect(() => {
     reload()
+    loadAnalysisModels()
   }, [])
 
   const predictEvent = async (event: DiscoveredEvent) => {
     setLoadingEventId(event.id)
     const controller = new AbortController()
-    const timeout = window.setTimeout(() => controller.abort(), 35000)
+    const timeout = window.setTimeout(() => controller.abort(), 110000)
     try {
       const response = await fetch('/api/kg/prediction/discovered-event', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ event_id: event.id, time_range: 30, prediction_type: 'general' }),
+        body: JSON.stringify({ event_id: event.id, time_range: 30, prediction_type: 'general', model_id: selectedAnalysisModel || undefined }),
         signal: controller.signal,
       })
       setPrediction(await readJson(response))
       await loadHistory()
     } catch (error) {
-      alert(error instanceof DOMException && error.name === 'AbortError' ? '交叉分析超时，请稍后重试。系统已将 LLM 解读限制在 10 秒内。' : error instanceof Error ? error.message : '交叉分析失败')
+      alert(error instanceof DOMException && error.name === 'AbortError' ? '深度分析超过 110 秒，请稍后重试。系统不会用固定模板替代分析结果。' : error instanceof Error ? error.message : '交叉分析失败')
     } finally {
       window.clearTimeout(timeout)
       setLoadingEventId(null)
@@ -275,7 +364,17 @@ export default function SelfEnhancementPage() {
             <CardHeader className="flex flex-row items-start justify-between gap-4">
               <div>
                 <CardTitle>系统发现的候选事件</CardTitle>
-                <p className="mt-1 text-sm text-gray-500">只有至少 2 篇相关文档的事件才能交叉分析。按钮会读取这些文档的摘要、知识点和关系，输出基准、乐观和风险情景。</p>
+                <p className="mt-1 text-sm text-gray-500">只有至少 2 篇相关文档的事件才能交叉分析。系统结合来源正文、知识点和关系，推演经济、政策、产业影响以及具体机会与挑战。</p>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-medium text-gray-600">分析模型</span>
+                  <Select value={selectedAnalysisModel || null} onValueChange={(value) => { if (value) { setSelectedAnalysisModel(value); localStorage.setItem('kg-analysis-model', value) } }}>
+                    <SelectTrigger size="sm" className="w-64"><SelectValue placeholder={benchmarkingModels ? '正在测试模型速度...' : '选择分析模型'} /></SelectTrigger>
+                    <SelectContent>{analysisModels.map((model) => <SelectItem key={model.id} value={model.id}>{model.name}{modelLatencies[model.id] ? ` · ${modelLatencies[model.id]}ms` : ''}</SelectItem>)}</SelectContent>
+                  </Select>
+                  <Button size="sm" variant="outline" onClick={() => benchmarkAnalysisModels()} disabled={benchmarkingModels || !analysisModels.length}>
+                    {benchmarkingModels ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-1 h-3.5 w-3.5" />}{benchmarkingModels ? '测速中' : '测速并选最快'}
+                  </Button>
+                </div>
               </div>
               <Button variant="outline" onClick={loadEvents} disabled={loadingEvents}>
                 <RefreshCw className={`mr-2 h-4 w-4 ${loadingEvents ? 'animate-spin' : ''}`} />刷新发现
@@ -292,7 +391,7 @@ export default function SelfEnhancementPage() {
                       <p className="mt-1 text-sm text-gray-500">发现置信度 {Math.round(event.confidence * 100)}% · 来源 {event.evidence_articles.length} 篇</p>
                       <div className="mt-2 flex flex-wrap gap-2">{event.signal_reasons.map((reason) => <Badge key={reason} variant="outline">{reason}</Badge>)}</div>
                     </div>
-                    <Button onClick={() => predictEvent(event)} disabled={loadingEventId !== null}>
+                    <Button onClick={() => predictEvent(event)} disabled={loadingEventId !== null || benchmarkingModels || !selectedAnalysisModel}>
                       {loadingEventId === event.id ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <TrendingUp className="mr-2 h-4 w-4" />}
                       交叉分析
                     </Button>
@@ -308,15 +407,66 @@ export default function SelfEnhancementPage() {
 
           {prediction && (
             <Card className="border-green-200">
-              <CardHeader><CardTitle>交叉分析结果</CardTitle><p className="text-sm text-gray-500">{prediction.topic}</p></CardHeader>
-              <CardContent className="space-y-4">
-                <div className="rounded border border-slate-200 bg-slate-50 p-3 text-sm text-gray-700">“证据支持度”表示当前资料对判断方向的支持程度，不是事件发生概率，也不是统计学置信区间。分数越高，说明来源、知识点和已审核关系越充分。</div>
-                <div className="flex flex-wrap gap-2"><Badge>判断方向：{trendLabel(prediction.trend)}</Badge><Badge variant="outline">证据支持度：{prediction.knowledge_basis.support_level || '待评估'}（{Math.round(prediction.confidence * 100)}分）</Badge><Badge variant="outline">来源：{prediction.knowledge_basis.evidence_articles || 0} 篇</Badge><Badge variant="outline">结构化知识点：{prediction.knowledge_basis.knowledge_points || 0} 个</Badge><Badge variant="outline">已审核关系：{prediction.knowledge_basis.cross_document_relations || 0} 条</Badge></div>
-                {(prediction.knowledge_basis.knowledge_points || 0) === 0 && <div className="flex gap-2 rounded bg-amber-50 p-3 text-sm text-amber-800"><AlertCircle className="h-4 w-4 shrink-0" />本次使用了多篇文章，但这些文章尚未形成知识点或正式关系，结果主要依据文章内容，可信度需要谨慎解读。</div>}
-                <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-4"><div className="flex flex-wrap items-center justify-between gap-2"><h4 className="font-medium">事件解读</h4><Badge variant="outline">{prediction.interpretation?.current_phase || '待补充阶段判断'}</Badge></div><p className="mt-2 text-sm leading-6 text-gray-700">{prediction.interpretation?.event_summary || '当前结果主要反映来源文章中的共同信号，尚未形成进一步解读。'}</p>{prediction.interpretation?.next_developments?.length ? <div className="mt-4"><h5 className="mb-2 text-sm font-medium">可能的下一步</h5><div className="grid gap-3 md:grid-cols-2">{prediction.interpretation.next_developments.map((item) => <div key={item.title} className="rounded border bg-white p-3"><div className="flex flex-wrap justify-between gap-2"><strong className="text-sm">{item.title}</strong><Badge variant="outline">可能性：{item.likelihood}</Badge></div><p className="mt-2 text-xs text-gray-600">判断依据：{item.basis}</p><p className="mt-1 text-xs text-gray-500">观察：{item.watch_for}</p></div>)}</div></div> : null}<div className="mt-4 grid gap-4 text-sm md:grid-cols-2"><div><h5 className="mb-1 font-medium">推动因素</h5><ul className="list-disc space-y-1 pl-5 text-gray-600">{(prediction.interpretation?.drivers || []).map((item) => <li key={item}>{item}</li>)}</ul></div><div><h5 className="mb-1 font-medium">风险与不确定性</h5><ul className="list-disc space-y-1 pl-5 text-gray-600">{(prediction.interpretation?.risks || []).map((item) => <li key={item}>{item}</li>)}</ul></div></div><div className="mt-4"><h5 className="mb-1 text-sm font-medium">继续观察</h5><p className="text-sm text-gray-600">{(prediction.interpretation?.watch_indicators || []).join('；') || '等待新的独立来源或可验证结果。'}</p></div>{prediction.interpretation?.decision_value && <div className="mt-4 rounded border bg-white p-3 text-sm"><strong>决策价值：{prediction.interpretation.decision_value.category}</strong><p className="mt-1 text-gray-600">{prediction.interpretation.decision_value.explanation}</p></div>}</div>
-                <div><div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h4 className="font-medium">可能情景</h4><span className="text-xs text-gray-500">情景参考权重，不是统计概率</span></div><div className="grid gap-3 md:grid-cols-3">{prediction.scenarios.map((scenario) => <div key={scenario.name} className="rounded border p-3"><div className="flex justify-between"><strong>{scenario.name}</strong><Badge variant="outline">{trendLabel(scenario.trend)}</Badge></div><p className="mt-1 text-sm text-gray-500">参考权重：{Math.round(scenario.probability * 100)}%</p><p className="mt-1 text-xs text-gray-500">{scenario.basis}</p></div>)}</div></div>
-                <details><summary className="cursor-pointer text-sm font-medium">查看参与判断的知识证据</summary><div className="mt-2 space-y-1 text-sm text-gray-600">{prediction.knowledge_basis.evidence_titles?.map((title) => <p key={title}>· {title}</p>)}</div></details>
-                <details open className="rounded border p-3"><summary className="cursor-pointer text-sm font-medium">查看参与判断的知识证据</summary><div className="mt-3 space-y-3 text-sm text-gray-600"><div><p className="font-medium text-gray-800">结构化知识点</p>{prediction.knowledge_basis.knowledge_point_details?.map((point, index) => <div key={`${point.title}-${index}`} className="mt-2 rounded border bg-white p-2"><div className="font-medium text-gray-800">{point.title} <span className="text-xs text-gray-500">（{categoryLabels[point.category] || point.category}）</span></div><p className="mt-1">{point.content}</p>{point.evidence && <p className="mt-1 text-xs text-gray-500">原文依据：{point.evidence}</p>}</div>)}</div>{(prediction.knowledge_basis.relation_details || []).length > 0 && <div><p className="font-medium text-gray-800">已审核关系</p>{prediction.knowledge_basis.relation_details?.map((relation, index) => <div key={`${relation.source}-${relation.target}-${index}`} className="mt-2 rounded border bg-white p-2"><p className="font-medium text-gray-800">{relation.source} → {relation.target} <span className="text-xs text-gray-500">（{relationLabels[relation.type] || relation.type}）</span></p>{relation.evidence && <p className="mt-1 text-xs text-gray-500">关系依据：{relation.evidence}</p>}</div>)}</div>}{!prediction.knowledge_basis.knowledge_point_details?.length && !prediction.knowledge_basis.relation_details?.length && <p className="text-amber-700">本次没有可用的结构化知识点或已审核关系，判断主要来自文章之间的共同信号。</p>}</div></details>
+              <CardHeader>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div><CardTitle>多源影响推演</CardTitle><p className="mt-1 text-sm text-gray-500">{prediction.topic}</p></div>
+                  <Badge variant={prediction.interpretation?.analysis_status === 'unavailable' ? 'destructive' : 'default'}>
+                    {prediction.interpretation?.analysis_status === 'unavailable' ? '深度分析未完成' : '深度分析完成'}
+                  </Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-5">
+                <div className="rounded border border-slate-200 bg-slate-50 p-3 text-sm text-gray-700">
+                  推演会区分来源事实与模型推断。内部方向代码仅用于候选事件初筛，不代表股价、概率或必然结果，也不再作为面向用户的结论。
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant="outline">证据支持度：{prediction.knowledge_basis.support_level || '待评估'}（{Math.round(prediction.confidence * 100)}分）</Badge>
+                  <Badge variant="outline">来源：{prediction.knowledge_basis.evidence_articles || 0} 篇</Badge>
+                  <Badge variant="outline">知识点：{prediction.knowledge_basis.knowledge_points || 0} 个</Badge>
+                  <Badge variant="outline">已审核关系：{prediction.knowledge_basis.cross_document_relations || 0} 条</Badge>
+                  {prediction.interpretation?.analysis_model && <Badge variant="outline">模型：{analysisModels.find((model) => model.id === prediction.interpretation?.analysis_model)?.name || prediction.interpretation.analysis_model}</Badge>}
+                </div>
+                {!!prediction.interpretation?.quality_warnings?.length && <div className="flex gap-2 bg-amber-50 p-3 text-sm text-amber-800"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" /><span>系统已保留合格推演，并自动剔除 {prediction.interpretation.quality_warnings.length} 条不够具体的模型条目。</span></div>}
+
+                {prediction.interpretation?.analysis_status === 'unavailable' ? (
+                  <div className="border-l-4 border-red-500 bg-red-50 p-4">
+                    <div className="flex gap-3"><AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-600" /><div><h4 className="font-medium text-red-900">本次没有形成可用推演</h4><p className="mt-1 text-sm text-red-800">{prediction.interpretation.analysis_error || '模型未返回足够具体的分析，系统已拒绝展示通用模板。'}</p></div></div>
+                    <Button className="mt-3" size="sm" variant="outline" onClick={() => { const target = events.find((item) => item.id === prediction.knowledge_basis.event_id); if (target) predictEvent(target) }}>重新深度分析</Button>
+                  </div>
+                ) : (
+                  <>
+                    {(prediction.knowledge_basis.knowledge_points || 0) === 0 && <div className="flex gap-2 bg-amber-50 p-3 text-sm text-amber-800"><AlertCircle className="h-4 w-4 shrink-0" />当前没有结构化知识点或正式关系，推演主要依据多篇来源正文，结论需要结合下方验证指标持续校验。</div>}
+
+                    <section className="border-l-4 border-blue-600 bg-blue-50/50 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="font-semibold">核心研判</h4><Badge variant="outline">{prediction.interpretation?.current_phase || '阶段待判断'}</Badge></div>
+                      <p className="mt-2 text-base font-medium leading-7 text-gray-900">{prediction.interpretation?.executive_judgment}</p>
+                      <p className="mt-2 text-sm leading-6 text-gray-600">{prediction.interpretation?.event_summary}</p>
+                    </section>
+
+                    {prediction.interpretation?.signal_assessment && <section className="border-b pb-5"><div className="flex flex-wrap items-center gap-2"><h4 className="font-semibold">信号含义</h4><Badge>{prediction.interpretation.signal_assessment.label}</Badge></div><p className="mt-2 text-sm leading-6 text-gray-700">{prediction.interpretation.signal_assessment.meaning}</p><p className="mt-1 text-xs leading-5 text-gray-500">证据与分歧：{prediction.interpretation.signal_assessment.evidence}</p></section>}
+
+                    <section>
+                      <h4 className="mb-3 font-semibold">经济、政策与产业影响</h4>
+                      <div className="grid gap-3 md:grid-cols-2">{(prediction.interpretation?.impact_assessments || []).map((item, index) => <article key={`${item.dimension}-${index}`} className="rounded border p-4"><div className="flex flex-wrap items-center justify-between gap-2"><Badge variant="outline">{item.dimension}</Badge><span className="text-xs text-gray-500">{item.horizon} · 可能性{item.likelihood}</span></div><h5 className="mt-3 font-medium leading-6">{item.conclusion}</h5><p className="mt-2 text-sm leading-6 text-blue-800">推演链：{item.mechanism}</p><p className="mt-2 text-xs text-gray-600">影响对象：{item.affected_parties.join('、')}</p><p className="mt-1 text-xs text-gray-500">事实依据：{item.evidence_basis}</p></article>)}</div>
+                    </section>
+
+                    <section>
+                      <h4 className="mb-3 font-semibold">未来可能发生的具体变化</h4>
+                      <div className="space-y-3">{(prediction.interpretation?.next_developments || []).map((item, index) => <article key={`${item.title}-${index}`} className="border-l-2 border-slate-300 py-1 pl-4"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{item.dimension || '综合'}</Badge><strong className="text-sm">{item.title}</strong><span className="text-xs text-gray-500">{item.timeframe || '时间待验证'} · 可能性{item.likelihood}</span></div>{item.mechanism && <p className="mt-2 text-sm leading-6 text-gray-700">发生机制：{item.mechanism}</p>}<p className="mt-1 text-xs text-gray-600">受影响对象：{item.affected_parties?.join('、') || '待识别'}</p><p className="mt-1 text-xs text-gray-500">依据：{item.basis}</p><p className="mt-1 text-xs text-blue-700">验证或推翻：{item.watch_for}</p></article>)}</div>
+                    </section>
+
+                    <section className="grid gap-5 border-t pt-5 md:grid-cols-2">
+                      <div><h4 className="font-semibold text-emerald-800">可把握的机会</h4><div className="mt-3 space-y-3">{(prediction.interpretation?.opportunities || []).map((item, index) => <article key={`${item.title}-${index}`} className="border-l-2 border-emerald-500 pl-3"><h5 className="text-sm font-medium">{item.title}</h5><p className="mt-1 text-xs leading-5 text-gray-600">受益者：{item.beneficiaries.join('、')}；{item.rationale}</p><p className="mt-1 text-xs text-emerald-700">成立条件：{item.entry_condition} · {item.horizon}</p></article>)}</div></div>
+                      <div><h4 className="font-semibold text-red-800">需要应对的挑战</h4><div className="mt-3 space-y-3">{(prediction.interpretation?.challenges || []).map((item, index) => <article key={`${item.title}-${index}`} className="border-l-2 border-red-500 pl-3"><h5 className="text-sm font-medium">{item.title}</h5><p className="mt-1 text-xs leading-5 text-gray-600">风险对象：{item.exposed_parties.join('、')}；{item.rationale}</p><p className="mt-1 text-xs text-red-700">预警信号：{item.warning_signal} · {item.horizon}</p></article>)}</div></div>
+                    </section>
+
+                    <section className="grid gap-5 border-t pt-5 text-sm md:grid-cols-2"><div><h4 className="mb-2 font-semibold">推动因素</h4><ul className="list-disc space-y-1 pl-5 text-gray-600">{(prediction.interpretation?.drivers || []).map((item) => <li key={item}>{item}</li>)}</ul></div><div><h4 className="mb-2 font-semibold">推演失效风险</h4><ul className="list-disc space-y-1 pl-5 text-gray-600">{(prediction.interpretation?.risks || []).map((item) => <li key={item}>{item}</li>)}</ul></div></section>
+
+                    <section className="border-t pt-5"><h4 className="font-semibold">下一步跟踪指标</h4><div className="mt-2 flex flex-wrap gap-2">{(prediction.interpretation?.watch_indicators || []).map((item) => <Badge key={item} variant="outline" className="whitespace-normal text-left font-normal">{item}</Badge>)}</div>{prediction.interpretation?.decision_value && <div className="mt-4 bg-slate-50 p-3 text-sm"><strong>决策用途：{prediction.interpretation.decision_value.category}</strong><p className="mt-1 text-gray-600">{prediction.interpretation.decision_value.explanation}</p></div>}</section>
+
+                    <details className="border-t pt-4"><summary className="cursor-pointer text-sm font-medium">查看参与判断的知识证据</summary><div className="mt-3 space-y-3 text-sm text-gray-600"><div><p className="font-medium text-gray-800">来源文章</p>{prediction.knowledge_basis.evidence_titles?.map((title) => <p key={title} className="mt-1">· {title}</p>)}</div><div><p className="font-medium text-gray-800">结构化知识点</p>{prediction.knowledge_basis.knowledge_point_details?.map((point, index) => <div key={`${point.title}-${index}`} className="mt-2 border-l-2 pl-3"><div className="font-medium text-gray-800">{point.title} <span className="text-xs text-gray-500">（{categoryLabels[point.category] || point.category}）</span></div><p className="mt-1">{point.content}</p>{point.evidence && <p className="mt-1 text-xs text-gray-500">原文依据：{point.evidence}</p>}</div>)}</div>{(prediction.knowledge_basis.relation_details || []).length > 0 && <div><p className="font-medium text-gray-800">已审核关系</p>{prediction.knowledge_basis.relation_details?.map((relation, index) => <div key={`${relation.source}-${relation.target}-${index}`} className="mt-2 border-l-2 pl-3"><p className="font-medium text-gray-800">{relation.source} → {relation.target} <span className="text-xs text-gray-500">（{relationLabels[relation.type] || relation.type}）</span></p>{relation.evidence && <p className="mt-1 text-xs text-gray-500">关系依据：{relation.evidence}</p>}</div>)}</div>}</div></details>
+                  </>
+                )}
               </CardContent>
             </Card>
           )}

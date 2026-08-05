@@ -6,6 +6,7 @@
 import json
 import logging
 import re
+import unicodedata
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 
@@ -65,6 +66,7 @@ EXTRACTION_PROMPT = """你是一个知识图谱专家。请从以下文章中提
 6. 只提取文章中明确提到的实体和关系
 7. 实体名称要标准化(如 "OpenAI" 不写成 "open ai")
 8. subtype 用英文大写单词,不要用空格/中文
+9. 每个实体必须至少参与一条关系；不要输出只有名称、没有任何关系的孤立实体
 
 **重要:subtype 选择指南(严格遵守):**
 - PERSON 类型:
@@ -250,13 +252,20 @@ class EntityExtractor:
                     ))
 
             # 解析关系
-            entity_names = {entity.name for entity in entities}
+            entity_names = {
+                self._normalize_entity_name(entity.name): entity.name
+                for entity in entities
+            }
             relation_items = data.get("relations", data.get("relationships", []))
             for r in relation_items:
                 if r.get("source") and r.get("target") and r.get("rel_type"):
-                    source = r["source"].strip()
-                    target = r["target"].strip()
-                    if source == target or source not in entity_names or target not in entity_names:
+                    source = entity_names.get(
+                        self._normalize_entity_name(str(r["source"]))
+                    )
+                    target = entity_names.get(
+                        self._normalize_entity_name(str(r["target"]))
+                    )
+                    if not source or not target or source == target:
                         continue
                     # 标准化关系类型
                     rel_type = r["rel_type"].lower().replace("-", "_").replace(" ", "_")
@@ -291,6 +300,12 @@ class EntityExtractor:
         except json.JSONDecodeError as e:
             logger.error(f"JSON 解析失败: {e}")
             return ExtractionResult(error=f"JSON 解析失败: {e}")
+
+    @staticmethod
+    def _normalize_entity_name(name: str) -> str:
+        """Normalize harmless formatting differences in relation endpoints."""
+        normalized = unicodedata.normalize("NFKC", name or "").casefold().strip()
+        return re.sub(r"[\s\-_·•]+", "", normalized)
 
     @staticmethod
     def _extract_json_object(response: Any) -> Optional[str]:
@@ -364,7 +379,7 @@ class EntityExtractor:
             if not self.validate_entity(entity):
                 continue
 
-            key = entity.name.lower()
+            key = self._normalize_entity_name(entity.name)
             if key not in seen:
                 seen[key] = entity
                 result.append(entity)
