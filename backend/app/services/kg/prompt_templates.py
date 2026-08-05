@@ -48,6 +48,8 @@ KNOWLEDGE_POINT_EXTRACTION = PromptTemplate(
    - method: 解决方案、技术方法、流程
 4. confidence: 置信度（0-1），基于文本明确程度
 5. keywords: 关键词列表（3-5个）
+6. evidence: 支撑该知识点的原文引用，必须来自输入文本
+7. source_span: 原文中的最小相关片段，不得补写输入文本之外的内容
 
 请以 JSON 数组格式返回：
 [
@@ -56,7 +58,9 @@ KNOWLEDGE_POINT_EXTRACTION = PromptTemplate(
     "content": "知识点详细内容...",
     "category": "concept",
     "confidence": 0.9,
-    "keywords": ["关键词1", "关键词2", "关键词3"]
+    "keywords": ["关键词1", "关键词2", "关键词3"],
+    "evidence": ["原文引用"],
+    "source_span": "原文中的相关片段"
   }
 ]
 
@@ -108,6 +112,37 @@ RELATIONSHIP_DISCOVERY = PromptTemplate(
 2. strength 基于证据充分程度（0-1）
 3. 关系应该是有意义的，不要提取太弱的关系
 4. 每个关系都要有简短的证据说明
+"""
+)
+
+KNOWLEDGE_SYNTHESIS = PromptTemplate(
+    id="knowledge_synthesis",
+    title="知识综合文档",
+    category="knowledge_mining",
+    description="基于多篇资料生成带证据的可复用知识文档",
+    variables=[
+        {"name": "topic", "description": "主题", "required": "true"},
+        {"name": "knowledge_points", "description": "知识声明和证据", "required": "true"},
+    ],
+    content="""你是研究分析员。请基于以下资料，围绕主题“{{topic}}”生成一份知识综合文档。
+
+资料中的知识声明：
+{{knowledge_points}}
+
+要求：
+1. 只使用资料中明确支持的内容，不得补造事实
+2. 区分事实、来源观点、推断和待验证假设
+3. 指出不同来源之间的共识、分歧和近期变化
+4. 输出必须包含来源知识声明的编号
+5. 内容应能被后续检索和复用，而不是简单重复单篇摘要
+
+请严格返回 JSON 对象：
+{
+  "title": "主题标题",
+  "summary": "不超过200字的结论摘要",
+  "content": "完整知识综合文档",
+  "quality_score": 0.0
+}
 """
 )
 
@@ -325,6 +360,7 @@ CAUSAL_ANALYSIS = PromptTemplate(
 BUILTIN_TEMPLATES: List[PromptTemplate] = [
     KNOWLEDGE_POINT_EXTRACTION,
     RELATIONSHIP_DISCOVERY,
+    KNOWLEDGE_SYNTHESIS,
     KNOWLEDGE_SUMMARY,
     TREND_PREDICTION,
     SENTIMENT_ANALYSIS,

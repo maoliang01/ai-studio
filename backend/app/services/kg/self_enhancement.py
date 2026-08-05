@@ -8,6 +8,9 @@
 import time
 import logging
 import re
+import hashlib
+import json
+from difflib import SequenceMatcher
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass, field
@@ -27,6 +30,14 @@ class KnowledgePoint:
     category: str  # concept/argument/fact/method
     confidence: float
     keywords: List[str] = field(default_factory=list)
+    evidence: List[str] = field(default_factory=list)
+    source_span: Optional[str] = None
+    source_url: Optional[str] = None
+    source_published_at: Optional[str] = None
+    status: str = "candidate"
+    model_name: Optional[str] = None
+    prompt_version: str = "kp_extraction:v1"
+    content_hash: str = ""
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
 
@@ -56,6 +67,7 @@ class SelfEnhancementResult:
     error_message: Optional[str] = None
     created_at: datetime = field(default_factory=datetime.now)
     completed_at: Optional[datetime] = None
+    input_hash: str = ""
 
 
 class KnowledgeSelfEnhancement:
@@ -84,7 +96,13 @@ class KnowledgeSelfEnhancement:
         self.prompt_manager = prompt_manager or template_manager
         self._processing_tasks: Dict[str, SelfEnhancementResult] = {}
 
-    async def process_new_article(self, article_id: str, article_content: str) -> SelfEnhancementResult:
+    async def process_new_article(
+        self,
+        article_id: str,
+        article_content: str,
+        source_url: Optional[str] = None,
+        source_published_at: Optional[str] = None,
+    ) -> SelfEnhancementResult:
         """
         处理新文章，启动自增强循环
 
@@ -104,9 +122,10 @@ class KnowledgeSelfEnhancement:
             SelfEnhancementResult: 处理结果
         """
         # 检查是否已处理过该文章，如果是则更新而不是创建新记录
+        content_hash = hashlib.sha256((article_content or "").encode("utf-8")).hexdigest()
         existing_task = None
         for task in self._processing_tasks.values():
-            if task.article_id == article_id:
+            if task.article_id == article_id and getattr(task, "input_hash", None) == content_hash:
                 existing_task = task
                 break
 
@@ -118,15 +137,17 @@ class KnowledgeSelfEnhancement:
             existing_task.knowledge_points_count = 0
             existing_task.associations_count = 0
             existing_task.error_message = None
+            existing_task.input_hash = content_hash
             result = existing_task
         else:
             # 创建新记录
-            enhancement_id = f"enh_{article_id}_{int(time.time())}"
+            enhancement_id = f"enh_{article_id}_{content_hash[:16]}"
             result = SelfEnhancementResult(
                 enhancement_id=enhancement_id,
                 article_id=article_id,
                 status='processing',
-                progress=0
+                progress=0,
+                input_hash=content_hash,
             )
             self._processing_tasks[enhancement_id] = result
 
@@ -139,13 +160,21 @@ class KnowledgeSelfEnhancement:
 
             # 步骤 2: 提取知识点 (40%)
             knowledge_points = await self._extract_knowledge_points(
-                article_id, processed_content
+                article_id,
+                processed_content,
+                source_url=source_url,
+                source_published_at=source_published_at,
+                content_hash=content_hash,
             )
             result.progress = 50
             result.knowledge_points_count = len(knowledge_points)
 
             # 步骤 3: 发现关联 (30%)
             associations = await self._discover_associations(knowledge_points)
+            cross_document_associations = await self._discover_cross_document_associations(
+                knowledge_points
+            )
+            associations.extend(cross_document_associations)
             result.progress = 80
             result.associations_count = len(associations)
 
@@ -193,7 +222,12 @@ class KnowledgeSelfEnhancement:
         return content.strip()
 
     async def _extract_knowledge_points(
-        self, article_id: str, content: str
+        self,
+        article_id: str,
+        content: str,
+        source_url: Optional[str] = None,
+        source_published_at: Optional[str] = None,
+        content_hash: str = "",
     ) -> List[KnowledgePoint]:
         """
         从内容中提取知识点
@@ -211,7 +245,15 @@ class KnowledgeSelfEnhancement:
             raw_points = self._rule_based_extract_points(content)
 
         for i, point_data in enumerate(raw_points):
-            point_id = f"kp_{article_id}_{i}"
+            point_text = str(point_data.get("content", "")).strip()
+            point_key = "\x1f".join((article_id, point_data.get("title", ""), point_text))
+            point_id = f"kp-{hashlib.sha256(point_key.encode('utf-8')).hexdigest()[:32]}"
+            evidence = [item for item in self._normalize_evidence(point_data.get("evidence")) if item in content]
+            source_span = str(point_data.get("source_span") or "").strip()
+            if source_span and source_span not in content:
+                source_span = None
+            if not source_span and point_text in content:
+                source_span = point_text
             point = KnowledgePoint(
                 id=point_id,
                 article_id=article_id,
@@ -219,7 +261,13 @@ class KnowledgeSelfEnhancement:
                 content=point_data.get('content', ''),
                 category=point_data.get('category', 'concept'),
                 confidence=point_data.get('confidence', 0.7),
-                keywords=point_data.get('keywords', [])
+                keywords=point_data.get('keywords', []),
+                evidence=evidence,
+                source_span=source_span or point_text,
+                source_url=source_url,
+                source_published_at=source_published_at,
+                model_name=point_data.get("model_name"),
+                content_hash=content_hash,
             )
             knowledge_points.append(point)
 
@@ -246,17 +294,67 @@ class KnowledgeSelfEnhancement:
                 max_tokens=2000
             )
 
-            # 解析 JSON
-            import json
-            # 尝试提取 JSON 部分
-            json_match = re.search(r'\[[\s\S]*\]', response)
-            if json_match:
-                return json.loads(json_match.group())
+            parsed = self._parse_structured_points(response)
+            if parsed is not None:
+                return parsed
             return []
 
         except Exception as e:
             logger.error(f"LLM extraction failed: {e}")
             return self._rule_based_extract_points(content)
+
+    @staticmethod
+    def _parse_structured_points(response: str) -> Optional[List[Dict[str, Any]]]:
+        """解析并校验 LLM 知识声明，拒绝非对象数组和明显无效字段。"""
+        if not response:
+            return None
+        candidates = [response.strip()]
+        json_match = re.search(r"\[[\s\S]*\]", response)
+        if json_match and json_match.group() not in candidates:
+            candidates.append(json_match.group())
+        for candidate in candidates:
+            try:
+                payload = json.loads(candidate)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, list):
+                continue
+            valid = []
+            for item in payload[:10]:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                content = str(item.get("content") or "").strip()
+                if not title or not content:
+                    continue
+                try:
+                    confidence = max(0.0, min(1.0, float(item.get("confidence", 0.5))))
+                except (TypeError, ValueError):
+                    confidence = 0.5
+                keywords = item.get("keywords") or []
+                if not isinstance(keywords, list):
+                    keywords = [str(keywords)]
+                valid.append({
+                    "title": title,
+                    "content": content,
+                    "category": str(item.get("category") or "concept"),
+                    "confidence": confidence,
+                    "keywords": [str(value).strip() for value in keywords if str(value).strip()][:10],
+                    "evidence": item.get("evidence") or [content],
+                    "source_span": str(item.get("source_span") or content),
+                })
+            return valid
+        return None
+
+    @staticmethod
+    def _normalize_evidence(value: Any) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value.strip()] if value.strip() else []
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()][:5]
+        return [str(value).strip()]
 
     def _rule_based_extract_points(self, content: str) -> List[Dict]:
         """基于规则提取知识点"""
@@ -315,20 +413,135 @@ class KnowledgeSelfEnhancement:
         """存储知识点到图数据库"""
         try:
             await self.kg_service.create_entity(
-                name=point.title,
+                # 使用稳定 ID 作为图节点 name，避免相同标题覆盖不同文章的知识声明。
+                name=point.id,
                 entity_type='KnowledgePoint',
                 properties={
                     'id': point.id,
+                    'title': point.title,
                     'article_id': point.article_id,
                     'content': point.content,
                     'category': point.category,
                     'confidence': point.confidence,
                     'keywords': point.keywords,
-                    'created_at': point.created_at.isoformat()
+                    'created_at': point.created_at.isoformat(),
+                    'evidence': point.evidence,
+                    'source_span': point.source_span or "",
+                    'source_url': point.source_url or "",
+                    'source_published_at': point.source_published_at or "",
+                    'status': point.status,
+                    'model_name': point.model_name or "rule_based",
+                    'prompt_version': point.prompt_version,
+                    'content_hash': point.content_hash,
                 }
             )
         except Exception as e:
             logger.error(f"Failed to store knowledge point: {e}")
+
+    async def _discover_cross_document_associations(
+        self, knowledge_points: List[KnowledgePoint]
+    ) -> List[Association]:
+        """召回其他文章中的相似知识声明，写入待审核候选关系。"""
+        if not knowledge_points or not hasattr(self.kg_service, "execute"):
+            return []
+
+        try:
+            rows = await self.kg_service.execute(
+                """
+                MATCH (n:Entity)
+                WHERE n.entity_type = 'KnowledgePoint'
+                RETURN n
+                LIMIT 500
+                """
+            )
+        except Exception as exc:
+            logger.warning("跨文档知识召回失败: %s", exc)
+            return []
+        if not isinstance(rows, list):
+            return []
+
+        candidates = []
+        current_ids = {point.id for point in knowledge_points}
+        for point in knowledge_points:
+            for row in rows:
+                node = row.get("n") if isinstance(row, dict) else None
+                if not node:
+                    continue
+                node_id = str(node.get("id") or "")
+                if not node_id or node_id in current_ids:
+                    continue
+                if str(node.get("article_id") or "") == point.article_id:
+                    continue
+                candidate_title = str(node.get("title") or node.get("name") or "")
+                candidate_content = str(node.get("content") or "")
+                candidate_keywords = set(node.get("keywords") or [])
+                if not candidate_title or not candidate_content:
+                    continue
+
+                keyword_union = set(point.keywords) | candidate_keywords
+                keyword_score = (
+                    len(set(point.keywords) & candidate_keywords) / len(keyword_union)
+                    if keyword_union else 0.0
+                )
+                title_score = SequenceMatcher(
+                    None, point.title.casefold(), candidate_title.casefold()
+                ).ratio()
+                content_score = SequenceMatcher(
+                    None, point.content[:300].casefold(), candidate_content[:300].casefold()
+                ).ratio()
+                score = round(0.45 * content_score + 0.35 * title_score + 0.20 * keyword_score, 4)
+                if score < 0.55:
+                    continue
+
+                positive_markers = ("支持", "表明", "促进", "增加", "提升", "有效", "成功")
+                negative_markers = ("不支持", "未发现", "没有", "无法", "否认", "下降", "减少", "失败")
+                point_positive = any(marker in point.content for marker in positive_markers)
+                point_negative = any(marker in point.content for marker in negative_markers)
+                candidate_positive = any(marker in candidate_content for marker in positive_markers)
+                candidate_negative = any(marker in candidate_content for marker in negative_markers)
+                polarity_conflict = (
+                    title_score >= 0.7
+                    and keyword_score >= 0.3
+                    and ((point_positive and candidate_negative) or (point_negative and candidate_positive))
+                )
+                relation_type = (
+                    "conflict_candidate"
+                    if polarity_conflict
+                    else "duplicate_candidate" if score >= 0.85 else "related_candidate"
+                )
+                association_id = f"assoc-{hashlib.sha256((point.id + node_id).encode('utf-8')).hexdigest()[:32]}"
+                association = Association(
+                    id=association_id,
+                    source_id=point.id,
+                    target_id=node_id,
+                    relation_type=relation_type,
+                    strength=score,
+                    evidence=(
+                        f"跨文档候选：标题相似度={title_score:.2f}，"
+                        f"内容相似度={content_score:.2f}，关键词相似度={keyword_score:.2f}"
+                    ),
+                )
+                candidates.append(association)
+
+        unique = {}
+        for association in candidates:
+            unique[association.id] = association
+            await self._store_candidate_association(association)
+        return list(unique.values())
+
+    async def _store_candidate_association(self, association: Association):
+        """保存待审核的跨文档候选，不将其视为正式关系。"""
+        try:
+            await self.kg_service.create_knowledge_candidate(
+                candidate_id=association.id,
+                source_id=association.source_id,
+                target_id=association.target_id,
+                candidate_type=association.relation_type,
+                strength=association.strength,
+                evidence=association.evidence,
+            )
+        except Exception as exc:
+            logger.warning("保存跨文档候选关系失败: %s", exc)
 
     async def _discover_associations(
         self, knowledge_points: List[KnowledgePoint]

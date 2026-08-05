@@ -433,6 +433,207 @@ class Neo4jService:
                 logger.error(f"创建关系失败: {e}")
                 return False
 
+    async def create_knowledge_candidate(
+        self,
+        candidate_id: str,
+        source_id: str,
+        target_id: str,
+        candidate_type: str,
+        strength: float,
+        evidence: str,
+    ) -> bool:
+        """保存知识候选审核记录，不提前创建正式关系。"""
+        if not self._driver:
+            await self.connect()
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                MERGE (review:MiningReview {id: $candidate_id})
+                SET review.review_type = 'knowledge_candidate',
+                    review.source_id = $source_id,
+                    review.target_id = $target_id,
+                    review.candidate_type = $candidate_type,
+                    review.strength = $strength,
+                    review.evidence = $evidence,
+                    review.decision = 'pending',
+                    review.status = CASE
+                        WHEN review.status IN ['approved', 'rejected'] THEN review.status
+                        ELSE 'pending' END,
+                    review.updated_at = datetime()
+                RETURN review.id AS id
+                """,
+                candidate_id=candidate_id,
+                source_id=source_id,
+                target_id=target_id,
+                candidate_type=candidate_type,
+                strength=strength,
+                evidence=evidence,
+            )
+            return await result.single() is not None
+
+    async def get_knowledge_candidates(
+        self,
+        review_status: Optional[str] = "pending",
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """读取知识候选审核记录。"""
+        if not self._driver:
+            await self.connect()
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (review:MiningReview)
+                WHERE review.review_type = 'knowledge_candidate'
+                  AND ($review_status IS NULL OR review.status = $review_status)
+                RETURN review{.*} AS review
+                ORDER BY review.updated_at DESC
+                LIMIT $limit
+                """,
+                review_status=review_status,
+                limit=max(1, min(int(limit), 500)),
+            )
+            return [record["review"] for record in await result.data()]
+
+    async def search_knowledge_syntheses(
+        self,
+        query: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """检索已发布的知识综合文档，供后续分析继续使用。"""
+        if not self._driver:
+            await self.connect()
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (n:Entity)
+                WHERE n.entity_type = 'KnowledgeSynthesis'
+                  AND n.status = 'published'
+                  AND (
+                    $query IS NULL OR n.topic CONTAINS $query OR
+                    n.title CONTAINS $query OR n.content CONTAINS $query
+                  )
+                RETURN n
+                ORDER BY n.updated_at DESC
+                LIMIT $limit
+                """,
+                {
+                    "query": query.strip() if query else None,
+                    "limit": max(1, min(int(limit), 200)),
+                },
+            )
+            return [dict(record["n"]) for record in await result.data()]
+
+    async def get_knowledge_quality_metrics(self) -> Dict[str, Any]:
+        """统计现有知识资产的可追溯性与审核闭环质量。"""
+        if not self._driver:
+            await self.connect()
+        async with self._driver.session() as session:
+            point_result = await session.run(
+                """
+                MATCH (n:Entity)
+                WHERE n.entity_type = 'KnowledgePoint'
+                RETURN count(n) AS total,
+                       count(CASE WHEN coalesce(n.evidence, '') <> '' THEN 1 END) AS with_evidence,
+                       count(CASE WHEN coalesce(n.source_url, '') <> '' THEN 1 END) AS with_source_url,
+                       count(CASE WHEN coalesce(n.content_hash, '') <> '' THEN 1 END) AS with_content_hash
+                """
+            )
+            point = (await point_result.single()) or {}
+            candidate_result = await session.run(
+                """
+                MATCH (r:MiningReview)
+                WHERE r.review_type = 'knowledge_candidate'
+                RETURN count(r) AS total,
+                       sum(CASE WHEN r.status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                       sum(CASE WHEN r.status = 'approved' THEN 1 ELSE 0 END) AS approved,
+                       sum(CASE WHEN r.status = 'rejected' THEN 1 ELSE 0 END) AS rejected
+                """
+            )
+            candidate = (await candidate_result.single()) or {}
+            relation_result = await session.run(
+                """
+                MATCH (a:Entity)-[r:KNOWLEDGE_RELATION]->(b:Entity)
+                RETURN count(r) AS total
+                """
+            )
+            relation = (await relation_result.single()) or {}
+
+        total = int(point.get("total") or 0)
+        return {
+            "knowledge_points": {
+                "total": total,
+                "with_evidence": int(point.get("with_evidence") or 0),
+                "with_source_url": int(point.get("with_source_url") or 0),
+                "with_content_hash": int(point.get("with_content_hash") or 0),
+                "evidence_coverage": round((int(point.get("with_evidence") or 0) / total), 4) if total else 0,
+                "source_coverage": round((int(point.get("with_source_url") or 0) / total), 4) if total else 0,
+            },
+            "candidates": {
+                "total": int(candidate.get("total") or 0),
+                "pending": int(candidate.get("pending") or 0),
+                "approved": int(candidate.get("approved") or 0),
+                "rejected": int(candidate.get("rejected") or 0),
+            },
+            "formal_relations": int(relation.get("total") or 0),
+        }
+
+    async def review_knowledge_candidate(
+        self,
+        candidate_id: str,
+        decision: str,
+        relation_type: Optional[str] = None,
+    ) -> bool:
+        """审核跨文档候选关系，并在批准时生成正式关系。"""
+        if decision not in {"approved", "rejected"}:
+            raise ValueError("decision must be approved or rejected")
+        if relation_type not in {None, "same_as", "related_to", "supports", "contradicts", "extends"}:
+            raise ValueError("unsupported knowledge relation type")
+        if not self._driver:
+            await self.connect()
+
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (review:MiningReview {id: $candidate_id})
+                WHERE review.review_type = 'knowledge_candidate'
+                MATCH (source:Entity {id: review.source_id}),
+                      (target:Entity {id: review.target_id})
+                SET review.status = $decision,
+                    review.decision = $decision,
+                    review.reviewed_at = datetime()
+                WITH source, target, review
+                FOREACH (_ IN CASE WHEN $decision = 'approved' THEN [1] ELSE [] END |
+                    MERGE (source)-[formal:KNOWLEDGE_RELATION {id: $candidate_id}]->(target)
+                    SET formal.relation_type = coalesce(
+                            $relation_type,
+                            CASE WHEN review.candidate_type = 'conflict_candidate'
+                                 THEN 'contradicts' ELSE review.candidate_type END
+                        ),
+                        formal.strength = review.strength,
+                        formal.evidence = review.evidence,
+                        formal.source_articles = [source.article_id, target.article_id],
+                        formal.evidence_samples = [source.source_span, target.source_span],
+                        formal.support_count = 2,
+                        formal.status = 'approved',
+                        formal.created_at = coalesce(formal.created_at, datetime()),
+                        formal.updated_at = datetime()
+                )
+                FOREACH (_ IN CASE WHEN $decision = 'approved' AND coalesce($relation_type, '') = 'same_as' THEN [1] ELSE [] END |
+                    SET source.canonical_knowledge_id = CASE
+                            WHEN source.id <= target.id THEN target.id ELSE source.id END,
+                        target.canonical_knowledge_id = CASE
+                            WHEN source.id <= target.id THEN target.id ELSE source.id END,
+                        source.evidence_count = coalesce(source.evidence_count, 0) + 1,
+                        target.evidence_count = coalesce(target.evidence_count, 0) + 1
+                )
+                RETURN review.status AS status
+                """,
+                candidate_id=candidate_id,
+                decision=decision,
+                relation_type=relation_type,
+            )
+            return await result.single() is not None
+
     async def link_article_to_entity(
         self,
         article_id: str,

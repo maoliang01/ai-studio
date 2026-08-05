@@ -1,1386 +1,319 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
+import { useEffect, useState } from 'react'
+import { AlertCircle, CheckCircle2, FileText, Loader2, RefreshCw, TrendingUp } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
-import { Progress } from '@/components/ui/progress'
-import { Input } from '@/components/ui/input'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Loader2, RefreshCw, BookOpen, Link, TrendingUp, FileText, Copy, Search, File, CheckSquare, Square, CheckCircle, AlertCircle } from 'lucide-react'
 
-interface Article {
+interface EventEvidence {
   id: string
   title: string
   summary: string
-  word_count: number
-  published_at: string | null
-  scraped_at: string | null
-  kg_status: string
-  category_name: string | null
-  source_type: string | null
+  url: string
+  published_at?: string | null
+  scraped_at?: string | null
 }
 
-interface KnowledgePoint {
+interface DiscoveredEvent {
   id: string
-  article_id: string
   title: string
-  content: string
-  category: string
+  topic: string
   confidence: number
-  keywords: string[]
-  created_at: string
+  signal_type: string
+  signal_reasons: string[]
+  evidence_articles: EventEvidence[]
 }
 
-interface Association {
+interface PredictionResult {
+  prediction_id: string
+  topic: string
+  trend: string
+  confidence: number
+  prediction_type: string
+  generated_at: string
+  factors: Array<{ type: string; name: string; evidence?: string }>
+  scenarios: Array<{ name: string; trend: string; probability: number; basis: string }>
+  interpretation?: {
+    event_summary: string
+    current_phase: string
+    next_developments: Array<{ title: string; likelihood: string; basis: string; watch_for: string }>
+    drivers: string[]
+    risks: string[]
+    watch_indicators: string[]
+    decision_value: { category: string; explanation: string }
+  }
+  knowledge_basis: {
+    event_id?: string
+    evidence_articles?: number
+    knowledge_points?: number
+    cross_document_relations?: number
+    multi_document?: boolean
+    evidence_titles?: string[]
+  }
+}
+
+interface Synthesis {
   id: string
-  source_id: string
-  source_title: string
-  target_id: string
-  target_title: string
-  relation_type: string
-  strength: number
-  evidence: string
+  topic: string
+  title: string
+  summary: string
+  content: string
+  status: string
+  iteration: number
+  source_document_ids: string[]
+  source_claim_ids: string[]
+  quality_score: number | null
+  created_at: string | null
 }
 
-interface EnhancementStats {
+interface PredictionRecord {
+  id: string
+  topic: string
+  trend: string
+  confidence: number
+  status: string
+  actual_trend: string | null
+  accuracy_score: number | null
+  created_at: string | null
+}
+
+interface Stats {
   total_articles_processed: number
   total_knowledge_points: number
   total_associations: number
-  average_points_per_article: number
-  average_associations_per_point: number
-  last_processed_at: string | null
+  quality_metrics?: {
+    knowledge_points?: { evidence_coverage: number; source_coverage: number }
+    candidates?: { pending: number }
+  }
 }
 
-interface PromptTemplate {
-  id: string
-  title: string
-  content: string
-  category: string
-  description: string
-  variables: Array<{ name: string; description: string; required?: string; default?: string }>
-  isBuiltin: boolean
+const trendLabels: Record<string, string> = { up: '上升', down: '下降', stable: '稳定' }
+
+function trendLabel(value: string) {
+  return trendLabels[value] || value
+}
+
+async function readJson(response: Response) {
+  const data = await response.json()
+  if (!response.ok) throw new Error(data.detail || '请求失败')
+  return data
 }
 
 export default function SelfEnhancementPage() {
-  const [stats, setStats] = useState<EnhancementStats | null>(null)
-  const [knowledgePoints, setKnowledgePoints] = useState<KnowledgePoint[]>([])
-  const [associations, setAssociations] = useState<Association[]>([])
-  const [templates, setTemplates] = useState<PromptTemplate[]>([])
-  const [selectedTemplate, setSelectedTemplate] = useState<PromptTemplate | null>(null)
-  const [templateVariables, setTemplateVariables] = useState<Record<string, string>>({})
-  const [renderedPrompt, setRenderedPrompt] = useState<string>('')
-  const [loading, setLoading] = useState(false)
-  const [processingResult, setProcessingResult] = useState<any>(null)
-
-  // 文章选择相关状态
-  const [articles, setArticles] = useState<Article[]>([])
-  const [selectedArticle, setSelectedArticle] = useState<Article | null>(null)
-  const [selectedArticles, setSelectedArticles] = useState<Set<string>>(new Set())
-  const [articleSearchQuery, setArticleSearchQuery] = useState('')
-  const [articlesLoading, setArticlesLoading] = useState(false)
-  const [articleStatusFilter, setArticleStatusFilter] = useState<string>('all')
-
-  // 趋势预测相关状态
-  const [predictionTopic, setPredictionTopic] = useState('')
-  const [predictionType, setPredictionType] = useState<string>('general')
-  const [predictionDays, setPredictionDays] = useState(30)
-  const [predictionResult, setPredictionResult] = useState<any>(null)
-  const [predictionLoading, setPredictionLoading] = useState(false)
-
-  // 批量处理相关状态
-  const [batchProcessing, setBatchProcessing] = useState(false)
-  const [batchProgress, setBatchProgress] = useState<{
-    total: number
-    processed: number
-    failed: number
-    percentage: number
-    currentArticle: { id: string; title: string; index: number } | null
-    errors: Array<{ article_id: string; error: string }>
-  } | null>(null)
-  const [pendingInfo, setPendingInfo] = useState<{ pending: number; processed: number } | null>(null)
-  const [currentTaskId, setCurrentTaskId] = useState<string | null>(null)
-
-  // 加载统计数据
-  useEffect(() => {
-    loadStats()
-    loadKnowledgePoints()
-    loadAssociations()
-    loadTemplates()
-    loadArticles()
-  }, [])
+  const [stats, setStats] = useState<Stats | null>(null)
+  const [events, setEvents] = useState<DiscoveredEvent[]>([])
+  const [syntheses, setSyntheses] = useState<Synthesis[]>([])
+  const [history, setHistory] = useState<PredictionRecord[]>([])
+  const [prediction, setPrediction] = useState<PredictionResult | null>(null)
+  const [loadingEvents, setLoadingEvents] = useState(false)
+  const [loadingEventId, setLoadingEventId] = useState<string | null>(null)
+  const [loadingSynthesis, setLoadingSynthesis] = useState(false)
 
   const loadStats = async () => {
-    try {
-      const response = await fetch('/api/kg/self-enhancement/stats')
-      if (response.ok) {
-        const data = await response.json()
-        setStats(data)
-      }
-    } catch (error) {
-      console.error('Failed to load stats:', error)
-    }
+    const response = await fetch('/api/kg/self-enhancement/stats')
+    if (response.ok) setStats(await response.json())
   }
 
-  const loadKnowledgePoints = async () => {
+  const loadEvents = async () => {
+    setLoadingEvents(true)
     try {
-      const response = await fetch('/api/kg/self-enhancement/knowledge-points')
-      if (response.ok) {
-        const data = await response.json()
-        setKnowledgePoints(data.knowledge_points || [])
-      }
+      const response = await fetch('/api/kg/prediction/discover-events?limit=20&days=90')
+      const data = await readJson(response)
+      setEvents(data.events || [])
     } catch (error) {
-      console.error('Failed to load knowledge points:', error)
-    }
-  }
-
-  const loadAssociations = async () => {
-    try {
-      const response = await fetch('/api/kg/self-enhancement/associations')
-      if (response.ok) {
-        const data = await response.json()
-        setAssociations(data.associations || [])
-      }
-    } catch (error) {
-      console.error('Failed to load associations:', error)
-    }
-  }
-
-  const loadTemplates = async () => {
-    try {
-      const response = await fetch('/api/kg/self-enhancement/templates')
-      if (response.ok) {
-        const data = await response.json()
-        setTemplates(data.templates || [])
-      }
-    } catch (error) {
-      console.error('Failed to load templates:', error)
-    }
-  }
-
-  const loadArticles = async (query?: string, statusFilter?: string) => {
-    setArticlesLoading(true)
-    try {
-      const params = new URLSearchParams()
-      if (query) params.set('q', query)
-      if (statusFilter && statusFilter !== 'all') {
-        params.set('kg_status', statusFilter)
-      }
-      params.set('page_size', '50')
-
-      const response = await fetch(`/api/kg/self-enhancement/articles?${params}`)
-      if (response.ok) {
-        const data = await response.json()
-        setArticles(data.articles || [])
-      }
-    } catch (error) {
-      console.error('Failed to load articles:', error)
+      console.error(error)
     } finally {
-      setArticlesLoading(false)
+      setLoadingEvents(false)
     }
   }
 
-  const searchArticles = useCallback(async (query: string) => {
-    setArticleSearchQuery(query)
-    await loadArticles(query || undefined, articleStatusFilter)
-  }, [articleStatusFilter])
-
-  const selectArticle = (article: Article) => {
-    setSelectedArticle(article)
+  const loadSyntheses = async () => {
+    const response = await fetch('/api/kg/self-enhancement/syntheses?limit=20')
+    if (response.ok) setSyntheses((await response.json()).syntheses || [])
   }
 
-  const toggleArticleSelection = (articleId: string) => {
-    setSelectedArticles(prev => {
-      const newSet = new Set(prev)
-      if (newSet.has(articleId)) {
-        newSet.delete(articleId)
-      } else {
-        newSet.add(articleId)
-      }
-      return newSet
-    })
+  const loadHistory = async () => {
+    const response = await fetch('/api/kg/prediction/history?limit=20')
+    if (response.ok) setHistory((await response.json()).predictions || [])
   }
 
-  const selectAllArticles = () => {
-    if (selectedArticles.size === articles.length) {
-      setSelectedArticles(new Set())
-    } else {
-      setSelectedArticles(new Set(articles.map(a => a.id)))
-    }
+  const reload = async () => {
+    await Promise.all([loadStats(), loadEvents(), loadSyntheses(), loadHistory()])
   }
 
-  const batchProcessArticles = async (forceReprocess: boolean = false) => {
-    if (selectedArticles.size === 0) {
-      alert('请先选择要处理的文章')
-      return
-    }
+  useEffect(() => {
+    reload()
+  }, [])
 
-    setBatchProcessing(true)
-    setBatchProgress({
-      total: selectedArticles.size,
-      processed: 0,
-      failed: 0,
-      percentage: 0,
-      currentArticle: null,
-      errors: []
-    })
-
+  const predictEvent = async (event: DiscoveredEvent) => {
+    setLoadingEventId(event.id)
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), 35000)
     try {
-      const response = await fetch('/api/kg/self-enhancement/batch-process', {
+      const response = await fetch('/api/kg/prediction/discovered-event', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          article_ids: Array.from(selectedArticles),
-          force_reprocess: forceReprocess
-        })
+        body: JSON.stringify({ event_id: event.id, time_range: 30, prediction_type: 'general' }),
+        signal: controller.signal,
       })
-
-      if (response.ok) {
-        const result = await response.json()
-        setCurrentTaskId(result.task_id)
-
-        // 开始轮询进度
-        pollBatchProgress(result.task_id)
-
-        // 清除选择
-        setSelectedArticles(new Set())
-      } else {
-        const error = await response.json()
-        alert(`批量处理失败: ${error.detail || '未知错误'}`)
-        setBatchProcessing(false)
-        setBatchProgress(null)
-      }
+      setPrediction(await readJson(response))
+      await loadHistory()
     } catch (error) {
-      console.error('Failed to batch process:', error)
-      alert('批量处理失败，请检查网络连接')
-      setBatchProcessing(false)
-      setBatchProgress(null)
+      alert(error instanceof DOMException && error.name === 'AbortError' ? '交叉分析超时，请稍后重试。系统已将 LLM 解读限制在 10 秒内。' : error instanceof Error ? error.message : '交叉分析失败')
+    } finally {
+      window.clearTimeout(timeout)
+      setLoadingEventId(null)
     }
   }
 
-  const pollBatchProgress = async (taskId: string) => {
-    const pollInterval = 2000 // 2秒轮询一次
-    let isCompleted = false
-
-    while (!isCompleted) {
-      try {
-        const response = await fetch(`/api/kg/self-enhancement/batch-status/${taskId}`)
-        if (response.ok) {
-          const progress = await response.json()
-
-          setBatchProgress({
-            total: progress.total,
-            processed: progress.processed,
-            failed: progress.failed,
-            percentage: progress.percentage,
-            currentArticle: progress.current_article,
-            errors: progress.errors || []
-          })
-
-          if (progress.status === 'completed' || progress.status === 'failed') {
-            isCompleted = true
-            setBatchProcessing(false)
-            setCurrentTaskId(null)
-
-            // 刷新数据
-            loadStats()
-            loadKnowledgePoints()
-            loadAssociations()
-            loadArticles(articleSearchQuery || undefined, articleStatusFilter)
-
-            if (progress.status === 'completed') {
-              alert(`批量处理完成！\n成功: ${progress.processed} 篇\n失败: ${progress.failed} 篇`)
-            } else {
-              alert(`批量处理失败: ${progress.error || '未知错误'}`)
-            }
-          }
-        }
-      } catch (error) {
-        console.error('Failed to poll progress:', error)
-      }
-
-      if (!isCompleted) {
-        await new Promise(resolve => setTimeout(resolve, pollInterval))
-      }
-    }
-  }
-
-  const detectPendingArticles = async () => {
+  const createAutoSynthesis = async () => {
+    setLoadingSynthesis(true)
     try {
-      const response = await fetch('/api/kg/self-enhancement/auto-detect-pending')
-      if (response.ok) {
-        const data = await response.json()
-        setPendingInfo({
-          pending: data.pending_count,
-          processed: data.processed_count
-        })
-
-        // 自动筛选待处理文章
-        setArticleStatusFilter('pending')
-        loadArticles(undefined, 'pending')
-      }
-    } catch (error) {
-      console.error('Failed to detect pending articles:', error)
-    }
-  }
-
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text)
-  }
-
-  const runPrediction = async () => {
-    if (!predictionTopic.trim()) {
-      alert('请输入预测主题')
-      return
-    }
-
-    setPredictionLoading(true)
-    setPredictionResult(null)
-
-    try {
-      const response = await fetch(`/api/kg/prediction/${predictionType}`, {
+      const response = await fetch('/api/kg/self-enhancement/syntheses/auto', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          topic: predictionTopic,
-          time_range: predictionDays
-        })
+        body: JSON.stringify({ limit: 5 }),
       })
-
-      if (response.ok) {
-        const result = await response.json()
-        setPredictionResult(result)
-      } else {
-        const error = await response.json()
-        alert(`预测失败: ${error.detail || '未知错误'}`)
-      }
+      await readJson(response)
+      await loadSyntheses()
     } catch (error) {
-      console.error('Prediction failed:', error)
-      alert('预测失败，请检查网络连接')
+      alert(error instanceof Error ? error.message : '知识综合失败')
     } finally {
-      setPredictionLoading(false)
+      setLoadingSynthesis(false)
     }
   }
 
-  const getTrendLabel = (trend: string) => {
-    const labels: Record<string, { text: string; color: string }> = {
-      up: { text: '上升', color: 'text-green-600' },
-      down: { text: '下降', color: 'text-red-600' },
-      stable: { text: '稳定', color: 'text-gray-600' }
-    }
-    return labels[trend] || { text: trend, color: 'text-gray-600' }
-  }
-
-  const processArticle = async () => {
-    if (!selectedArticle) {
-      alert('请先选择一篇文章')
+  const reviewSynthesis = async (id: string, decision: 'approved' | 'rejected') => {
+    const response = await fetch(`/api/kg/self-enhancement/syntheses/${id}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision }),
+    })
+    if (!response.ok) {
+      const data = await response.json()
+      alert(data.detail || '审核失败')
       return
     }
-
-    setLoading(true)
-    setProcessingResult(null)
-
-    try {
-      const response = await fetch('/api/kg/self-enhancement/process-article', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          article_id: selectedArticle.id
-        })
-      })
-
-      if (response.ok) {
-        const result = await response.json()
-        setProcessingResult(result)
-        // 刷新数据
-        loadStats()
-        loadKnowledgePoints()
-        loadAssociations()
-        // 刷新文章列表，保持当前筛选状态
-        loadArticles(articleSearchQuery || undefined, articleStatusFilter)
-        // 清除选中状态
-        setSelectedArticle(null)
-      } else {
-        const error = await response.json()
-        alert(`处理失败: ${error.detail || '未知错误'}`)
-      }
-    } catch (error) {
-      console.error('Failed to process article:', error)
-      alert('处理失败，请检查网络连接')
-    } finally {
-      setLoading(false)
-    }
+    await loadSyntheses()
   }
 
-  const getCategoryColor = (category: string) => {
-    const colors: Record<string, string> = {
-      concept: 'bg-blue-100 text-blue-800',
-      argument: 'bg-green-100 text-green-800',
-      fact: 'bg-yellow-100 text-yellow-800',
-      method: 'bg-purple-100 text-purple-800'
-    }
-    return colors[category] || 'bg-gray-100 text-gray-800'
-  }
-
-  const getCategoryName = (category: string) => {
-    const names: Record<string, string> = {
-      concept: '概念',
-      argument: '观点',
-      fact: '事实',
-      method: '方法'
-    }
-    return names[category] || category
-  }
-
-  const getKgStatusBadge = (status: string) => {
-    const variants: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
-      pending: 'outline',
-      processing: 'secondary',
-      success: 'default',
-      failed: 'destructive',
-    }
-    const labels: Record<string, string> = {
-      pending: '待处理',
-      processing: '处理中',
-      success: '已完成',
-      failed: '失败',
-    }
-    return (
-      <Badge variant={variants[status] || 'outline'}>
-        {labels[status] || status}
-      </Badge>
-    )
-  }
-
-  // 模板相关函数
-  const selectTemplateForUse = (template: PromptTemplate) => {
-    setSelectedTemplate(template)
-    // 初始化变量值（使用默认值）
-    const initialVars: Record<string, string> = {}
-    template.variables.forEach(v => {
-      initialVars[v.name] = v.default || ''
+  const submitFeedback = async (id: string, actualTrend: 'up' | 'down' | 'stable') => {
+    const response = await fetch(`/api/kg/prediction/history/${id}/feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actual_trend: actualTrend }),
     })
-    setTemplateVariables(initialVars)
-    setRenderedPrompt('')
+    if (response.ok) await loadHistory()
   }
 
-  const updateTemplateVariable = (varName: string, value: string) => {
-    setTemplateVariables(prev => ({ ...prev, [varName]: value }))
-  }
-
-  const renderTemplate = () => {
-    if (!selectedTemplate) return
-
-    let rendered = selectedTemplate.content
-    selectedTemplate.variables.forEach(v => {
-      const value = templateVariables[v.name] || v.default || ''
-      rendered = rendered.replace(new RegExp(`\\{\\{${v.name}\\}\\}`, 'g'), value)
-    })
-    setRenderedPrompt(rendered)
-  }
-
-  const useTemplateInChat = () => {
-    if (!renderedPrompt) {
-      renderTemplate()
-    }
-
-    // 使用 localStorage 传递提示词到对话页面
-    const prompt = renderedPrompt || selectedTemplate?.content || ''
-    localStorage.setItem('pending_prompt', prompt)
-    window.location.href = '/'
-  }
+  const multiDocumentEvents = events.filter((event) => event.evidence_articles.length >= 2)
+  const evidenceCoverage = stats?.quality_metrics?.knowledge_points?.evidence_coverage || 0
 
   return (
-    <div className="container mx-auto p-6">
-      <div className="flex items-center gap-3 mb-6">
-        <TrendingUp className="h-8 w-8" />
-        <h1 className="text-3xl font-bold">知识自增强循环</h1>
-      </div>
-
-      {/* 统计卡片 */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-gray-500">已处理文章</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold">{stats?.total_articles_processed || 0}</div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-gray-500">知识点总数</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold">{stats?.total_knowledge_points || 0}</div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-gray-500">关联总数</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold">{stats?.total_associations || 0}</div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm font-medium text-gray-500">平均知识点/文章</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold">
-              {stats?.average_points_per_article?.toFixed(2) || '0'}
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* 处理文章 - 文章列表选择 */}
-      <Card className="mb-6">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <BookOpen className="h-5 w-5" />
-            选择文章进行处理
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-4">
-            {/* 搜索栏 */}
-            <div className="flex gap-2">
-              <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-                <Input
-                  placeholder="搜索文章标题或摘要..."
-                  value={articleSearchQuery}
-                  onChange={(e) => searchArticles(e.target.value)}
-                  className="pl-10"
-                />
-              </div>
-              <Button
-                variant="outline"
-                onClick={() => { setArticleSearchQuery(''); loadArticles(undefined, articleStatusFilter) }}
-                disabled={articlesLoading}
-              >
-                <RefreshCw className={`h-4 w-4 ${articlesLoading ? 'animate-spin' : ''}`} />
-              </Button>
-            </div>
-
-            {/* 状态筛选按钮 */}
-            <div className="flex gap-2 flex-wrap">
-              <span className="text-sm text-gray-500 self-center">筛选：</span>
-              {[
-                { value: 'pending', label: '待处理' },
-                { value: 'all', label: '全部' },
-                { value: 'success', label: '已完成' },
-                { value: 'failed', label: '失败' },
-              ].map((item) => (
-                <Button
-                  key={item.value}
-                  variant={articleStatusFilter === item.value ? 'default' : 'outline'}
-                  size="sm"
-                  onClick={() => {
-                    setArticleStatusFilter(item.value)
-                    loadArticles(articleSearchQuery || undefined, item.value)
-                  }}
-                  disabled={articlesLoading}
-                >
-                  {item.label}
-                </Button>
-              ))}
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={detectPendingArticles}
-                disabled={articlesLoading}
-                className="ml-auto"
-              >
-                <FileText className="h-4 w-4 mr-1" />
-                检测待处理
-              </Button>
-            </div>
-
-            {/* 待处理信息提示 */}
-            {pendingInfo && (
-              <div className="flex items-center gap-3 p-3 bg-yellow-50 rounded-lg text-sm">
-                <AlertCircle className="h-5 w-5 text-yellow-600" />
-                <span>
-                  共 <strong>{pendingInfo.pending}</strong> 篇待处理文章，
-                  已处理 <strong>{pendingInfo.processed}</strong> 篇
-                </span>
-                <Button
-                  variant="link"
-                  size="sm"
-                  onClick={() => {
-                    setPendingInfo(null)
-                    setArticleStatusFilter('all')
-                    loadArticles(undefined, 'all')
-                  }}
-                >
-                  清除提示
-                </Button>
-              </div>
-            )}
-
-            {/* 文章列表 */}
-            <div className="border rounded-lg overflow-hidden">
-              <div className="max-h-[400px] overflow-y-auto">
-                {articlesLoading ? (
-                  <div className="p-8 text-center text-gray-500">
-                    <Loader2 className="h-6 w-6 animate-spin mx-auto mb-2" />
-                    加载中...
-                  </div>
-                ) : articles.length === 0 ? (
-                  <div className="p-8 text-center text-gray-500">暂无文章</div>
-                ) : (
-                  <table className="w-full text-sm">
-                    <thead className="bg-gray-50 sticky top-0">
-                      <tr>
-                        <th className="text-left p-3 font-medium text-gray-600 w-8">
-                          <input
-                            type="checkbox"
-                            checked={selectedArticles.size === articles.length && articles.length > 0}
-                            onChange={selectAllArticles}
-                            className="h-4 w-4"
-                          />
-                        </th>
-                        <th className="text-left p-3 font-medium text-gray-600">标题</th>
-                        <th className="text-left p-3 font-medium text-gray-600 w-20">字数</th>
-                        <th className="text-left p-3 font-medium text-gray-600 w-24">分类</th>
-                        <th className="text-left p-3 font-medium text-gray-600 w-20">状态</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y">
-                      {articles.map((article) => (
-                        <tr
-                          key={article.id}
-                          className={`cursor-pointer transition-colors ${
-                            selectedArticles.has(article.id)
-                              ? 'bg-blue-50 hover:bg-blue-100'
-                              : 'hover:bg-gray-50'
-                          }`}
-                        >
-                          <td className="p-3">
-                            <input
-                              type="checkbox"
-                              checked={selectedArticles.has(article.id)}
-                              onChange={() => toggleArticleSelection(article.id)}
-                              className="h-4 w-4"
-                            />
-                          </td>
-                          <td className="p-3" onClick={() => selectArticle(article)}>
-                            <div className="font-medium">{article.title}</div>
-                            {article.summary && (
-                              <div className="text-xs text-gray-500 mt-1 line-clamp-1">
-                                {article.summary}
-                              </div>
-                            )}
-                          </td>
-                          <td className="p-3 text-gray-500" onClick={() => selectArticle(article)}>{article.word_count || '-'}</td>
-                          <td className="p-3 text-gray-500" onClick={() => selectArticle(article)}>{article.category_name || '-'}</td>
-                          <td className="p-3" onClick={() => selectArticle(article)}>{getKgStatusBadge(article.kg_status)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-            </div>
-
-            {/* 选中文章信息 + 操作按钮 */}
-            {selectedArticle && (
-              <div className="flex items-center justify-between p-4 bg-blue-50 rounded-lg">
-                <div className="flex-1">
-                  <span className="text-sm text-gray-600">已选择：</span>
-                  <span className="font-semibold">{selectedArticle.title}</span>
-                  <span className="text-sm text-gray-500 ml-2">
-                    ({selectedArticle.word_count || 0} 字)
-                  </span>
-                </div>
-                <div className="flex gap-2">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setSelectedArticle(null)}
-                  >
-                    清除选择
-                  </Button>
-                  <Button onClick={processArticle} disabled={loading}>
-                    {loading ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        处理中...
-                      </>
-                    ) : (
-                      '开始处理'
-                    )}
-                  </Button>
-                </div>
-              </div>
-            )}
-
-            {/* 批量选择提示 */}
-            {selectedArticles.size > 0 && (
-              <div className="flex items-center justify-between p-4 bg-green-50 rounded-lg">
-                <div className="flex-1">
-                  <span className="text-sm text-gray-600">已选择 </span>
-                  <span className="font-semibold">{selectedArticles.size}</span>
-                  <span className="text-sm text-gray-600"> 篇文章</span>
-                  <span className="text-sm text-gray-500 ml-2">
-                    （待处理: {articles.filter(a => selectedArticles.has(a.id) && a.kg_status !== 'success').length}）
-                  </span>
-                </div>
-                <div className="flex gap-2">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setSelectedArticles(new Set())}
-                  >
-                    清除选择
-                  </Button>
-                  <Button
-                    onClick={(e) => {
-                      e.preventDefault()
-                      batchProcessArticles()
-                    }}
-                    disabled={batchProcessing}
-                    variant="default"
-                  >
-                    {batchProcessing ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        处理中...
-                      </>
-                    ) : (
-                      <>
-                        <FileText className="mr-2 h-4 w-4" />
-                        批量处理
-                      </>
-                    )}
-                  </Button>
-                  <Button
-                    onClick={(e) => {
-                      e.preventDefault()
-                      if (confirm('确定要重新处理所有选中的文章吗？这将覆盖现有的知识提取结果。')) {
-                        batchProcessArticles(true)
-                      }
-                    }}
-                    disabled={batchProcessing}
-                    variant="outline"
-                  >
-                    <RefreshCw className="mr-2 h-4 w-4" />
-                    重新处理
-                  </Button>
-                </div>
-              </div>
-            )}
-
-            {/* 未选择提示 */}
-            {!selectedArticle && selectedArticles.size === 0 && (
-              <div className="text-center text-gray-500 text-sm py-2">
-                请点击复选框选择多篇文章进行批量处理，或点击文章标题选择单篇文章处理
-              </div>
-            )}
+    <main className="container mx-auto max-w-7xl p-6">
+      <div className="mb-6 flex items-start justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-3">
+            <TrendingUp className="h-8 w-8" />
+            <h1 className="text-3xl font-bold">知识洞察中心</h1>
           </div>
-
-          {/* 处理结果 */}
-          {processingResult && (
-            <div className="mt-4 p-4 bg-gray-50 rounded-lg">
-              <h4 className="font-semibold mb-2">处理结果</h4>
-              <div className="grid grid-cols-2 gap-4 text-sm">
-                <div>
-                  <span className="text-gray-500">状态：</span>
-                  <Badge variant={processingResult.status === 'completed' ? 'default' : 'destructive'}>
-                    {processingResult.status === 'completed' ? '完成' : '失败'}
-                  </Badge>
-                </div>
-                <div>
-                  <span className="text-gray-500">知识点数量：</span>
-                  <span className="font-semibold">{processingResult.knowledge_points_count}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500">关联数量：</span>
-                  <span className="font-semibold">{processingResult.associations_count}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500">进度：</span>
-                  <Progress value={processingResult.progress} className="h-2 w-24 inline-block" />
-                </div>
-              </div>
-              {processingResult.summary && (
-                <div className="mt-3">
-                  <span className="text-gray-500 text-sm">总结：</span>
-                  <p className="text-sm mt-1">{processingResult.summary}</p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* 批量处理进度 */}
-          {batchProgress && (
-            <div className="mt-4 p-4 bg-green-50 rounded-lg">
-              <div className="flex items-center justify-between mb-3">
-                <h4 className="font-semibold">批量处理进度</h4>
-                {batchProcessing && (
-                  <div className="flex items-center text-sm text-green-600">
-                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    处理中...
-                  </div>
-                )}
-              </div>
-
-              {/* 进度条 */}
-              <div className="mb-3">
-                <div className="flex justify-between text-sm mb-1">
-                  <span>{batchProgress.percentage}%</span>
-                  <span>{batchProgress.processed + batchProgress.failed} / {batchProgress.total}</span>
-                </div>
-                <Progress value={batchProgress.percentage} className="h-2" />
-              </div>
-
-              {/* 统计信息 */}
-              <div className="grid grid-cols-3 gap-4 text-sm mb-3">
-                <div>
-                  <span className="text-gray-500">成功：</span>
-                  <span className="font-semibold text-green-600">{batchProgress.processed}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500">失败：</span>
-                  <span className="font-semibold text-red-600">{batchProgress.failed}</span>
-                </div>
-                <div>
-                  <span className="text-gray-500">总数：</span>
-                  <span className="font-semibold">{batchProgress.total}</span>
-                </div>
-              </div>
-
-              {/* 当前处理的文章 */}
-              {batchProgress.currentArticle && (
-                <div className="text-sm text-gray-600 mb-2">
-                  <span className="text-gray-500">当前处理：</span>
-                  <span className="font-medium">
-                    [{batchProgress.currentArticle.index}/{batchProgress.total}] {batchProgress.currentArticle.title}
-                  </span>
-                </div>
-              )}
-
-              {/* 错误信息 */}
-              {batchProgress.errors.length > 0 && (
-                <div className="mt-2 p-2 bg-red-50 rounded text-sm">
-                  <div className="flex items-center text-red-600 mb-1">
-                    <AlertCircle className="w-4 h-4 mr-1" />
-                    <span className="font-medium">错误 ({batchProgress.errors.length})</span>
-                  </div>
-                  <div className="max-h-20 overflow-y-auto">
-                    {batchProgress.errors.slice(0, 3).map((error, idx) => (
-                      <div key={idx} className="text-red-500 text-xs">
-                        文章 {error.article_id}: {error.error}
-                      </div>
-                    ))}
-                    {batchProgress.errors.length > 3 && (
-                      <div className="text-gray-500 text-xs">
-                        还有 {batchProgress.errors.length - 3} 个错误...
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* 提示词模板 */}
-      <Card className="mb-6">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <FileText className="h-5 w-5" />
-            提示词模板
-            <Badge variant="secondary">{templates.length}</Badge>
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <Tabs defaultValue="knowledge_mining">
-            <TabsList>
-              <TabsTrigger value="knowledge_mining">知识挖掘</TabsTrigger>
-              <TabsTrigger value="extraction_results">提取结果</TabsTrigger>
-              <TabsTrigger value="prediction">趋势预测</TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="knowledge_mining" className="mt-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {templates
-                  .filter(t => t.category === 'knowledge_mining')
-                  .map(template => (
-                    <Card
-                      key={template.id}
-                      className={`cursor-pointer transition-colors ${
-                        selectedTemplate?.id === template.id
-                          ? 'border-primary bg-primary/5'
-                          : 'hover:bg-gray-50'
-                      }`}
-                      onClick={() => selectTemplateForUse(template)}
-                    >
-                      <CardContent className="p-4">
-                        <div className="flex justify-between items-start mb-2">
-                          <h4 className="font-semibold text-sm">{template.title}</h4>
-                          <Badge variant="outline" className="text-xs">
-                            {template.variables.length} 变量
-                          </Badge>
-                        </div>
-                        <p className="text-xs text-gray-500 mb-2">{template.description}</p>
-                        <div className="flex flex-wrap gap-1">
-                          {template.variables.slice(0, 3).map(v => (
-                            <code key={v.name} className="text-xs bg-gray-100 px-1 rounded">
-                              {`{{${v.name}}}`}
-                            </code>
-                          ))}
-                        </div>
-                      </CardContent>
-                    </Card>
-                  ))}
-              </div>
-            </TabsContent>
-
-            <TabsContent value="extraction_results" className="mt-4">
-              <div className="space-y-6">
-                {/* 知识点列表 */}
-                <div>
-                  <div className="flex justify-between items-center mb-4">
-                    <h4 className="font-semibold flex items-center gap-2">
-                      <BookOpen className="h-4 w-4" />
-                      提取的知识点
-                      <Badge variant="secondary">{knowledgePoints.length}</Badge>
-                    </h4>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={loadKnowledgePoints}
-                    >
-                      <RefreshCw className="h-4 w-4 mr-1" />
-                      刷新
-                    </Button>
-                  </div>
-
-                  {knowledgePoints.length === 0 ? (
-                    <Card className="p-6 text-center text-gray-500">
-                      <BookOpen className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                      <p>暂无提取的知识点</p>
-                      <p className="text-sm mt-1">请先处理文章以提取知识要点</p>
-                    </Card>
-                  ) : (
-                    <div className="grid gap-3">
-                      {knowledgePoints.map(point => (
-                        <Card key={point.id} className="p-4 hover:bg-gray-50">
-                          <div className="flex justify-between items-start">
-                            <div className="flex-1">
-                              <div className="flex items-center gap-2 mb-1">
-                                <h5 className="font-medium">{point.title}</h5>
-                                <Badge variant="outline" className="text-xs">
-                                  {point.category}
-                                </Badge>
-                                <span className="text-xs text-gray-500">
-                                  置信度: {(point.confidence * 100).toFixed(0)}%
-                                </span>
-                              </div>
-                              <p className="text-sm text-gray-600 line-clamp-2">{point.content}</p>
-                              {point.keywords && point.keywords.length > 0 && (
-                                <div className="flex flex-wrap gap-1 mt-2">
-                                  {point.keywords.map((kw, i) => (
-                                    <Badge key={i} variant="secondary" className="text-xs">
-                                      {kw}
-                                    </Badge>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                            <div className="text-xs text-gray-400 ml-4">
-                              {point.article_id && (
-                                <span>文章: {point.article_id.slice(0, 8)}...</span>
-                              )}
-                            </div>
-                          </div>
-                        </Card>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* 关联列表 */}
-                <div>
-                  <div className="flex justify-between items-center mb-4">
-                    <h4 className="font-semibold flex items-center gap-2">
-                      <Link className="h-4 w-4" />
-                      知识关联
-                      <Badge variant="secondary">{associations.length}</Badge>
-                    </h4>
-                  </div>
-
-                  {associations.length === 0 ? (
-                    <Card className="p-6 text-center text-gray-500">
-                      <Link className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                      <p>暂无发现的关联</p>
-                      <p className="text-sm mt-1">处理更多文章后将自动发现知识关联</p>
-                    </Card>
-                  ) : (
-                    <div className="grid gap-3">
-                      {associations.map(assoc => (
-                        <Card key={assoc.id} className="p-4 hover:bg-gray-50">
-                          <div className="flex items-center gap-2">
-                            <span className="font-medium text-blue-600">
-                              {assoc.source_title}
-                            </span>
-                            <Badge variant="outline" className="text-xs">
-                              {assoc.relation_type}
-                            </Badge>
-                            <span className="font-medium text-green-600">
-                              {assoc.target_title}
-                            </span>
-                            <span className="text-xs text-gray-500 ml-auto">
-                              强度: {(assoc.strength * 100).toFixed(0)}%
-                            </span>
-                          </div>
-                          {assoc.evidence && (
-                            <p className="text-xs text-gray-500 mt-2 line-clamp-1">
-                              证据: {assoc.evidence}
-                            </p>
-                          )}
-                        </Card>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </TabsContent>
-
-            <TabsContent value="prediction" className="mt-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {templates
-                  .filter(t => t.category === 'prediction')
-                  .map(template => (
-                    <Card
-                      key={template.id}
-                      className={`cursor-pointer transition-colors ${
-                        selectedTemplate?.id === template.id
-                          ? 'border-primary bg-primary/5'
-                          : 'hover:bg-gray-50'
-                      }`}
-                      onClick={() => selectTemplateForUse(template)}
-                    >
-                      <CardContent className="p-4">
-                        <div className="flex justify-between items-start mb-2">
-                          <h4 className="font-semibold text-sm">{template.title}</h4>
-                          <Badge variant="outline" className="text-xs">
-                            {template.variables.length} 变量
-                          </Badge>
-                        </div>
-                        <p className="text-xs text-gray-500 mb-2">{template.description}</p>
-                        <div className="flex flex-wrap gap-1">
-                          {template.variables.slice(0, 3).map(v => (
-                            <code key={v.name} className="text-xs bg-gray-100 px-1 rounded">
-                              {`{{${v.name}}}`}
-                            </code>
-                          ))}
-                        </div>
-                      </CardContent>
-                    </Card>
-                  ))}
-              </div>
-            </TabsContent>
-          </Tabs>
-
-          {/* 选中的模板详情 */}
-          {selectedTemplate && (
-            <div className="mt-4 p-4 bg-gray-50 rounded-lg">
-              <div className="flex justify-between items-start mb-3">
-                <div>
-                  <h4 className="font-semibold">{selectedTemplate.title}</h4>
-                  <p className="text-sm text-gray-500">{selectedTemplate.description}</p>
-                </div>
-                <div className="flex gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => copyToClipboard(selectedTemplate.content)}
-                  >
-                    <Copy className="h-4 w-4 mr-1" />
-                    复制
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => { setSelectedTemplate(null); setRenderedPrompt('') }}
-                  >
-                    ✕
-                  </Button>
-                </div>
-              </div>
-              <div className="mb-3">
-                <h5 className="text-sm font-medium mb-2">填写变量：</h5>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {selectedTemplate.variables.map(v => (
-                    <div key={v.name} className="flex flex-col">
-                      <label className="text-xs text-gray-600 mb-1">
-                        <code className="font-mono bg-gray-100 px-1 rounded">{`{{${v.name}}}`}</code>
-                        <span className="ml-1">{v.description}</span>
-                        {v.required === 'true' && (
-                          <Badge variant="destructive" className="ml-1 text-xs">必填</Badge>
-                        )}
-                      </label>
-                      <Input
-                        type="text"
-                        placeholder={v.default || `请输入${v.description}`}
-                        value={templateVariables[v.name] || ''}
-                        onChange={(e) => updateTemplateVariable(v.name, e.target.value)}
-                        className="h-8 text-sm"
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* 操作按钮 */}
-              <div className="flex gap-2 mb-3">
-                <Button size="sm" onClick={renderTemplate}>
-                  预览渲染结果
-                </Button>
-                <Button size="sm" variant="default" onClick={useTemplateInChat}>
-                  <FileText className="h-4 w-4 mr-1" />
-                  使用此模板对话
-                </Button>
-              </div>
-
-              {/* 渲染结果预览 */}
-              {renderedPrompt && (
-                <div className="mb-3">
-                  <h5 className="text-sm font-medium mb-2">渲染结果预览：</h5>
-                  <pre className="text-xs whitespace-pre-wrap bg-green-50 p-3 rounded border font-mono max-h-40 overflow-y-auto">
-                    {renderedPrompt}
-                  </pre>
-                </div>
-              )}
-
-              {/* 原始模板 */}
-              <details className="text-xs text-gray-500">
-                <summary className="cursor-pointer hover:text-gray-700">查看原始模板</summary>
-                <pre className="mt-2 whitespace-pre-wrap bg-white p-3 rounded border font-mono max-h-40 overflow-y-auto">
-                  {selectedTemplate.content}
-                </pre>
-              </details>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* 知识点列表 */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <BookOpen className="h-5 w-5" />
-              知识点库
-              <Badge variant="secondary">{knowledgePoints.length}</Badge>
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4 max-h-[500px] overflow-y-auto">
-              {knowledgePoints.length === 0 ? (
-                <p className="text-gray-500 text-center py-8">暂无知识点</p>
-              ) : (
-                knowledgePoints.map((point) => (
-                  <div key={point.id} className="border p-4 rounded-lg hover:bg-gray-50">
-                    <div className="flex justify-between items-start mb-2">
-                      <h3 className="font-semibold">{point.title}</h3>
-                      <Badge className={getCategoryColor(point.category)}>
-                        {getCategoryName(point.category)}
-                      </Badge>
-                    </div>
-                    <p className="text-sm text-gray-600 mb-2">
-                      {point.content.substring(0, 150)}...
-                    </p>
-                    <div className="flex items-center gap-2 text-xs text-gray-400">
-                      <span>置信度: {(point.confidence * 100).toFixed(0)}%</span>
-                      {point.keywords && point.keywords.length > 0 && (
-                        <>
-                          <span>•</span>
-                          <span>关键词: {point.keywords.slice(0, 3).join(', ')}</span>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* 关联列表 */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Link className="h-5 w-5" />
-              知识关联
-              <Badge variant="secondary">{associations.length}</Badge>
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-4 max-h-[500px] overflow-y-auto">
-              {associations.length === 0 ? (
-                <p className="text-gray-500 text-center py-8">暂无关联</p>
-              ) : (
-                associations.map((assoc) => (
-                  <div key={assoc.id} className="border p-4 rounded-lg hover:bg-gray-50">
-                    <div className="flex justify-between items-center mb-2">
-                      <div className="flex items-center gap-2">
-                        <span className="font-semibold text-sm">{assoc.source_title}</span>
-                        <span className="text-gray-400">→</span>
-                        <span className="font-semibold text-sm">{assoc.target_title}</span>
-                      </div>
-                      <Badge variant="outline">{assoc.relation_type}</Badge>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Progress value={assoc.strength * 100} className="h-2 flex-1" />
-                      <span className="text-xs text-gray-500">
-                        {(assoc.strength * 100).toFixed(0)}%
-                      </span>
-                    </div>
-                    {assoc.evidence && (
-                      <p className="text-xs text-gray-400 mt-2">{assoc.evidence}</p>
-                    )}
-                  </div>
-                ))
-              )}
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* 趋势预测 */}
-      <Card className="mt-6">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <TrendingUp className="h-5 w-5" />
-            趋势预测
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-4">
-            {/* 预测输入 */}
-            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-              <div className="md:col-span-2">
-                <label className="text-sm font-medium text-gray-700 mb-1 block">预测主题</label>
-                <Input
-                  placeholder="例如：人工智能、大语言模型、新能源汽车..."
-                  value={predictionTopic}
-                  onChange={(e) => setPredictionTopic(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="text-sm font-medium text-gray-700 mb-1 block">预测类型</label>
-                <select
-                  className="w-full h-10 px-3 rounded-md border border-input bg-background text-sm"
-                  value={predictionType}
-                  onChange={(e) => setPredictionType(e.target.value)}
-                >
-                  <option value="general">一般趋势</option>
-                  <option value="technology">技术趋势</option>
-                  <option value="sentiment">舆情预测</option>
-                </select>
-              </div>
-              <div>
-                <label className="text-sm font-medium text-gray-700 mb-1 block">预测天数</label>
-                <Input
-                  type="number"
-                  min={7}
-                  max={90}
-                  value={predictionDays}
-                  onChange={(e) => setPredictionDays(parseInt(e.target.value) || 30)}
-                />
-              </div>
-            </div>
-
-            <Button onClick={runPrediction} disabled={predictionLoading}>
-              {predictionLoading ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  预测中...
-                </>
-              ) : (
-                <>
-                  <TrendingUp className="mr-2 h-4 w-4" />
-                  开始预测
-                </>
-              )}
-            </Button>
-
-            {/* 预测结果 */}
-            {predictionResult && (
-              <div className="mt-4 p-4 bg-gray-50 rounded-lg">
-                <div className="flex items-center justify-between mb-4">
-                  <div>
-                    <h4 className="font-semibold text-lg">{predictionResult.topic}</h4>
-                    <p className="text-sm text-gray-500">
-                      预测类型: {predictionResult.prediction_type} | 生成时间: {new Date(predictionResult.generated_at).toLocaleString()}
-                    </p>
-                  </div>
-                  <div className="text-right">
-                    <div className={`text-2xl font-bold ${getTrendLabel(predictionResult.trend).color}`}>
-                      {getTrendLabel(predictionResult.trend).text}
-                    </div>
-                    <div className="text-sm text-gray-500">
-                      置信度: {(predictionResult.confidence * 100).toFixed(0)}%
-                    </div>
-                  </div>
-                </div>
-
-                {/* 影响因素 */}
-                {predictionResult.factors && predictionResult.factors.length > 0 && (
-                  <div className="mb-4">
-                    <h5 className="text-sm font-medium mb-2">影响因素：</h5>
-                    <div className="flex flex-wrap gap-2">
-                      {predictionResult.factors.map((factor: any, idx: number) => (
-                        <Badge key={idx} variant="outline">
-                          {factor.name || factor.type}
-                        </Badge>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* 时间线预览 */}
-                {predictionResult.timeline && predictionResult.timeline.length > 0 && (
-                  <div>
-                    <h5 className="text-sm font-medium mb-2">趋势预测（前7天）：</h5>
-                    <div className="grid grid-cols-7 gap-2 text-center text-xs">
-                      {predictionResult.timeline.slice(0, 7).map((item: any, idx: number) => (
-                        <div key={idx} className="p-2 bg-white rounded border">
-                          <div className="text-gray-500">{item.date.slice(5)}</div>
-                          <div className="font-semibold">{item.predicted_value}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* 刷新按钮 */}
-      <div className="mt-6 flex justify-center">
-        <Button variant="outline" onClick={() => {
-          loadStats()
-          loadKnowledgePoints()
-          loadAssociations()
-          loadArticles()
-        }}>
-          <RefreshCw className="mr-2 h-4 w-4" />
-          刷新数据
+          <p className="mt-2 text-sm text-gray-600">
+            系统从持续进入的文章中发现事件，交叉比较多篇来源，生成可审核的趋势、舆情、科技和商机洞察。
+          </p>
+        </div>
+        <Button variant="outline" onClick={reload} title="重新加载数据">
+          <RefreshCw className="mr-2 h-4 w-4" />刷新
         </Button>
       </div>
-    </div>
+
+      <Card className="mb-6 border-blue-200 bg-blue-50/40">
+        <CardContent className="grid gap-4 p-4 text-sm md:grid-cols-4">
+          <div><strong>1. 数据进入</strong><p className="mt-1 text-gray-600">爬虫或外部导入文章，系统自动去重并保留来源。</p></div>
+          <div><strong>2. 事件发现</strong><p className="mt-1 text-gray-600">从近期文章中发现至少两个来源共同指向的变化。</p></div>
+          <div><strong>3. 交叉分析</strong><p className="mt-1 text-gray-600">比较文章、知识点和关系，输出多种可能情景。</p></div>
+          <div><strong>4. 审核反馈</strong><p className="mt-1 text-gray-600">发布有价值的综合知识，并反馈预测是否命中。</p></div>
+        </CardContent>
+      </Card>
+
+      <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-4">
+        <Card><CardHeader className="pb-2"><CardTitle className="text-sm text-gray-500">已处理文档</CardTitle></CardHeader><CardContent><div className="text-3xl font-bold">{stats?.total_articles_processed || 0}</div></CardContent></Card>
+        <Card><CardHeader className="pb-2"><CardTitle className="text-sm text-gray-500">知识点</CardTitle></CardHeader><CardContent><div className="text-3xl font-bold">{stats?.total_knowledge_points || 0}</div><p className="mt-1 text-xs text-gray-500">作为分析证据，不是最终洞察</p></CardContent></Card>
+        <Card><CardHeader className="pb-2"><CardTitle className="text-sm text-gray-500">正式关系</CardTitle></CardHeader><CardContent><div className="text-3xl font-bold">{stats?.total_associations || 0}</div><p className="mt-1 text-xs text-gray-500">审核通过后才参与关系推理</p></CardContent></Card>
+        <Card><CardHeader className="pb-2"><CardTitle className="text-sm text-gray-500">证据覆盖率</CardTitle></CardHeader><CardContent><div className="text-3xl font-bold">{Math.round(evidenceCoverage * 100)}%</div><p className="mt-1 text-xs text-gray-500">知识点带原文证据的比例</p></CardContent></Card>
+      </div>
+
+      <Tabs defaultValue="events">
+        <TabsList className="mb-4">
+          <TabsTrigger value="events">候选事件与交叉分析</TabsTrigger>
+          <TabsTrigger value="synthesis">知识综合</TabsTrigger>
+          <TabsTrigger value="feedback">预测反馈</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="events" className="space-y-4">
+          <Card>
+            <CardHeader className="flex flex-row items-start justify-between gap-4">
+              <div>
+                <CardTitle>系统发现的候选事件</CardTitle>
+                <p className="mt-1 text-sm text-gray-500">只有至少 2 篇相关文档的事件才能交叉分析。按钮会读取这些文档的摘要、知识点和关系，输出基准、乐观和风险情景。</p>
+              </div>
+              <Button variant="outline" onClick={loadEvents} disabled={loadingEvents}>
+                <RefreshCw className={`mr-2 h-4 w-4 ${loadingEvents ? 'animate-spin' : ''}`} />刷新发现
+              </Button>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {multiDocumentEvents.length === 0 ? (
+                <div className="rounded border border-dashed p-8 text-center text-sm text-gray-500">暂时没有多来源候选事件，请等待更多文章进入。</div>
+              ) : multiDocumentEvents.map((event) => (
+                <div key={event.id} className="rounded-lg border p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <div className="min-w-0 flex-1">
+                      <h3 className="font-semibold">{event.title}</h3>
+                      <p className="mt-1 text-sm text-gray-500">发现置信度 {Math.round(event.confidence * 100)}% · 来源 {event.evidence_articles.length} 篇</p>
+                      <div className="mt-2 flex flex-wrap gap-2">{event.signal_reasons.map((reason) => <Badge key={reason} variant="outline">{reason}</Badge>)}</div>
+                    </div>
+                    <Button onClick={() => predictEvent(event)} disabled={loadingEventId !== null}>
+                      {loadingEventId === event.id ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <TrendingUp className="mr-2 h-4 w-4" />}
+                      交叉分析
+                    </Button>
+                  </div>
+                  <details className="mt-3 rounded bg-gray-50 p-3 text-sm">
+                    <summary className="cursor-pointer font-medium">查看参与分析的文章</summary>
+                    <div className="mt-2 space-y-2">{event.evidence_articles.map((article) => <div key={article.id} className="border-b pb-2 last:border-0"><p className="font-medium">{article.title}</p><p className="text-xs text-gray-500">{article.summary || '无摘要'}</p></div>)}</div>
+                  </details>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+
+          {prediction && (
+            <Card className="border-green-200">
+              <CardHeader><CardTitle>交叉分析结果</CardTitle><p className="text-sm text-gray-500">{prediction.topic}</p></CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex flex-wrap gap-2"><Badge>趋势：{trendLabel(prediction.trend)}</Badge><Badge variant="outline">置信度：{Math.round(prediction.confidence * 100)}%</Badge><Badge variant="outline">来源：{prediction.knowledge_basis.evidence_articles || 0} 篇</Badge><Badge variant="outline">知识点：{prediction.knowledge_basis.knowledge_points || 0} 个</Badge><Badge variant="outline">关系：{prediction.knowledge_basis.cross_document_relations || 0} 条</Badge></div>
+                {(prediction.knowledge_basis.knowledge_points || 0) === 0 && <div className="flex gap-2 rounded bg-amber-50 p-3 text-sm text-amber-800"><AlertCircle className="h-4 w-4 shrink-0" />本次使用了多篇文章，但这些文章尚未形成知识点或正式关系，结果主要依据文章内容，可信度需要谨慎解读。</div>}
+                <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-4"><div className="flex flex-wrap items-center justify-between gap-2"><h4 className="font-medium">事件解读</h4><Badge variant="outline">{prediction.interpretation?.current_phase || '待补充阶段判断'}</Badge></div><p className="mt-2 text-sm leading-6 text-gray-700">{prediction.interpretation?.event_summary || '当前结果主要反映来源文章中的共同信号，尚未形成进一步解读。'}</p>{prediction.interpretation?.next_developments?.length ? <div className="mt-4"><h5 className="mb-2 text-sm font-medium">可能的下一步</h5><div className="grid gap-3 md:grid-cols-2">{prediction.interpretation.next_developments.map((item) => <div key={item.title} className="rounded border bg-white p-3"><div className="flex flex-wrap justify-between gap-2"><strong className="text-sm">{item.title}</strong><Badge variant="outline">可能性：{item.likelihood}</Badge></div><p className="mt-2 text-xs text-gray-600">判断依据：{item.basis}</p><p className="mt-1 text-xs text-gray-500">观察：{item.watch_for}</p></div>)}</div></div> : null}<div className="mt-4 grid gap-4 text-sm md:grid-cols-2"><div><h5 className="mb-1 font-medium">推动因素</h5><ul className="list-disc space-y-1 pl-5 text-gray-600">{(prediction.interpretation?.drivers || []).map((item) => <li key={item}>{item}</li>)}</ul></div><div><h5 className="mb-1 font-medium">风险与不确定性</h5><ul className="list-disc space-y-1 pl-5 text-gray-600">{(prediction.interpretation?.risks || []).map((item) => <li key={item}>{item}</li>)}</ul></div></div><div className="mt-4"><h5 className="mb-1 text-sm font-medium">继续观察</h5><p className="text-sm text-gray-600">{(prediction.interpretation?.watch_indicators || []).join('；') || '等待新的独立来源或可验证结果。'}</p></div>{prediction.interpretation?.decision_value && <div className="mt-4 rounded border bg-white p-3 text-sm"><strong>决策价值：{prediction.interpretation.decision_value.category}</strong><p className="mt-1 text-gray-600">{prediction.interpretation.decision_value.explanation}</p></div>}</div>
+                <div><div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h4 className="font-medium">可能情景</h4><span className="text-xs text-gray-500">情景参考权重，不是统计概率</span></div><div className="grid gap-3 md:grid-cols-3">{prediction.scenarios.map((scenario) => <div key={scenario.name} className="rounded border p-3"><div className="flex justify-between"><strong>{scenario.name}</strong><Badge variant="outline">{trendLabel(scenario.trend)}</Badge></div><p className="mt-1 text-sm text-gray-500">参考权重：{Math.round(scenario.probability * 100)}%</p><p className="mt-1 text-xs text-gray-500">{scenario.basis}</p></div>)}</div></div>
+                <details><summary className="cursor-pointer text-sm font-medium">查看参与判断的知识证据</summary><div className="mt-2 space-y-1 text-sm text-gray-600">{prediction.knowledge_basis.evidence_titles?.map((title) => <p key={title}>· {title}</p>)}</div></details>
+              </CardContent>
+            </Card>
+          )}
+        </TabsContent>
+
+        <TabsContent value="synthesis" className="space-y-4">
+          <Card>
+            <CardHeader><CardTitle>知识综合</CardTitle><p className="text-sm text-gray-500">系统自动选择候选事件的来源文档和知识点，生成可复用的知识草稿。发布前必须人工审核。</p></CardHeader>
+            <CardContent><Button onClick={createAutoSynthesis} disabled={loadingSynthesis}>{loadingSynthesis ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileText className="mr-2 h-4 w-4" />}自动发现并生成草稿</Button></CardContent>
+          </Card>
+          {syntheses.map((synthesis) => <Card key={synthesis.id}><CardHeader><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle>{synthesis.title}</CardTitle><p className="mt-1 text-sm text-gray-500">来源 {synthesis.source_document_ids.length} 篇 · 知识声明 {synthesis.source_claim_ids.length} 条</p></div><Badge variant={synthesis.status === 'published' ? 'default' : 'secondary'}>{synthesis.status}</Badge></div></CardHeader><CardContent><p className="text-sm text-gray-600">{synthesis.summary}</p>{(synthesis.status === 'draft' || synthesis.status === 'review') && <div className="mt-3 flex gap-2"><Button onClick={() => reviewSynthesis(synthesis.id, 'approved')}><CheckCircle2 className="mr-2 h-4 w-4" />审核发布</Button><Button variant="outline" onClick={() => reviewSynthesis(synthesis.id, 'rejected')}>驳回</Button></div>}<details className="mt-3"><summary className="cursor-pointer text-sm font-medium">查看综合内容</summary><pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap rounded bg-gray-50 p-3 text-xs">{synthesis.content}</pre></details></CardContent></Card>)}
+          {syntheses.length === 0 && <div className="rounded border border-dashed p-8 text-center text-sm text-gray-500">还没有综合草稿，点击上方按钮开始。</div>}
+        </TabsContent>
+
+        <TabsContent value="feedback" className="space-y-4">
+          <Card><CardHeader><CardTitle>预测反馈</CardTitle><p className="text-sm text-gray-500">预测结果不会自动变成事实。未来观察到实际结果后，请标记真实趋势，系统会统计命中率。</p></CardHeader><CardContent className="space-y-3">{history.map((item) => <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 border-b pb-3 last:border-0"><div><p className="font-medium">{item.topic}</p><p className="text-xs text-gray-500">预测：{trendLabel(item.trend)} · 置信度 {Math.round(item.confidence * 100)}% {item.status === 'evaluated' ? `· 命中率 ${Math.round((item.accuracy_score || 0) * 100)}%` : ''}</p></div>{item.status !== 'evaluated' && <div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => submitFeedback(item.id, 'up')}>上升</Button><Button size="sm" variant="outline" onClick={() => submitFeedback(item.id, 'stable')}>稳定</Button><Button size="sm" variant="outline" onClick={() => submitFeedback(item.id, 'down')}>下降</Button></div>}</div>)}{history.length === 0 && <p className="py-8 text-center text-sm text-gray-500">完成一次交叉分析后，这里会出现预测记录。</p>}</CardContent></Card>
+        </TabsContent>
+      </Tabs>
+    </main>
   )
 }

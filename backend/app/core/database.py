@@ -163,7 +163,7 @@ def init_db():
     # 导入所有模型以确保它们被注册
     from app.models import (
         Article, Category, ScrapeSource, Keyword, ArticleKeyword, ArticleLink,
-        ScheduledTask, ScrapeHistory
+        ScheduledTask, ScrapeHistory, KnowledgeJob, KnowledgeSynthesis, PredictionRecord
     )
 
     engine = get_engine()
@@ -171,10 +171,31 @@ def init_db():
     # 创建所有表
     Base.metadata.create_all(bind=engine)
     _ensure_wechat_account_columns(engine)
+    _ensure_knowledge_job_columns(engine)
+    _ensure_prediction_columns(engine)
     logger.info("数据库表已创建/更新")
 
     # 创建全文搜索索引（如果不存在）
     _create_fts_index(engine)
+
+
+def _ensure_knowledge_job_columns(engine) -> None:
+    """为已存在的任务表补齐异步任务载荷字段。"""
+    with engine.begin() as connection:
+        connection.execute(text(
+            "ALTER TABLE knowledge_jobs ADD COLUMN IF NOT EXISTS payload JSONB"
+        ))
+        connection.execute(text(
+            "ALTER TABLE knowledge_jobs ADD COLUMN IF NOT EXISTS next_retry_at TIMESTAMP NULL"
+        ))
+
+
+def _ensure_prediction_columns(engine) -> None:
+    """Keep prediction snapshots compatible with databases created before interpretation existed."""
+    with engine.begin() as connection:
+        connection.execute(text(
+            "ALTER TABLE prediction_records ADD COLUMN IF NOT EXISTS interpretation JSONB"
+        ))
 
 
 def _ensure_wechat_account_columns(engine) -> None:

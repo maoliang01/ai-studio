@@ -5,6 +5,8 @@
 """
 import logging
 import asyncio
+import hashlib
+import uuid
 from typing import Optional, List, Dict, Any, Literal
 from datetime import date, datetime
 
@@ -14,12 +16,16 @@ from pydantic import BaseModel, Field
 
 from app.core.database import get_db
 from app.models.article import Article
+from app.models.knowledge import KnowledgeJob
+from app.models.synthesis import KnowledgeSynthesis
+from app.models.prediction import PredictionRecord
 from app.services.kg import Neo4jService, EntityExtractor, EmbeddingService
 from app.services.kg.graph import EntityNode, Relationship
 from app.services.kg.embedding import VectorStore
 from app.services.kg.qa import answer_question
 from app.services.kg.mining import find_relation_evidence
 from app.services import kg_sync
+from app.services.knowledge_synthesis import KnowledgeSynthesisService
 
 logger = logging.getLogger("ai-studio")
 
@@ -1569,6 +1575,7 @@ async def process_article_for_enhancement(
 
     # 如果没有提供内容，从数据库获取
     article_content = request.article_content
+    article = None
     if not article_content:
         article = db.query(Article).filter(Article.id == request.article_id).first()
         if not article:
@@ -1583,17 +1590,39 @@ async def process_article_for_enhancement(
             )
         article_content = article.content
 
+    input_hash = hashlib.sha256((article_content or "").encode("utf-8")).hexdigest()
+    job_id = f"enh_{request.article_id}_{input_hash[:16]}"
+    job = db.query(KnowledgeJob).filter(KnowledgeJob.id == job_id).first()
+    if job is None:
+        job = KnowledgeJob(
+            id=job_id,
+            target_id=request.article_id,
+            input_hash=input_hash,
+            status="processing",
+            progress=0,
+        )
+        db.add(job)
+    else:
+        job.status = "processing"
+        job.progress = 0
+        job.error_message = None
+        job.completed_at = None
+    job.started_at = datetime.utcnow()
+    db.commit()
+
     result = await service.process_new_article(
         article_id=request.article_id,
-        article_content=article_content
+        article_content=article_content,
+        source_url=article.url if article else None,
+        source_published_at=article.published_at.isoformat() if article and article.published_at else None,
     )
 
-    # 更新文章的 kg_status
-    article = db.query(Article).filter(Article.id == request.article_id).first()
-    if article:
-        article.kg_status = "success" if result.status == "completed" else "failed"
-        article.kg_processed_at = datetime.now()
-        db.commit()
+    job.status = result.status
+    job.progress = result.progress
+    job.result_summary = result.summary
+    job.error_message = result.error_message
+    job.completed_at = datetime.utcnow() if result.status in {"completed", "failed"} else None
+    db.commit()
 
     return {
         "enhancement_id": result.enhancement_id,
@@ -1621,6 +1650,28 @@ async def get_enhancement_status(enhancement_id: str):
     """
     service = await _get_self_enhancement_service()
     result = service.get_processing_status(enhancement_id)
+
+    if result is None:
+        from app.core.database import get_session_local
+        SessionLocal = get_session_local()
+        session = SessionLocal()
+        try:
+            job = session.query(KnowledgeJob).filter(KnowledgeJob.id == enhancement_id).first()
+            if job is not None:
+                return {
+                    "enhancement_id": job.id,
+                    "article_id": job.target_id,
+                    "status": job.status,
+                    "progress": job.progress,
+                    "knowledge_points_count": 0,
+                    "associations_count": 0,
+                    "summary": job.result_summary,
+                    "error_message": job.error_message,
+                    "created_at": job.created_at.isoformat() if job.created_at else None,
+                    "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+                }
+        finally:
+            session.close()
 
     if result is None:
         raise HTTPException(
@@ -1675,6 +1726,7 @@ async def get_enhancement_stats(db: Session = Depends(get_db)):
     # 从Neo4j查询知识点和关联数量
     total_points = 0
     total_associations = 0
+    quality_metrics = {}
 
     try:
         from app.services.kg.graph import Neo4jService
@@ -1693,6 +1745,7 @@ async def get_enhancement_stats(db: Session = Depends(get_db)):
                 'MATCH (a:Entity)-[r]->(b:Entity) WHERE a.entity_type = "KnowledgePoint" AND b.entity_type = "KnowledgePoint" RETURN count(r) as count'
             )
             total_associations = result[0]['count'] if result else 0
+            quality_metrics = await neo4j.get_knowledge_quality_metrics()
         finally:
             await neo4j.close()
     except Exception as neo4j_error:
@@ -1717,6 +1770,7 @@ async def get_enhancement_stats(db: Session = Depends(get_db)):
             if last_processed_at
             else None
         ),
+        "quality_metrics": quality_metrics,
     }
 
 
@@ -1755,11 +1809,17 @@ async def list_knowledge_points(
             knowledge_points.append({
                 "id": node.get("id", ""),
                 "article_id": node.get("article_id", ""),
-                "title": node.get("name", ""),
+                "title": node.get("title") or node.get("name", ""),
                 "content": node.get("content", ""),
                 "category": node.get("category", "concept"),
                 "confidence": node.get("confidence", 0.5),
                 "keywords": node.get("keywords", []),
+                "evidence": node.get("evidence", []),
+                "source_span": node.get("source_span") or None,
+                "source_url": node.get("source_url") or None,
+                "status": node.get("status", "candidate"),
+                "model_name": node.get("model_name") or None,
+                "prompt_version": node.get("prompt_version") or None,
                 "created_at": node.get("created_at", ""),
             })
 
@@ -1823,12 +1883,16 @@ async def list_associations(
             associations.append({
                 "id": rel.get("id", ""),
                 "source_id": source.get("id", ""),
-                "source_title": source.get("name", ""),
+                "source_title": source.get("title") or source.get("name", ""),
                 "target_id": target.get("id", ""),
-                "target_title": target.get("name", ""),
-                "relation_type": rel.type if hasattr(rel, 'type') else "related_to",
+                "target_title": target.get("title") or target.get("name", ""),
+                "relation_type": rel.get("relation_type") or rel.get("candidate_type") or (
+                    rel.type if hasattr(rel, 'type') else "related_to"
+                ),
                 "strength": rel.get("strength", 0.5),
                 "evidence": rel.get("evidence", ""),
+                "status": rel.get("status", "approved"),
+                "candidate_type": rel.get("candidate_type", ""),
                 "created_at": rel.get("created_at", ""),
             })
 
@@ -1838,6 +1902,269 @@ async def list_associations(
         }
     finally:
         await neo4j.close()
+
+
+class KnowledgeCandidateReviewRequest(BaseModel):
+    """跨文档知识候选审核请求。"""
+    decision: Literal["approved", "rejected"]
+    relation_type: Optional[Literal[
+        "same_as", "related_to", "supports", "contradicts", "extends"
+    ]] = None
+
+
+class KnowledgeSynthesisCreateRequest(BaseModel):
+    """创建知识综合文档请求。"""
+    topic: str = Field(..., min_length=1, max_length=300)
+    article_ids: List[str] = Field(..., min_length=1, max_length=50)
+    parent_synthesis_id: Optional[str] = None
+    async_mode: bool = False
+
+
+class KnowledgeSynthesisAutoRequest(BaseModel):
+    topic: Optional[str] = Field(None, max_length=300)
+    limit: int = Field(5, ge=1, le=20)
+
+
+class KnowledgeSynthesisReviewRequest(BaseModel):
+    decision: Literal["approved", "rejected"]
+
+
+@router.post("/self-enhancement/associations/{association_id}/review")
+async def review_knowledge_candidate(
+    association_id: str,
+    request: KnowledgeCandidateReviewRequest,
+):
+    """批准或驳回跨文档知识候选关系。"""
+    neo4j = Neo4jService()
+    try:
+        reviewed = await neo4j.review_knowledge_candidate(
+            candidate_id=association_id,
+            decision=request.decision,
+            relation_type=request.relation_type,
+        )
+        if not reviewed:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="知识候选关系不存在或已被处理",
+            )
+        return {
+            "id": association_id,
+            "status": request.decision,
+            "relation_type": request.relation_type,
+        }
+    finally:
+        await neo4j.close()
+
+
+@router.get("/self-enhancement/association-candidates")
+async def list_knowledge_candidates(
+    review_status: Optional[str] = Query("pending", description="审核状态"),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """读取跨文档知识候选审核记录。"""
+    neo4j = Neo4jService()
+    try:
+        candidates = await neo4j.get_knowledge_candidates(
+            review_status=review_status,
+            limit=limit,
+        )
+        return {"candidates": candidates, "total": len(candidates)}
+    finally:
+        await neo4j.close()
+
+
+@router.post("/self-enhancement/syntheses")
+async def create_knowledge_synthesis(
+    request: KnowledgeSynthesisCreateRequest,
+    db: Session = Depends(get_db),
+):
+    """基于多篇文章生成一份待审核的知识综合文档。"""
+    from app.core.llm import llm_service
+
+    if request.async_mode:
+        from app.services.knowledge_jobs import enqueue_synthesis
+        job_id = enqueue_synthesis(
+            topic=request.topic,
+            article_ids=request.article_ids,
+            parent_synthesis_id=request.parent_synthesis_id,
+        )
+        return {"job_id": job_id, "status": "queued"}
+
+    neo4j = Neo4jService()
+    try:
+        service = KnowledgeSynthesisService(neo4j, llm_service)
+        synthesis = await service.create_draft(
+            db=db,
+            topic=request.topic,
+            article_ids=request.article_ids,
+            parent_synthesis_id=request.parent_synthesis_id,
+        )
+        return _serialize_synthesis(synthesis)
+    finally:
+        await neo4j.close()
+
+
+@router.post("/self-enhancement/syntheses/auto")
+async def create_auto_knowledge_synthesis(
+    request: KnowledgeSynthesisAutoRequest,
+    db: Session = Depends(get_db),
+):
+    """自动发现候选事件并选择证据文档生成知识综合草稿。"""
+    from app.core.llm import llm_service
+
+    neo4j = Neo4jService()
+    try:
+        service = KnowledgeSynthesisService(neo4j, llm_service)
+        synthesis = await service.create_auto_draft(db, topic=request.topic, limit=request.limit)
+        return _serialize_synthesis(synthesis)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    finally:
+        await neo4j.close()
+
+
+@router.get("/self-enhancement/jobs/{job_id}")
+async def get_knowledge_job(job_id: str, db: Session = Depends(get_db)):
+    """查询持久化知识任务状态。"""
+    job = db.query(KnowledgeJob).filter(KnowledgeJob.id == job_id).first()
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识任务不存在")
+    return {
+        "id": job.id,
+        "job_type": job.job_type,
+        "target_id": job.target_id,
+        "status": job.status,
+        "progress": job.progress,
+        "retry_count": job.retry_count,
+        "next_retry_at": job.next_retry_at.isoformat() if job.next_retry_at else None,
+        "result_summary": job.result_summary,
+        "error_message": job.error_message,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+    }
+
+
+@router.get("/self-enhancement/jobs")
+async def list_knowledge_jobs(
+    job_status: Optional[str] = Query(None, alias="status"),
+    job_type: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    """查询知识增强与知识综合的持久化任务。"""
+    query = db.query(KnowledgeJob)
+    if job_status:
+        query = query.filter(KnowledgeJob.status == job_status)
+    if job_type:
+        query = query.filter(KnowledgeJob.job_type == job_type)
+    jobs = query.order_by(KnowledgeJob.updated_at.desc()).limit(limit).all()
+    return {
+        "jobs": [
+            {
+                "id": job.id,
+                "job_type": job.job_type,
+                "target_id": job.target_id,
+                "status": job.status,
+                "progress": job.progress,
+                "retry_count": job.retry_count,
+                "next_retry_at": job.next_retry_at.isoformat() if job.next_retry_at else None,
+                "error_message": job.error_message,
+                "result_summary": job.result_summary,
+                "created_at": job.created_at.isoformat() if job.created_at else None,
+                "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+            }
+            for job in jobs
+        ],
+        "total": len(jobs),
+    }
+
+
+@router.get("/self-enhancement/syntheses")
+async def list_knowledge_syntheses(
+    topic: Optional[str] = Query(None),
+    synthesis_status: Optional[str] = Query(None, alias="status"),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    query = db.query(KnowledgeSynthesis)
+    if topic:
+        query = query.filter(KnowledgeSynthesis.topic.ilike(f"%{topic}%"))
+    if synthesis_status:
+        query = query.filter(KnowledgeSynthesis.status == synthesis_status)
+    items = query.order_by(KnowledgeSynthesis.updated_at.desc()).limit(limit).all()
+    return {"syntheses": [_serialize_synthesis(item) for item in items], "total": len(items)}
+
+
+@router.get("/self-enhancement/syntheses/search")
+async def search_published_knowledge_syntheses(
+    q: Optional[str] = Query(None, description="主题、标题或内容关键词"),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """检索已发布的综合文档。"""
+    neo4j = Neo4jService()
+    try:
+        items = await neo4j.search_knowledge_syntheses(query=q, limit=limit)
+        return {"syntheses": items, "total": len(items)}
+    finally:
+        await neo4j.close()
+
+
+@router.get("/self-enhancement/syntheses/{synthesis_id}")
+async def get_knowledge_synthesis(
+    synthesis_id: str,
+    db: Session = Depends(get_db),
+):
+    synthesis = db.query(KnowledgeSynthesis).filter(KnowledgeSynthesis.id == synthesis_id).first()
+    if synthesis is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识综合文档不存在")
+    return _serialize_synthesis(synthesis)
+
+
+@router.post("/self-enhancement/syntheses/{synthesis_id}/review")
+async def review_knowledge_synthesis(
+    synthesis_id: str,
+    request: KnowledgeSynthesisReviewRequest,
+    db: Session = Depends(get_db),
+):
+    from app.core.llm import llm_service
+
+    neo4j = Neo4jService()
+    try:
+        service = KnowledgeSynthesisService(neo4j, llm_service)
+        synthesis = db.query(KnowledgeSynthesis).filter(KnowledgeSynthesis.id == synthesis_id).first()
+        if synthesis is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识综合文档不存在")
+        if request.decision == "approved":
+            synthesis = await service.publish(db, synthesis_id)
+        else:
+            synthesis.status = "rejected"
+            synthesis.updated_at = datetime.utcnow()
+            db.commit()
+            db.refresh(synthesis)
+        return _serialize_synthesis(synthesis)
+    finally:
+        await neo4j.close()
+
+
+def _serialize_synthesis(synthesis: KnowledgeSynthesis) -> Dict[str, Any]:
+    return {
+        "id": synthesis.id,
+        "topic": synthesis.topic,
+        "title": synthesis.title,
+        "content": synthesis.content,
+        "summary": synthesis.summary,
+        "source_document_ids": synthesis.source_document_ids or [],
+        "source_claim_ids": synthesis.source_claim_ids or [],
+        "iteration": synthesis.iteration,
+        "parent_synthesis_id": synthesis.parent_synthesis_id,
+        "model_name": synthesis.model_name,
+        "prompt_version": synthesis.prompt_version,
+        "quality_score": synthesis.quality_score,
+        "status": synthesis.status,
+        "created_at": synthesis.created_at.isoformat() if synthesis.created_at else None,
+        "updated_at": synthesis.updated_at.isoformat() if synthesis.updated_at else None,
+    }
 
 
 # ==================== 文章选择 API ====================
@@ -1986,14 +2313,15 @@ async def batch_process_articles_enhancement(
 
 
 async def _process_articles_batch(task_id: str, article_ids: List[str]):
-    """后台批量处理文章"""
+    """后台批量创建持久化知识增强任务。"""
     from app.core.database import get_session_local
-    from app.services.kg.self_enhancement import KnowledgeSelfEnhancement
+    from app.services.knowledge_jobs import enqueue_article_enhancement
 
     # 初始化进度
     _batch_progress[task_id] = {
         "total": len(article_ids),
         "processed": 0,
+        "queued": 0,
         "failed": 0,
         "skipped": 0,
         "current_article": None,
@@ -2006,14 +2334,6 @@ async def _process_articles_batch(task_id: str, article_ids: List[str]):
     db = SessionLocal()
 
     try:
-        # 获取服务实例
-        neo4j = Neo4jService()
-        from app.core.llm import llm_service
-        service = KnowledgeSelfEnhancement(
-            kg_service=neo4j,
-            llm_client=llm_service
-        )
-
         for idx, article_id in enumerate(article_ids):
             try:
                 article = db.query(Article).filter(Article.id == article_id).first()
@@ -2028,42 +2348,25 @@ async def _process_articles_batch(task_id: str, article_ids: List[str]):
                     "index": idx + 1
                 }
 
-                # 更新状态为处理中
-                article.kg_status = "processing"
-                db.commit()
-
-                # 处理文章
-                result = await service.process_new_article(
+                job_id = enqueue_article_enhancement(
                     article_id=article_id,
-                    article_content=article.content
+                    content=article.content,
+                    source_url=article.url,
+                    source_published_at=(
+                        article.published_at.isoformat() if article.published_at else None
+                    ),
                 )
-
-                # 更新状态
-                if result.status == "completed":
-                    article.kg_status = "success"
-                    _batch_progress[task_id]["processed"] += 1
+                if job_id:
+                    _batch_progress[task_id]["queued"] += 1
                 else:
-                    article.kg_status = "failed"
-                    article.kg_error_message = result.error_message
                     _batch_progress[task_id]["failed"] += 1
                     _batch_progress[task_id]["errors"].append({
                         "article_id": str(article_id),
-                        "error": result.error_message
+                        "error": "知识增强任务入队失败",
                     })
-
-                article.kg_processed_at = datetime.now()
-                db.commit()
-
-                # 添加小延迟避免API限流
-                await asyncio.sleep(0.5)
 
             except Exception as e:
                 logger.error(f"处理文章 {article_id} 失败: {e}")
-                article = db.query(Article).filter(Article.id == article_id).first()
-                if article:
-                    article.kg_status = "failed"
-                    article.kg_error_message = str(e)
-                    db.commit()
                 _batch_progress[task_id]["failed"] += 1
                 _batch_progress[task_id]["errors"].append({
                     "article_id": str(article_id),
@@ -2111,8 +2414,9 @@ async def get_batch_process_status(task_id: str):
     # 计算进度百分比
     total = progress["total"]
     processed = progress["processed"]
+    queued = progress.get("queued", 0)
     failed = progress["failed"]
-    completed = processed + failed
+    completed = processed + queued + failed
     percentage = round((completed / total) * 100, 1) if total > 0 else 0
 
     return {
@@ -2120,6 +2424,7 @@ async def get_batch_process_status(task_id: str):
         "status": progress["status"],
         "total": total,
         "processed": processed,
+        "queued": queued,
         "failed": failed,
         "skipped": progress["skipped"],
         "percentage": percentage,
@@ -2228,6 +2533,18 @@ async def get_prompt_template(template_id: str):
 
 # ==================== 趋势预测 API ====================
 
+@router.get("/prediction/discover-events")
+async def discover_prediction_events(
+    limit: int = Query(20, ge=1, le=100),
+    days: int = Query(90, ge=1, le=3650),
+    db: Session = Depends(get_db),
+):
+    """从近期文章主动发现可能值得预测的事件。"""
+    from app.services.kg.event_discovery import EventDiscoveryService
+
+    candidates = EventDiscoveryService().discover(db, limit=limit, days=days)
+    return {"events": candidates, "total": len(candidates)}
+
 class TrendPredictionRequest(BaseModel):
     """趋势预测请求"""
     topic: str = Field(..., description="预测主题")
@@ -2235,8 +2552,38 @@ class TrendPredictionRequest(BaseModel):
     prediction_type: str = Field("general", description="预测类型")
 
 
+class DiscoveredEventPredictionRequest(BaseModel):
+    event_id: str = Field(..., min_length=1, max_length=100)
+    time_range: int = Field(30, ge=1, le=365)
+    prediction_type: str = Field("general")
+
+
+class PredictionFeedbackRequest(BaseModel):
+    actual_trend: Literal["up", "down", "stable"]
+    feedback: Optional[str] = None
+    accuracy_score: Optional[float] = Field(None, ge=0, le=1)
+
+
+def _save_prediction_record(db: Session, request: TrendPredictionRequest, result) -> str:
+    prediction_id = f"pred-{uuid.uuid4().hex}"
+    db.add(PredictionRecord(
+        id=prediction_id,
+        topic=result.topic,
+        prediction_type=result.prediction_type,
+        time_range=request.time_range,
+        trend=result.trend,
+        confidence=result.confidence,
+        factors=result.factors,
+        timeline=result.timeline,
+        knowledge_basis=result.knowledge_basis,
+        interpretation=result.interpretation,
+    ))
+    db.commit()
+    return prediction_id
+
+
 @router.post("/prediction/trend")
-async def predict_trend(request: TrendPredictionRequest):
+async def predict_trend(request: TrendPredictionRequest, db: Session = Depends(get_db)):
     """
     预测趋势
 
@@ -2261,6 +2608,7 @@ async def predict_trend(request: TrendPredictionRequest):
         time_range=request.time_range,
         prediction_type=request.prediction_type
     )
+    prediction_id = _save_prediction_record(db, request, result)
 
     return {
         "topic": result.topic,
@@ -2269,12 +2617,14 @@ async def predict_trend(request: TrendPredictionRequest):
         "factors": result.factors,
         "timeline": result.timeline,
         "prediction_type": result.prediction_type,
-        "generated_at": result.generated_at
+        "generated_at": result.generated_at,
+        "knowledge_basis": result.knowledge_basis,
+        "prediction_id": prediction_id,
     }
 
 
 @router.post("/prediction/sentiment")
-async def predict_sentiment(request: TrendPredictionRequest):
+async def predict_sentiment(request: TrendPredictionRequest, db: Session = Depends(get_db)):
     """预测舆情趋势"""
     from app.services.kg.prediction import TrendPredictionEngine
 
@@ -2282,6 +2632,7 @@ async def predict_sentiment(request: TrendPredictionRequest):
     engine = TrendPredictionEngine(kg_service=neo4j)
 
     result = await engine.predict_sentiment(topic=request.topic)
+    prediction_id = _save_prediction_record(db, request, result)
 
     return {
         "topic": result.topic,
@@ -2290,12 +2641,14 @@ async def predict_sentiment(request: TrendPredictionRequest):
         "factors": result.factors,
         "timeline": result.timeline,
         "prediction_type": result.prediction_type,
-        "generated_at": result.generated_at
+        "generated_at": result.generated_at,
+        "knowledge_basis": result.knowledge_basis,
+        "prediction_id": prediction_id,
     }
 
 
 @router.post("/prediction/technology")
-async def predict_technology(request: TrendPredictionRequest):
+async def predict_technology(request: TrendPredictionRequest, db: Session = Depends(get_db)):
     """预测技术趋势"""
     from app.services.kg.prediction import TrendPredictionEngine
 
@@ -2303,6 +2656,7 @@ async def predict_technology(request: TrendPredictionRequest):
     engine = TrendPredictionEngine(kg_service=neo4j)
 
     result = await engine.predict_technology(topic=request.topic)
+    prediction_id = _save_prediction_record(db, request, result)
 
     return {
         "topic": result.topic,
@@ -2311,5 +2665,147 @@ async def predict_technology(request: TrendPredictionRequest):
         "factors": result.factors,
         "timeline": result.timeline,
         "prediction_type": result.prediction_type,
-        "generated_at": result.generated_at
+        "generated_at": result.generated_at,
+        "knowledge_basis": result.knowledge_basis,
+        "prediction_id": prediction_id,
+        "scenarios": result.scenarios,
+    }
+
+
+@router.post("/prediction/discovered-event")
+async def predict_discovered_event(
+    request: DiscoveredEventPredictionRequest,
+    db: Session = Depends(get_db),
+):
+    """对系统发现的候选事件执行多文档交叉预测。"""
+    from app.services.kg.event_discovery import EventDiscoveryService
+    from app.services.kg.prediction import TrendPredictionEngine
+    from app.core.llm import llm_service
+
+    events = EventDiscoveryService().discover(db, limit=100, days=3650)
+    event = next((item for item in events if item["id"] == request.event_id), None)
+    if event is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="候选事件已过期，请刷新候选事件")
+    if len(event.get("evidence_articles") or []) < 2:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="该候选事件只有单篇证据，暂不进行交叉预测")
+    neo4j = get_neo4j_service()
+    try:
+        result = await TrendPredictionEngine(neo4j, llm_client=llm_service).predict_discovered_event(
+            event=event,
+            time_range=request.time_range,
+            prediction_type=request.prediction_type,
+        )
+        record_request = TrendPredictionRequest(
+            topic=result.topic,
+            time_range=request.time_range,
+            prediction_type=request.prediction_type,
+        )
+        prediction_id = _save_prediction_record(db, record_request, result)
+        return {
+            "topic": result.topic,
+            "trend": result.trend,
+            "confidence": result.confidence,
+            "factors": result.factors,
+            "timeline": result.timeline,
+            "scenarios": result.scenarios,
+            "prediction_type": result.prediction_type,
+            "generated_at": result.generated_at,
+            "knowledge_basis": result.knowledge_basis,
+            "interpretation": result.interpretation,
+            "prediction_id": prediction_id,
+            "event": event,
+        }
+    finally:
+        await neo4j.close()
+
+
+@router.get("/prediction/history")
+async def list_prediction_history(
+    topic: Optional[str] = Query(None),
+    prediction_status: Optional[str] = Query(None, alias="status"),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    """查询预测快照，供回放和命中评估使用。"""
+    query = db.query(PredictionRecord)
+    if topic:
+        query = query.filter(PredictionRecord.topic.ilike(f"%{topic}%"))
+    if prediction_status:
+        query = query.filter(PredictionRecord.status == prediction_status)
+    records = query.order_by(PredictionRecord.created_at.desc()).limit(limit).all()
+    return {"predictions": [_serialize_prediction_record(record) for record in records], "total": len(records)}
+
+
+def _serialize_prediction_record(record: PredictionRecord) -> Dict[str, Any]:
+    return {
+        "id": record.id,
+        "topic": record.topic,
+        "prediction_type": record.prediction_type,
+        "time_range": record.time_range,
+        "trend": record.trend,
+        "confidence": record.confidence,
+        "factors": record.factors or [],
+        "timeline": record.timeline or [],
+        "knowledge_basis": record.knowledge_basis or {},
+        "interpretation": record.interpretation or {},
+        "status": record.status,
+        "feedback": record.feedback,
+        "actual_trend": record.actual_trend,
+        "accuracy_score": record.accuracy_score,
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+        "evaluated_at": record.evaluated_at.isoformat() if record.evaluated_at else None,
+    }
+
+
+@router.post("/prediction/history/{prediction_id}/feedback")
+async def review_prediction(
+    prediction_id: str,
+    request: PredictionFeedbackRequest,
+    db: Session = Depends(get_db),
+):
+    """记录人工观察结果，形成预测反馈闭环。"""
+    record = db.query(PredictionRecord).filter(PredictionRecord.id == prediction_id).first()
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="预测记录不存在")
+    record.actual_trend = request.actual_trend
+    record.feedback = request.feedback
+    record.accuracy_score = request.accuracy_score if request.accuracy_score is not None else (
+        1.0 if record.trend == request.actual_trend else 0.0
+    )
+    record.status = "evaluated"
+    record.evaluated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(record)
+    return _serialize_prediction_record(record)
+
+
+@router.get("/prediction/metrics")
+async def get_prediction_metrics(
+    topic: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """汇总预测反馈，用于置信度校准和主题决策。"""
+    query = db.query(PredictionRecord).filter(PredictionRecord.status == "evaluated")
+    if topic:
+        query = query.filter(PredictionRecord.topic.ilike(f"%{topic}%"))
+    records = query.order_by(PredictionRecord.evaluated_at.desc()).limit(1000).all()
+
+    def summarize(items):
+        if not items:
+            return {"evaluated": 0, "accuracy": None, "average_confidence": None}
+        return {
+            "evaluated": len(items),
+            "accuracy": round(sum((item.accuracy_score or 0) for item in items) / len(items), 4),
+            "average_confidence": round(sum(item.confidence or 0 for item in items) / len(items), 4),
+        }
+
+    by_topic = {}
+    by_type = {}
+    for record in records:
+        by_topic.setdefault(record.topic, []).append(record)
+        by_type.setdefault(record.prediction_type, []).append(record)
+    return {
+        "overall": summarize(records),
+        "by_topic": {key: summarize(value) for key, value in by_topic.items()},
+        "by_type": {key: summarize(value) for key, value in by_type.items()},
     }

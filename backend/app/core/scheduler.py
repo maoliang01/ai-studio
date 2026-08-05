@@ -22,6 +22,8 @@ SCHEDULED_PAGE_TIMEOUT_SECONDS = int(os.getenv("SCHEDULED_PAGE_TIMEOUT_SECONDS",
 SCHEDULED_URL_RETRIES = int(os.getenv("SCHEDULED_URL_RETRIES", "1"))
 SCHEDULED_RETRY_BACKOFF_SECONDS = float(os.getenv("SCHEDULED_RETRY_BACKOFF_SECONDS", "5"))
 SCHEDULED_TASK_MAX_RUNTIME_SECONDS = int(os.getenv("SCHEDULED_TASK_MAX_RUNTIME_SECONDS", "1200"))
+KNOWLEDGE_JOB_INTERVAL_SECONDS = int(os.getenv("KNOWLEDGE_JOB_INTERVAL_SECONDS", "60"))
+KNOWLEDGE_JOB_BATCH_SIZE = int(os.getenv("KNOWLEDGE_JOB_BATCH_SIZE", "2"))
 
 
 async def _scrape_scheduled_url(
@@ -554,6 +556,29 @@ def register_kg_reconcile_job(scheduler, interval_minutes: int = 30):
         max_instances=1
     )
     logger.info(f"KG 定时对账任务已注册,间隔 {interval_minutes} 分钟")
+
+
+def run_knowledge_job_worker():
+    """在 APScheduler 线程中运行一批持久化知识增强任务。"""
+    from app.services.knowledge_jobs import run_pending_knowledge_jobs
+    run_pending_knowledge_jobs(limit=KNOWLEDGE_JOB_BATCH_SIZE)
+
+
+def register_knowledge_job_worker(scheduler):
+    """注册知识增强 Worker，间隔由 KNOWLEDGE_JOB_INTERVAL_SECONDS 控制。"""
+    from app.services.knowledge_jobs import recover_interrupted_knowledge_jobs
+    recovered = recover_interrupted_knowledge_jobs()
+    if recovered:
+        logger.warning("恢复 %s 个被中断的知识增强任务", recovered)
+    scheduler.add_job(
+        run_knowledge_job_worker,
+        "interval",
+        seconds=max(10, KNOWLEDGE_JOB_INTERVAL_SECONDS),
+        id="knowledge_job_worker",
+        replace_existing=True,
+        max_instances=1,
+    )
+    logger.info("知识增强 Worker 已注册，间隔 %s 秒，每批 %s 个任务", KNOWLEDGE_JOB_INTERVAL_SECONDS, KNOWLEDGE_JOB_BATCH_SIZE)
 
 
 # 全局调度器实例

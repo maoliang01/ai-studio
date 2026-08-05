@@ -186,6 +186,15 @@ export default function ScrapePage() {
     loadRecentHistory();
   }, []);
 
+  // 手动深度爬取完成后刷新持久化历史记录
+  useEffect(() => {
+    if (isScraping) return;
+    fetch("/api/scheduled/history?limit=5")
+      .then((res) => res.ok ? res.json() : [])
+      .then((data) => setRecentHistory(data.histories || data || []))
+      .catch((error) => console.error("刷新历史记录失败:", error));
+  }, [isScraping]);
+
   // 选择已有来源时自动填充 URL
   const handleSelectSource = (source: ScrapeSource) => {
     setSelectedSource(source);
@@ -1154,7 +1163,7 @@ export default function ScrapePage() {
                             )}
                             <div className="flex-1 min-w-0">
                               <p className="text-sm font-medium truncate">
-                                {item.taskName || item.articleTitle || "定时任务"}
+                                {item.taskName || item.articleTitle || "手动爬取"}
                               </p>
                               <p className="text-xs text-muted-foreground">
                                 {item.status === "success"

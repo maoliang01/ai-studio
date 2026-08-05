@@ -34,7 +34,7 @@ export default function SettingsPage() {
       <div className="max-w-4xl mx-auto p-6 space-y-8">
         <div>
           <h1 className="text-2xl font-semibold mb-2">设置</h1>
-          <p className="text-muted-foreground">配置 AI Studio 的各项功能</p>
+          <p className="text-muted-foreground">配置 Find Out 的各项功能</p>
         </div>
 
         {/* 主题设置 */}
@@ -122,7 +122,7 @@ export default function SettingsPage() {
                                 : "#10B981",
                     }}
                   />
-                  <span className="text-sm font-medium">AI Studio</span>
+                  <span className="text-sm font-medium">Find Out</span>
                 </div>
                 <div className="space-y-2">
                   <div className="h-3 w-3/4 rounded bg-muted-foreground/20" />

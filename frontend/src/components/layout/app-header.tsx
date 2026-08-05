@@ -30,7 +30,7 @@ export function AppHeader() {
   const { toggleSidebar } = useSidebar();
   const { settings, setTheme } = useSettingsStore();
 
-  const title = pageTitles[pathname] || "AI Studio";
+  const title = pageTitles[pathname] || "Find Out";
 
   const toggleTheme = () => {
     const themes: Array<"light" | "dark" | "system"> = ["light", "dark", "system"];

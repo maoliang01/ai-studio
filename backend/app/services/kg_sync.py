@@ -260,8 +260,9 @@ async def _extract_and_link_entities_inner(article_id: str) -> bool:
             len(entities),
         )
 
-        # 触发知识自增强循环
-        asyncio.create_task(trigger_self_enhancement(article_id, content))
+        # 只创建持久化增强任务，由统一 Worker 执行，避免重复触发和重启丢任务。
+        from app.services.knowledge_jobs import enqueue_article_enhancement
+        enqueue_article_enhancement(article_id, content)
 
         return True
 
@@ -446,47 +447,11 @@ async def _get_kg_content_hash(neo4j: Neo4jService, article_id: str) -> str:
         return rec["h"] if rec else ""
 
 
-# ============ 知识自增强循环集成 ============
-
-_self_enhancement_service = None
-
-
-def get_self_enhancement_service():
-    """获取自增强服务实例（延迟初始化）"""
-    global _self_enhancement_service
-    if _self_enhancement_service is None:
-        try:
-            from app.services.kg.self_enhancement import KnowledgeSelfEnhancement
-            from app.core.llm import LLMService
-            neo4j = Neo4jService()
-            llm_service = LLMService()
-            _self_enhancement_service = KnowledgeSelfEnhancement(
-                kg_service=neo4j,
-                llm_client=llm_service
-            )
-        except Exception as e:
-            logger.warning(f"初始化自增强服务失败: {e}")
-    return _self_enhancement_service
-
-
 async def trigger_self_enhancement(article_id: str, content: str):
     """
     触发知识自增强循环
 
     在文章实体抽取成功后调用，提取知识点、关联和总结。
     """
-    service = get_self_enhancement_service()
-    if service is None:
-        logger.debug("自增强服务未初始化，跳过")
-        return
-
-    try:
-        logger.info(f"触发自增强循环: {article_id}")
-        result = await service.process_new_article(article_id, content)
-        logger.info(
-            f"自增强完成: {article_id} - "
-            f"知识点={result.knowledge_points_count}, "
-            f"关联={result.associations_count}"
-        )
-    except Exception as e:
-        logger.error(f"自增强循环失败 {article_id}: {e}")
+    from app.services.knowledge_jobs import enqueue_article_enhancement
+    enqueue_article_enhancement(article_id, content)

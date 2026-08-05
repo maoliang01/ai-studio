@@ -22,6 +22,9 @@ from app.models.wechat import (
     WechatCookie,
     WechatCrawlTask,
 )
+from app.models.knowledge import KnowledgeJob
+from app.models.synthesis import KnowledgeSynthesis
+from app.models.prediction import PredictionRecord
 
 __all__ = [
     "Article",
@@ -36,4 +39,7 @@ __all__ = [
     "WechatAccount",
     "WechatCookie",
     "WechatCrawlTask",
+    "KnowledgeJob",
+    "KnowledgeSynthesis",
+    "PredictionRecord",
 ]

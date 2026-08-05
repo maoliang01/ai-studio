@@ -69,7 +69,7 @@ export function AppSidebar() {
             <Sparkles className="h-4 w-4 text-primary" />
           </div>
           <div className="flex flex-col">
-            <span className="text-sm font-semibold">AI Studio</span>
+            <span className="text-sm font-semibold">Find Out</span>
             <span className="text-xs text-muted-foreground">工作台</span>
           </div>
         </div>

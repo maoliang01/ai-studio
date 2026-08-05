@@ -36,7 +36,11 @@ async def lifespan(app: FastAPI):
             settings.settings_store.scrape_sources,
         )
 
-        from app.core.scheduler import init_scheduler, register_kg_reconcile_job
+        from app.core.scheduler import (
+            init_scheduler,
+            register_kg_reconcile_job,
+            register_knowledge_job_worker,
+        )
         _scheduler = init_scheduler()
         logger.info("定时任务调度器已启动")
 
@@ -45,6 +49,7 @@ async def lifespan(app: FastAPI):
         # 默认每 10 分钟对账，迁移设备后 Neo4j 数据卷缺失也能自动补抽。
         interval = int(os.getenv("KG_RECONCILE_INTERVAL_MINUTES", "10"))
         register_kg_reconcile_job(_scheduler, interval_minutes=interval)
+        register_knowledge_job_worker(_scheduler)
 
         # 幂等初始化图谱约束、Claim 索引和现有实体的稳定标识。
         from app.services.kg import Neo4jService

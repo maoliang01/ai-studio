@@ -20,7 +20,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI Studio - AI 工作台",
+  title: "Find Out - AI 工作台",
   description: "强大的 AI 工作台，支持多模型对话、知识库管理、提示词管理等功能",
 };
 

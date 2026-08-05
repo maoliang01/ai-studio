@@ -1112,6 +1112,25 @@ class DateExtractor:
         return result
 
     @classmethod
+    def extract_thepaper_list_dates(cls, html: str, base_url: str) -> Dict[str, str]:
+        """读取澎湃频道页 Next.js 数据中的文章发布时间。"""
+        if not html or 'thepaper.cn' not in base_url.lower():
+            return {}
+        result: Dict[str, str] = {}
+        pattern = re.compile(
+            r'"contId"\s*:\s*(\d+).{0,1800}?"pubTimeLong"\s*:\s*(\d{13})',
+            re.IGNORECASE | re.DOTALL,
+        )
+        for match in pattern.finditer(html):
+            try:
+                published = datetime.fromtimestamp(int(match.group(2)) / 1000).strftime("%Y-%m-%d")
+            except (ValueError, OSError, OverflowError):
+                continue
+            if cls._validate_date(published):
+                result[urljoin(base_url, f"/newsDetail_forward_{match.group(1)}")] = published
+        return result
+
+    @classmethod
     def extract_list_item_titles(cls, html: str, base_url: str) -> Dict[str, str]:
         """提取栏目列表中网站展示的文章标题，供受限外链兜底。"""
         if not html:
@@ -2627,6 +2646,10 @@ class WebScraper:
 
         # 列表页显示日期仅作为详情页明确发布日期缺失时的站点级兜底。
         list_item_dates = DateExtractor.extract_list_item_dates(list_page.html, url)
+        if 'thepaper.cn/channel_' in url.lower():
+            list_item_dates.update(
+                DateExtractor.extract_thepaper_list_dates(list_page.html, url)
+            )
         list_item_titles = DateExtractor.extract_list_item_titles(list_page.html, url)
 
         # 2. 识别文章链接（基于 URL 模式）
@@ -2723,11 +2746,23 @@ class WebScraper:
         logger.info(f"有效文章: {len(valid_results)} 篇")
 
         if (date_range or custom_date_range) and start_date and end_date:
+            is_thepaper_channel = 'thepaper.cn/channel_' in url.lower()
+            if is_thepaper_channel:
+                for item in valid_results:
+                    if not item.published_at:
+                        item.published_at = list_item_dates.get(item.url.split("#", 1)[0])
+                        if not item.published_at:
+                            match = re.search(r'newsDetail_forward_(\d+)', item.url)
+                            if match:
+                                item.published_at = list_item_dates.get(
+                                    urljoin(url, f"/newsDetail_forward_{match.group(1)}")
+                                )
             before_count = len(valid_results)
-            valid_results = [
-                r for r in valid_results
-                if r.published_at and self._date_in_range(r.published_at, start_date, end_date)
-            ]
+            if not is_thepaper_channel:
+                valid_results = [
+                    r for r in valid_results
+                    if r.published_at and self._date_in_range(r.published_at, start_date, end_date)
+                ]
             logger.info(f"正文发布日期过滤: {before_count} -> {len(valid_results)} 篇")
 
         # 5. 按日期排序（最新的在前）
@@ -2841,6 +2876,12 @@ class WebScraper:
             has_date_in_url = bool(re.search(r'/(\d{6}|\d{8})/', link)) or bool(re.search(r'/t\d{8}', link))
             # 文件扩展名
             has_file_ext = any(link.endswith(ext) for ext in ['.html', '.htm', '.shtml', '.php'])
+            # 澎湃新闻频道页使用 /newsDetail_forward_数字 作为文章详情链接，
+            # 不带传统文件扩展名，仅在澎湃同域名下识别，避免影响其他站点。
+            is_thepaper_detail = (
+                domain.endswith('thepaper.cn')
+                and re.search(r'/newsDetail_forward_\d+', parsed.path, re.IGNORECASE) is not None
+            )
 
             # 栏目检查：只接受主栏目路径下的文章
             is_same_category = len(link_parts) > 1 and link_parts[0] == main_category
@@ -2857,7 +2898,10 @@ class WebScraper:
             # 例如求是网：列表页 /cpc/，文章 /20260705/...
             is_category_index_page = any(base_url.rstrip('/').endswith(x) for x in ['/index.htm', '/index.html', '/index.php', '/index'])
 
-            if has_file_ext and is_same_category:
+            if is_thepaper_detail:
+                article_links.append(link)
+                logger.debug(f"  接受(澎湃详情页): {link}")
+            elif has_file_ext and is_same_category:
                 article_links.append(link)
                 logger.debug(f"  接受(栏目匹配): {link}")
             elif has_file_ext and not is_same_category and is_category_index_page:

@@ -29,6 +29,12 @@ class KnowledgePointSchema(BaseModel):
         description="置信度，0-1 之间"
     )
     keywords: List[str] = Field(default_factory=list, description="关键词列表")
+    evidence: List[str] = Field(default_factory=list, description="原文证据引用")
+    source_span: Optional[str] = Field(default=None, description="原文位置或片段")
+    source_url: Optional[str] = Field(default=None, description="来源地址")
+    status: str = Field(default="candidate", description="知识状态")
+    model_name: Optional[str] = Field(default=None, description="提取模型")
+    prompt_version: Optional[str] = Field(default=None, description="提示词版本")
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
 
@@ -61,6 +67,8 @@ class AssociationSchema(BaseModel):
         description="关联强度，0-1 之间"
     )
     evidence: str = Field(default="", description="关联证据")
+    status: str = Field(default="approved", description="关系状态")
+    candidate_type: Optional[str] = Field(default=None, description="候选关系类型")
     created_at: datetime = Field(default_factory=datetime.now)
 
     class Config:
