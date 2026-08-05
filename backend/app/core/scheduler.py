@@ -11,6 +11,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.core.database import get_db
+from app.core.time_utils import beijing_now, local_to_utc_naive
 from app.models.scheduled_task import ScheduledTask, ScrapeHistory, TaskStatus
 from app.models.wechat import WechatCrawlTask
 
@@ -22,6 +23,7 @@ SCHEDULED_PAGE_TIMEOUT_SECONDS = int(os.getenv("SCHEDULED_PAGE_TIMEOUT_SECONDS",
 SCHEDULED_URL_RETRIES = int(os.getenv("SCHEDULED_URL_RETRIES", "1"))
 SCHEDULED_RETRY_BACKOFF_SECONDS = float(os.getenv("SCHEDULED_RETRY_BACKOFF_SECONDS", "5"))
 SCHEDULED_TASK_MAX_RUNTIME_SECONDS = int(os.getenv("SCHEDULED_TASK_MAX_RUNTIME_SECONDS", "1200"))
+SCHEDULED_MAX_ARTICLES = int(os.getenv("SCHEDULED_MAX_ARTICLES", "10"))
 KNOWLEDGE_JOB_INTERVAL_SECONDS = int(os.getenv("KNOWLEDGE_JOB_INTERVAL_SECONDS", "60"))
 KNOWLEDGE_JOB_BATCH_SIZE = int(os.getenv("KNOWLEDGE_JOB_BATCH_SIZE", "2"))
 
@@ -277,7 +279,7 @@ def run_scheduled_task(task_id: str):
                             scraper=scraper,
                             url=url,
                             options=options,
-                            max_articles=20,
+                            max_articles=SCHEDULED_MAX_ARTICLES,
                             date_range=task.scrape_range,
                             timeout_seconds=timeout_seconds,
                         )
@@ -367,12 +369,12 @@ def run_scheduled_task(task_id: str):
 
 def _calculate_next_run(schedule_time: str) -> datetime:
     """计算下次执行时间"""
-    now = datetime.now()
+    now = beijing_now()
     hour, minute = map(int, schedule_time.split(":"))
     next_run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if next_run <= now:
         next_run += timedelta(days=1)
-    return next_run
+    return local_to_utc_naive(next_run)
 
 
 def sync_scheduler_tasks(scheduler: BackgroundScheduler):

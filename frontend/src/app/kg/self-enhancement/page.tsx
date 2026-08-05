@@ -51,6 +51,9 @@ interface PredictionResult {
     cross_document_relations?: number
     multi_document?: boolean
     evidence_titles?: string[]
+    support_level?: string
+    knowledge_point_details?: Array<{ title: string; content: string; category: string; evidence?: string; source_url?: string | null }>
+    relation_details?: Array<{ source: string; target: string; type: string; strength: number; evidence?: string }>
   }
 }
 
@@ -76,6 +79,7 @@ interface PredictionRecord {
   status: string
   actual_trend: string | null
   accuracy_score: number | null
+  knowledge_basis?: { support_level?: string }
   created_at: string | null
 }
 
@@ -93,6 +97,21 @@ const trendLabels: Record<string, string> = { up: '上升', down: '下降', stab
 
 function trendLabel(value: string) {
   return trendLabels[value] || value
+}
+
+const categoryLabels: Record<string, string> = {
+  concept: '概念',
+  fact: '事实',
+  argument: '观点',
+  method: '方法',
+}
+
+const relationLabels: Record<string, string> = {
+  same_as: '同一内容',
+  related_to: '相关',
+  supports: '支持',
+  contradicts: '矛盾',
+  extends: '延伸',
 }
 
 async function readJson(response: Response) {
@@ -240,7 +259,7 @@ export default function SelfEnhancementPage() {
       <div className="mb-6 grid grid-cols-2 gap-4 md:grid-cols-4">
         <Card><CardHeader className="pb-2"><CardTitle className="text-sm text-gray-500">已处理文档</CardTitle></CardHeader><CardContent><div className="text-3xl font-bold">{stats?.total_articles_processed || 0}</div></CardContent></Card>
         <Card><CardHeader className="pb-2"><CardTitle className="text-sm text-gray-500">知识点</CardTitle></CardHeader><CardContent><div className="text-3xl font-bold">{stats?.total_knowledge_points || 0}</div><p className="mt-1 text-xs text-gray-500">作为分析证据，不是最终洞察</p></CardContent></Card>
-        <Card><CardHeader className="pb-2"><CardTitle className="text-sm text-gray-500">正式关系</CardTitle></CardHeader><CardContent><div className="text-3xl font-bold">{stats?.total_associations || 0}</div><p className="mt-1 text-xs text-gray-500">审核通过后才参与关系推理</p></CardContent></Card>
+        <Card><CardHeader className="pb-2"><CardTitle className="text-sm text-gray-500">已审核关系</CardTitle></CardHeader><CardContent><div className="text-3xl font-bold">{stats?.total_associations || 0}</div><p className="mt-1 text-xs text-gray-500">已确认的知识点之间关系</p></CardContent></Card>
         <Card><CardHeader className="pb-2"><CardTitle className="text-sm text-gray-500">证据覆盖率</CardTitle></CardHeader><CardContent><div className="text-3xl font-bold">{Math.round(evidenceCoverage * 100)}%</div><p className="mt-1 text-xs text-gray-500">知识点带原文证据的比例</p></CardContent></Card>
       </div>
 
@@ -291,11 +310,13 @@ export default function SelfEnhancementPage() {
             <Card className="border-green-200">
               <CardHeader><CardTitle>交叉分析结果</CardTitle><p className="text-sm text-gray-500">{prediction.topic}</p></CardHeader>
               <CardContent className="space-y-4">
-                <div className="flex flex-wrap gap-2"><Badge>趋势：{trendLabel(prediction.trend)}</Badge><Badge variant="outline">置信度：{Math.round(prediction.confidence * 100)}%</Badge><Badge variant="outline">来源：{prediction.knowledge_basis.evidence_articles || 0} 篇</Badge><Badge variant="outline">知识点：{prediction.knowledge_basis.knowledge_points || 0} 个</Badge><Badge variant="outline">关系：{prediction.knowledge_basis.cross_document_relations || 0} 条</Badge></div>
+                <div className="rounded border border-slate-200 bg-slate-50 p-3 text-sm text-gray-700">“证据支持度”表示当前资料对判断方向的支持程度，不是事件发生概率，也不是统计学置信区间。分数越高，说明来源、知识点和已审核关系越充分。</div>
+                <div className="flex flex-wrap gap-2"><Badge>判断方向：{trendLabel(prediction.trend)}</Badge><Badge variant="outline">证据支持度：{prediction.knowledge_basis.support_level || '待评估'}（{Math.round(prediction.confidence * 100)}分）</Badge><Badge variant="outline">来源：{prediction.knowledge_basis.evidence_articles || 0} 篇</Badge><Badge variant="outline">结构化知识点：{prediction.knowledge_basis.knowledge_points || 0} 个</Badge><Badge variant="outline">已审核关系：{prediction.knowledge_basis.cross_document_relations || 0} 条</Badge></div>
                 {(prediction.knowledge_basis.knowledge_points || 0) === 0 && <div className="flex gap-2 rounded bg-amber-50 p-3 text-sm text-amber-800"><AlertCircle className="h-4 w-4 shrink-0" />本次使用了多篇文章，但这些文章尚未形成知识点或正式关系，结果主要依据文章内容，可信度需要谨慎解读。</div>}
                 <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-4"><div className="flex flex-wrap items-center justify-between gap-2"><h4 className="font-medium">事件解读</h4><Badge variant="outline">{prediction.interpretation?.current_phase || '待补充阶段判断'}</Badge></div><p className="mt-2 text-sm leading-6 text-gray-700">{prediction.interpretation?.event_summary || '当前结果主要反映来源文章中的共同信号，尚未形成进一步解读。'}</p>{prediction.interpretation?.next_developments?.length ? <div className="mt-4"><h5 className="mb-2 text-sm font-medium">可能的下一步</h5><div className="grid gap-3 md:grid-cols-2">{prediction.interpretation.next_developments.map((item) => <div key={item.title} className="rounded border bg-white p-3"><div className="flex flex-wrap justify-between gap-2"><strong className="text-sm">{item.title}</strong><Badge variant="outline">可能性：{item.likelihood}</Badge></div><p className="mt-2 text-xs text-gray-600">判断依据：{item.basis}</p><p className="mt-1 text-xs text-gray-500">观察：{item.watch_for}</p></div>)}</div></div> : null}<div className="mt-4 grid gap-4 text-sm md:grid-cols-2"><div><h5 className="mb-1 font-medium">推动因素</h5><ul className="list-disc space-y-1 pl-5 text-gray-600">{(prediction.interpretation?.drivers || []).map((item) => <li key={item}>{item}</li>)}</ul></div><div><h5 className="mb-1 font-medium">风险与不确定性</h5><ul className="list-disc space-y-1 pl-5 text-gray-600">{(prediction.interpretation?.risks || []).map((item) => <li key={item}>{item}</li>)}</ul></div></div><div className="mt-4"><h5 className="mb-1 text-sm font-medium">继续观察</h5><p className="text-sm text-gray-600">{(prediction.interpretation?.watch_indicators || []).join('；') || '等待新的独立来源或可验证结果。'}</p></div>{prediction.interpretation?.decision_value && <div className="mt-4 rounded border bg-white p-3 text-sm"><strong>决策价值：{prediction.interpretation.decision_value.category}</strong><p className="mt-1 text-gray-600">{prediction.interpretation.decision_value.explanation}</p></div>}</div>
                 <div><div className="mb-2 flex flex-wrap items-center justify-between gap-2"><h4 className="font-medium">可能情景</h4><span className="text-xs text-gray-500">情景参考权重，不是统计概率</span></div><div className="grid gap-3 md:grid-cols-3">{prediction.scenarios.map((scenario) => <div key={scenario.name} className="rounded border p-3"><div className="flex justify-between"><strong>{scenario.name}</strong><Badge variant="outline">{trendLabel(scenario.trend)}</Badge></div><p className="mt-1 text-sm text-gray-500">参考权重：{Math.round(scenario.probability * 100)}%</p><p className="mt-1 text-xs text-gray-500">{scenario.basis}</p></div>)}</div></div>
                 <details><summary className="cursor-pointer text-sm font-medium">查看参与判断的知识证据</summary><div className="mt-2 space-y-1 text-sm text-gray-600">{prediction.knowledge_basis.evidence_titles?.map((title) => <p key={title}>· {title}</p>)}</div></details>
+                <details open className="rounded border p-3"><summary className="cursor-pointer text-sm font-medium">查看参与判断的知识证据</summary><div className="mt-3 space-y-3 text-sm text-gray-600"><div><p className="font-medium text-gray-800">结构化知识点</p>{prediction.knowledge_basis.knowledge_point_details?.map((point, index) => <div key={`${point.title}-${index}`} className="mt-2 rounded border bg-white p-2"><div className="font-medium text-gray-800">{point.title} <span className="text-xs text-gray-500">（{categoryLabels[point.category] || point.category}）</span></div><p className="mt-1">{point.content}</p>{point.evidence && <p className="mt-1 text-xs text-gray-500">原文依据：{point.evidence}</p>}</div>)}</div>{(prediction.knowledge_basis.relation_details || []).length > 0 && <div><p className="font-medium text-gray-800">已审核关系</p>{prediction.knowledge_basis.relation_details?.map((relation, index) => <div key={`${relation.source}-${relation.target}-${index}`} className="mt-2 rounded border bg-white p-2"><p className="font-medium text-gray-800">{relation.source} → {relation.target} <span className="text-xs text-gray-500">（{relationLabels[relation.type] || relation.type}）</span></p>{relation.evidence && <p className="mt-1 text-xs text-gray-500">关系依据：{relation.evidence}</p>}</div>)}</div>}{!prediction.knowledge_basis.knowledge_point_details?.length && !prediction.knowledge_basis.relation_details?.length && <p className="text-amber-700">本次没有可用的结构化知识点或已审核关系，判断主要来自文章之间的共同信号。</p>}</div></details>
               </CardContent>
             </Card>
           )}
@@ -311,6 +332,7 @@ export default function SelfEnhancementPage() {
         </TabsContent>
 
         <TabsContent value="feedback" className="space-y-4">
+          <div className="rounded border border-slate-200 bg-slate-50 p-3 text-sm text-gray-700">反馈的用途：未来确认事件实际方向后回填“实际上升、实际稳定或实际下降”。系统据此计算方向一致度，帮助判断过去的规则是否可靠，不会把这次反馈直接当成新的事实。</div>
           <Card><CardHeader><CardTitle>预测反馈</CardTitle><p className="text-sm text-gray-500">预测结果不会自动变成事实。未来观察到实际结果后，请标记真实趋势，系统会统计命中率。</p></CardHeader><CardContent className="space-y-3">{history.map((item) => <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 border-b pb-3 last:border-0"><div><p className="font-medium">{item.topic}</p><p className="text-xs text-gray-500">预测：{trendLabel(item.trend)} · 置信度 {Math.round(item.confidence * 100)}% {item.status === 'evaluated' ? `· 命中率 ${Math.round((item.accuracy_score || 0) * 100)}%` : ''}</p></div>{item.status !== 'evaluated' && <div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => submitFeedback(item.id, 'up')}>上升</Button><Button size="sm" variant="outline" onClick={() => submitFeedback(item.id, 'stable')}>稳定</Button><Button size="sm" variant="outline" onClick={() => submitFeedback(item.id, 'down')}>下降</Button></div>}</div>)}{history.length === 0 && <p className="py-8 text-center text-sm text-gray-500">完成一次交叉分析后，这里会出现预测记录。</p>}</CardContent></Card>
         </TabsContent>
       </Tabs>

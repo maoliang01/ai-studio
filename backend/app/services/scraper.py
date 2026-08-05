@@ -16,10 +16,28 @@ from collections import Counter
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime, date, timedelta
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, urlunparse
+from zoneinfo import ZoneInfo
 import httpx
 
 from app.services.alternate_scraper import strip_semantic_noise_blocks
+
+APP_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+
+def current_local_date() -> date:
+    """Return the application date in the user's configured China timezone."""
+    return datetime.now(APP_TIMEZONE).date()
+
+
+def canonicalize_article_url(url: str) -> str:
+    """Remove tracking query parameters from The Paper article URLs only."""
+    parsed = urlparse(url or "")
+    if parsed.netloc.lower().endswith("thepaper.cn") and re.search(
+        r"/newsDetail_forward_\d+", parsed.path, re.IGNORECASE
+    ):
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+    return url
 
 
 def extract_date_from_content(content: str, base_url: str = "") -> Tuple[Optional[str], Optional[str]]:
@@ -83,7 +101,7 @@ def extract_date_from_content(content: str, base_url: str = "") -> Tuple[Optiona
                     try:
                         parsed = datetime.strptime(normalized, "%Y-%m-%d")
                         d = parsed.date()
-                        if d.year >= 2000 and d <= date.today() + timedelta(days=1):
+                        if d.year >= 2000 and d <= current_local_date() + timedelta(days=1):
                             published_at = normalized
                             break
                     except:
@@ -1015,7 +1033,7 @@ class DateExtractor:
         try:
             parsed = datetime.strptime(date_str, "%Y-%m-%d")
             d = parsed.date()
-            today = date.today()
+            today = current_local_date()
 
             # 1. 不能是未来日期（允许1天误差）
             if d > today + timedelta(days=MAX_FUTURE_DAYS):
@@ -2075,6 +2093,7 @@ class WebScraper:
             db = SessionLocal()
 
             try:
+                result.url = canonicalize_article_url(result.url)
                 if result.content and result.word_count >= 20:
                     if not result.summary:
                         result.summary = summarize_locally(result.content)
@@ -2672,13 +2691,13 @@ class WebScraper:
         # 3. 计算日期范围。URL 中的日期可能是建页/更新/归档时间，
         # 不能据此提前丢弃文章；正文抓取后再按 published_at 最终过滤。
         if date_range or custom_date_range:
-            today = date.today()
-            if date_range == "today":
+            today = current_local_date()
+            if date_range in ("today", "1d"):
                 start_date, end_date = today, today
-            elif date_range == "week":
+            elif date_range in ("week", "7d"):
                 # 含今天在内共 7 个自然日。
                 start_date, end_date = today - timedelta(days=6), today
-            elif date_range == "month":
+            elif date_range in ("month", "30d"):
                 # 含今天在内共 30 个自然日。
                 start_date, end_date = today - timedelta(days=29), today
             elif custom_date_range:

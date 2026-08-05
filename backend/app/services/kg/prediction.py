@@ -95,6 +95,7 @@ class TrendPredictionEngine:
         article_ids = [item.get("id") for item in evidence if item.get("id")]
         points = []
         relation_count = 0
+        relation_details = []
         try:
             rows = await self.kg_service.execute(
                 """
@@ -116,11 +117,26 @@ class TrendPredictionEngine:
                   AND b.entity_type = 'KnowledgePoint'
                   AND a.article_id IN $article_ids
                   AND b.article_id IN $article_ids
-                RETURN count(r) AS count
+                  AND coalesce(r.status, 'approved') = 'approved'
+                RETURN a, b, r
+                LIMIT 100
                 """,
                 {"article_ids": article_ids},
             )
-            relation_count = int(relation_rows[0].get("count", 0)) if relation_rows else 0
+            for row in relation_rows if isinstance(relation_rows, list) else []:
+                source = row.get("a") if isinstance(row, dict) else None
+                target = row.get("b") if isinstance(row, dict) else None
+                relation = row.get("r") if isinstance(row, dict) else None
+                if not source or not target or not relation:
+                    continue
+                relation_details.append({
+                    "source": source.get("title") or source.get("name", ""),
+                    "target": target.get("title") or target.get("name", ""),
+                    "type": relation.get("relation_type") or "related_to",
+                    "strength": relation.get("strength", 0.5),
+                    "evidence": relation.get("evidence", ""),
+                })
+            relation_count = len(relation_details)
         except Exception as exc:
             logger.warning("候选事件跨文档知识读取失败: %s", exc)
 
@@ -154,6 +170,18 @@ class TrendPredictionEngine:
             "cross_document_relations": relation_count,
             "multi_document": evidence_count > 1,
             "evidence_titles": [item.get("title") for item in evidence if item.get("title")],
+            "support_level": "较强" if confidence >= 0.7 else ("一般" if confidence >= 0.5 else "较弱"),
+            "knowledge_point_details": [
+                {
+                    "title": point.get("title") or point.get("name", ""),
+                    "content": point.get("content", ""),
+                    "category": point.get("category", "concept"),
+                    "evidence": point.get("evidence", ""),
+                    "source_url": point.get("source_url"),
+                }
+                for point in points[:30]
+            ],
+            "relation_details": relation_details,
         }
         article_factors = [
             {"type": "source_article", "name": item.get("title"), "strength": 0.45, "evidence": item.get("summary", "")}

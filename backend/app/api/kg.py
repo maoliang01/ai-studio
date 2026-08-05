@@ -2565,6 +2565,27 @@ class PredictionFeedbackRequest(BaseModel):
 
 
 def _save_prediction_record(db: Session, request: TrendPredictionRequest, result) -> str:
+    event_id = (result.knowledge_basis or {}).get("event_id")
+    if event_id:
+        recent_records = (
+            db.query(PredictionRecord)
+            .filter(PredictionRecord.status == "pending")
+            .order_by(PredictionRecord.created_at.desc())
+            .limit(100)
+            .all()
+        )
+        for existing in recent_records:
+            if (existing.knowledge_basis or {}).get("event_id") == event_id:
+                existing.topic = result.topic
+                existing.trend = result.trend
+                existing.confidence = result.confidence
+                existing.factors = result.factors
+                existing.timeline = result.timeline
+                existing.knowledge_basis = result.knowledge_basis
+                existing.interpretation = result.interpretation
+                existing.time_range = request.time_range
+                db.commit()
+                return existing.id
     prediction_id = f"pred-{uuid.uuid4().hex}"
     db.add(PredictionRecord(
         id=prediction_id,

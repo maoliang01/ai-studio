@@ -4,6 +4,7 @@ import hashlib
 import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse, urlunparse
 
 from sqlalchemy.orm import Session
 
@@ -17,6 +18,15 @@ class EventDiscoveryService:
         "发布", "获批", "突破", "完成", "签约", "启动", "建成", "上线",
         "增长", "下降", "投资", "计划", "试验", "发现", "合作", "入选",
     )
+
+    @staticmethod
+    def _canonical_url(url: str) -> str:
+        parsed = urlparse(url or "")
+        if parsed.netloc.lower().endswith("thepaper.cn") and re.search(
+            r"/newsDetail_forward_\d+", parsed.path, re.IGNORECASE
+        ):
+            return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+        return url
 
     @staticmethod
     def _tokens(text: str) -> set[str]:
@@ -35,6 +45,18 @@ class EventDiscoveryService:
             articles = db.query(Article).filter(
                 Article.status.in_(["completed", "success"]),
             ).order_by(Article.scraped_at.desc()).limit(100).all()
+
+        # 同一文章可能以 canonical URL 和带 commTag 等参数的 URL 重复入库，
+        # 事件发现只保留一条，避免重复生成候选事件。
+        unique_articles = []
+        seen_urls = set()
+        for article in articles:
+            canonical_url = self._canonical_url(article.url)
+            if canonical_url in seen_urls:
+                continue
+            seen_urls.add(canonical_url)
+            unique_articles.append(article)
+        articles = unique_articles
 
         candidates = []
         article_tokens = {article.id: self._tokens(f"{article.title} {article.summary}") for article in articles}
