@@ -155,7 +155,7 @@ class EntityExtractor:
             # 调用 LLM
             messages = [{"role": "user", "content": prompt}]
             response = await llm_service.non_stream_chat(
-                model_id=self.model_id or "default",
+                model_id=self.model_id or "",
                 messages=messages,
                 temperature=0.3,  # 较低温度确保稳定性
                 max_tokens=4096

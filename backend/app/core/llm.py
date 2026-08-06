@@ -140,6 +140,10 @@ class LLMService:
         """发送对话请求，返回流式响应"""
         # 如果前端传递了配置，直接使用它
         config = model_config
+        # 兼容历史调用方传入的 "default"；真正的默认模型由配置中的
+        # default_llm 决定，不能把它当成一个必须存在的模型 ID。
+        if model_id in ("default", "default-llm"):
+            model_id = ""
         if not config and model_id:
             config = self.get_model_config(model_id)
             if not config:
@@ -213,6 +217,10 @@ class LLMService:
         """发送对话请求，返回完整响应（非流式）"""
         # 优先使用前端传递的配置
         config = model_config
+        # 兼容历史调用方传入的 "default"；真正的默认模型由配置中的
+        # default_llm 决定，不能把它当成一个必须存在的模型 ID。
+        if model_id in ("default", "default-llm"):
+            model_id = ""
         if not config and model_id:
             config = self.get_model_config(model_id)
             if not config:

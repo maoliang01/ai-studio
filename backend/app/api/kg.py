@@ -11,6 +11,7 @@ from typing import Optional, List, Dict, Any, Literal
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 
@@ -127,7 +128,11 @@ async def get_graph_stats():
         stats["articles_in_db"] = db_count
         kg_articles = stats.get("articles", 0)
         stats["orphan_entities"] = stats.get("orphan_entities", 0)
-        stats["drift_detected"] = kg_articles != db_count or stats["orphan_entities"] > 0
+        stats["drift_detected"] = (
+            kg_articles != db_count
+            or stats.get("articles_without_entities", 0) > 0
+            or stats["orphan_entities"] > 0
+        )
 
         return {
             "status": "success",
@@ -648,11 +653,24 @@ async def get_sync_status(db: Session = Depends(get_db)):
             r = await s.run("MATCH (a:Article) RETURN count(a) AS c")
             rec = await r.single()
             total_in_kg = rec["c"] if rec else 0
+            r_unlinked = await s.run(
+                """
+                MATCH (a:Article)
+                WHERE NOT (a)-[:CONTAINS_ENTITY]->(:Entity)
+                RETURN count(a) AS c
+                """
+            )
+            rec_unlinked = await r_unlinked.single()
+            articles_without_entities = rec_unlinked["c"] if rec_unlinked else 0
             r_orphan = await s.run("""
                 MATCH (e:Entity)
-                WHERE NOT (e)<-[:CONTAINS_ENTITY]-(:Article)
+                WHERE e.entity_type IN $article_entity_types
+                  AND NOT (e)<-[:CONTAINS_ENTITY]-(:Article)
                 RETURN count(e) AS c
-            """)
+            """, article_entity_types=[
+                "PERSON", "ORGANIZATION", "LOCATION", "TECHNOLOGY",
+                "EVENT", "CONCEPT", "DATE",
+            ])
             rec_orphan = await r_orphan.single()
             orphan_entities = rec_orphan["c"] if rec_orphan else 0
         await neo4j.close()
@@ -662,8 +680,13 @@ async def get_sync_status(db: Session = Depends(get_db)):
             "by_status": normalized,
             "total_in_db": total_in_db,
             "total_in_kg": total_in_kg,
+            "articles_without_entities": articles_without_entities,
             "orphan_entities": orphan_entities,
-            "drift_detected": total_in_db != total_in_kg or orphan_entities > 0,
+            "drift_detected": (
+                total_in_db != total_in_kg
+                or articles_without_entities > 0
+                or orphan_entities > 0
+            ),
             "failed_articles": failed_articles,
             "partial_articles": partial_articles,
             "sync_state": get_sync_state(),
@@ -717,6 +740,7 @@ async def process_pending_articles_now(
     max_concurrency: int = Query(default=3, ge=1, le=10, description="并发数"),
     include_failed: bool = Query(default=True, description="是否同时重试失败文章"),
     include_success: bool = Query(default=False, description="是否安全重建已成功文章的证据"),
+    include_partial: bool = Query(default=False, description="是否重试抽取未完成文章"),
     db: Session = Depends(get_db)
 ):
     """
@@ -731,8 +755,13 @@ async def process_pending_articles_now(
             limit=limit,
             include_failed=include_failed,
             include_success=include_success,
+            include_partial=include_partial,
         )
-        return {"status": "success", **result}
+        return {
+            "status": "success",
+            **result,
+            "results": {"success": result.get("scheduled", 0), "skipped": 0, "failed": 0},
+        }
     except Exception as e:
         logger.error(f"立即抽取失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2320,6 +2349,7 @@ async def _process_articles_batch(task_id: str, article_ids: List[str]):
     # 初始化进度
     _batch_progress[task_id] = {
         "total": len(article_ids),
+        "article_ids": [str(article_id) for article_id in article_ids],
         "processed": 0,
         "queued": 0,
         "failed": 0,
@@ -2373,8 +2403,8 @@ async def _process_articles_batch(task_id: str, article_ids: List[str]):
                     "error": str(e)
                 })
 
-        # 标记任务完成
-        _batch_progress[task_id]["status"] = "completed"
+        # 入队完成，但实际知识增强仍由持久化 Worker 继续执行。
+        _batch_progress[task_id]["status"] = "queued"
         _batch_progress[task_id]["end_time"] = datetime.now().isoformat()
         _batch_progress[task_id]["current_article"] = None
 
@@ -2387,7 +2417,7 @@ async def _process_articles_batch(task_id: str, article_ids: List[str]):
 
 
 @router.get("/self-enhancement/batch-status/{task_id}")
-async def get_batch_process_status(task_id: str):
+async def get_batch_process_status(task_id: str, db: Session = Depends(get_db)):
     """
     获取批量处理任务状态
 
@@ -2411,17 +2441,29 @@ async def get_batch_process_status(task_id: str):
 
     progress = _batch_progress[task_id]
 
-    # 计算进度百分比
+    # 查询持久化知识增强任务，返回真实处理进度，而不是仅统计入队进度。
     total = progress["total"]
-    processed = progress["processed"]
-    queued = progress.get("queued", 0)
-    failed = progress["failed"]
-    completed = processed + queued + failed
-    percentage = round((completed / total) * 100, 1) if total > 0 else 0
+    article_ids = progress.get("article_ids", [])
+    processed = 0
+    queued = 0
+    failed = progress.get("failed", 0)
+    if article_ids:
+        job_rows = db.query(KnowledgeJob.status, func.count(KnowledgeJob.id)).filter(
+            KnowledgeJob.job_type == "article_enhancement",
+            KnowledgeJob.target_id.in_(article_ids),
+        ).group_by(KnowledgeJob.status).all()
+        status_counts = {job_status: count for job_status, count in job_rows}
+        processed = status_counts.get("completed", 0)
+        queued = status_counts.get("pending", 0) + status_counts.get("processing", 0)
+        failed += status_counts.get("failed", 0) + status_counts.get("rejected", 0)
+
+    completed = min(total, processed + failed)
+    percentage = round((completed / total) * 100, 1) if total > 0 else 100
+    current_status = "completed" if completed >= total else "running"
 
     return {
         "task_id": task_id,
-        "status": progress["status"],
+        "status": current_status,
         "total": total,
         "processed": processed,
         "queued": queued,

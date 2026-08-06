@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { AlertCircle, CheckCircle2, FileText, Loader2, RefreshCw, TrendingUp } from 'lucide-react'
+import { AlertCircle, CheckCircle2, Download, FileText, Loader2, Play, RefreshCw, TrendingUp } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -129,6 +129,25 @@ interface Stats {
   }
 }
 
+interface PendingDocument {
+  id: string
+  title: string
+  kg_status: string
+}
+
+interface ManualProcessStatus {
+  task_id: string
+  status: string
+  total: number
+  processed: number
+  queued: number
+  failed: number
+  skipped: number
+  percentage: number
+  current_article?: { title?: string; index?: number } | null
+  error_count?: number
+}
+
 const trendLabels: Record<string, string> = { up: '推进信号较多', down: '约束信号较多', stable: '信号相对均衡' }
 
 function trendLabel(value: string) {
@@ -156,6 +175,20 @@ async function readJson(response: Response) {
   return data
 }
 
+function escapeReportHtml(value: unknown) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;')
+}
+
+function reportList(items: string[] | undefined) {
+  if (!items?.length) return '<p class="empty">暂无</p>'
+  return `<ul>${items.map((item) => `<li>${escapeReportHtml(item)}</li>`).join('')}</ul>`
+}
+
 export default function SelfEnhancementPage() {
   const [stats, setStats] = useState<Stats | null>(null)
   const [events, setEvents] = useState<DiscoveredEvent[]>([])
@@ -169,6 +202,12 @@ export default function SelfEnhancementPage() {
   const [selectedAnalysisModel, setSelectedAnalysisModel] = useState('')
   const [modelLatencies, setModelLatencies] = useState<Record<string, number>>({})
   const [benchmarkingModels, setBenchmarkingModels] = useState(false)
+  const [exportingPdf, setExportingPdf] = useState(false)
+  const [pendingDocuments, setPendingDocuments] = useState<PendingDocument[]>([])
+  const [loadingPendingDocuments, setLoadingPendingDocuments] = useState(false)
+  const [manualTaskId, setManualTaskId] = useState<string | null>(null)
+  const [manualProcessStatus, setManualProcessStatus] = useState<ManualProcessStatus | null>(null)
+  const [startingManualProcess, setStartingManualProcess] = useState(false)
 
   const loadStats = async () => {
     const response = await fetch('/api/kg/self-enhancement/stats')
@@ -196,6 +235,19 @@ export default function SelfEnhancementPage() {
   const loadHistory = async () => {
     const response = await fetch('/api/kg/prediction/history?limit=20')
     if (response.ok) setHistory((await response.json()).predictions || [])
+  }
+
+  const loadPendingDocuments = async () => {
+    setLoadingPendingDocuments(true)
+    try {
+      const response = await fetch('/api/kg/self-enhancement/auto-detect-pending', { method: 'POST' })
+      const data = await readJson(response)
+      setPendingDocuments(data.pending_articles || [])
+    } catch (error) {
+      console.error('加载待处理文档失败:', error)
+    } finally {
+      setLoadingPendingDocuments(false)
+    }
   }
 
   const benchmarkAnalysisModels = async (candidates = analysisModels) => {
@@ -247,7 +299,7 @@ export default function SelfEnhancementPage() {
   }
 
   const reload = async () => {
-    await Promise.all([loadStats(), loadEvents(), loadSyntheses(), loadHistory()])
+    await Promise.all([loadStats(), loadEvents(), loadSyntheses(), loadHistory(), loadPendingDocuments()])
   }
 
   useEffect(() => {
@@ -255,24 +307,189 @@ export default function SelfEnhancementPage() {
     loadAnalysisModels()
   }, [])
 
-  const predictEvent = async (event: DiscoveredEvent) => {
-    setLoadingEventId(event.id)
-    const controller = new AbortController()
-    const timeout = window.setTimeout(() => controller.abort(), 110000)
+  useEffect(() => {
+    if (!manualTaskId) return
+    let stopped = false
+    let timer: number | undefined
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/kg/self-enhancement/batch-status/${manualTaskId}`)
+        if (!response.ok) return
+        const data = await response.json() as ManualProcessStatus
+        if (stopped) return
+        setManualProcessStatus(data)
+        if (['completed', 'failed'].includes(data.status)) {
+          if (timer) window.clearInterval(timer)
+          await Promise.all([loadStats(), loadPendingDocuments()])
+        }
+      } catch (error) {
+        console.error('查询文档处理进度失败:', error)
+      }
+    }
+    timer = window.setInterval(poll, 1500)
+    void poll()
+    return () => {
+      stopped = true
+      if (timer) window.clearInterval(timer)
+    }
+  }, [manualTaskId])
+
+  const processPendingDocuments = async () => {
+    if (startingManualProcess || !pendingDocuments.length) return
+    setStartingManualProcess(true)
     try {
-      const response = await fetch('/api/kg/prediction/discovered-event', {
+      const response = await fetch('/api/kg/self-enhancement/batch-process', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ event_id: event.id, time_range: 30, prediction_type: 'general', model_id: selectedAnalysisModel || undefined }),
-        signal: controller.signal,
+        body: JSON.stringify({ article_ids: pendingDocuments.map((article) => article.id) }),
       })
-      setPrediction(await readJson(response))
+      const data = await readJson(response)
+      if (!data.task_id) {
+        setManualProcessStatus({
+          task_id: '', status: 'completed', total: data.total || 0, processed: 0,
+          queued: 0, failed: 0, skipped: data.skipped || 0, percentage: 100,
+        })
+        await Promise.all([loadStats(), loadPendingDocuments()])
+        return
+      }
+      setManualTaskId(data.task_id)
+      setManualProcessStatus({
+        task_id: data.task_id, status: data.status || 'started', total: data.total || 0,
+        processed: 0, queued: 0, failed: 0, skipped: data.skipped || 0, percentage: 0,
+      })
+    } catch (error) {
+      alert(error instanceof Error ? error.message : '手动处理文档失败')
+    } finally {
+      setStartingManualProcess(false)
+    }
+  }
+
+  const predictEvent = async (event: DiscoveredEvent) => {
+    setLoadingEventId(event.id)
+    try {
+      const requestPrediction = async (modelId?: string) => {
+        const controller = new AbortController()
+        const timeout = window.setTimeout(() => controller.abort(), 175000)
+        try {
+          const response = await fetch('/api/kg/prediction/discovered-event', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ event_id: event.id, time_range: 30, prediction_type: 'general', model_id: modelId || undefined }),
+            signal: controller.signal,
+          })
+          return await readJson(response) as PredictionResult
+        } finally {
+          window.clearTimeout(timeout)
+        }
+      }
+
+      const preferredModel = selectedAnalysisModel || undefined
+      let result = await requestPrediction(preferredModel)
+      const retryableFailure = result.interpretation?.analysis_status === 'unavailable'
+        && /超过|JSON 解析失败|自动修复失败/.test(result.interpretation.analysis_error || '')
+      if (retryableFailure && analysisModels.length > 1) {
+        const currentIndex = Math.max(analysisModels.findIndex((model) => model.id === preferredModel), 0)
+        const fallbackModel = analysisModels[(currentIndex + 1) % analysisModels.length]
+        if (fallbackModel.id !== preferredModel) {
+          const fallbackResult = await requestPrediction(fallbackModel.id)
+          result = fallbackResult
+          if (fallbackResult.interpretation?.analysis_status === 'complete') {
+            setSelectedAnalysisModel(fallbackModel.id)
+            localStorage.setItem('kg-analysis-model', fallbackModel.id)
+          }
+        }
+      }
+      setPrediction(result)
       await loadHistory()
     } catch (error) {
-      alert(error instanceof DOMException && error.name === 'AbortError' ? '深度分析超过 110 秒，请稍后重试。系统不会用固定模板替代分析结果。' : error instanceof Error ? error.message : '交叉分析失败')
+      alert(error instanceof DOMException && error.name === 'AbortError' ? '深度分析请求超时，请稍后重试。系统不会用固定模板替代分析结果。' : error instanceof Error ? error.message : '交叉分析失败')
     } finally {
-      window.clearTimeout(timeout)
       setLoadingEventId(null)
+    }
+  }
+
+  const exportPredictionPdf = async () => {
+    const interpretation = prediction?.interpretation
+    if (!prediction || !interpretation || interpretation.analysis_status !== 'complete' || exportingPdf) return
+    setExportingPdf(true)
+    const report = document.createElement('div')
+    try {
+      const [{ jsPDF }, { default: html2canvas }] = await Promise.all([import('jspdf'), import('html2canvas')])
+      const modelName = analysisModels.find((model) => model.id === interpretation.analysis_model)?.name || interpretation.analysis_model || '系统默认模型'
+      const impacts = (interpretation.impact_assessments || []).map((item) => `
+        <article><div class="meta">${escapeReportHtml(item.dimension)} · ${escapeReportHtml(item.horizon)} · 可能性${escapeReportHtml(item.likelihood)}</div>
+        <h3>${escapeReportHtml(item.conclusion)}</h3><p><strong>推演机制：</strong>${escapeReportHtml(item.mechanism)}</p>
+        <p><strong>影响对象：</strong>${escapeReportHtml(item.affected_parties?.join('、'))}</p><p><strong>事实依据：</strong>${escapeReportHtml(item.evidence_basis)}</p></article>`).join('')
+      const developments = (interpretation.next_developments || []).map((item) => `
+        <article><div class="meta">${escapeReportHtml(item.dimension || '综合')} · ${escapeReportHtml(item.timeframe)} · 可能性${escapeReportHtml(item.likelihood)}</div>
+        <h3>${escapeReportHtml(item.title)}</h3><p><strong>发生机制：</strong>${escapeReportHtml(item.mechanism)}</p>
+        <p><strong>影响对象：</strong>${escapeReportHtml(item.affected_parties?.join('、'))}</p><p><strong>判断依据：</strong>${escapeReportHtml(item.basis)}</p>
+        <p><strong>验证或推翻：</strong>${escapeReportHtml(item.watch_for)}</p></article>`).join('')
+      const opportunities = (interpretation.opportunities || []).map((item) => `
+        <article><h3>${escapeReportHtml(item.title)}</h3><p><strong>潜在受益者：</strong>${escapeReportHtml(item.beneficiaries.join('、'))}</p>
+        <p>${escapeReportHtml(item.rationale)}</p><p><strong>成立条件：</strong>${escapeReportHtml(item.entry_condition)} · ${escapeReportHtml(item.horizon)}</p></article>`).join('')
+      const challenges = (interpretation.challenges || []).map((item) => `
+        <article><h3>${escapeReportHtml(item.title)}</h3><p><strong>风险对象：</strong>${escapeReportHtml(item.exposed_parties.join('、'))}</p>
+        <p>${escapeReportHtml(item.rationale)}</p><p><strong>预警信号：</strong>${escapeReportHtml(item.warning_signal)} · ${escapeReportHtml(item.horizon)}</p></article>`).join('')
+
+      report.setAttribute('aria-hidden', 'true')
+      report.style.cssText = 'position:absolute;left:0;top:0;z-index:2147483647;box-sizing:border-box;width:860px;background:#fff;color:#172033;font-family:"Microsoft YaHei","PingFang SC",Arial,sans-serif;padding:38px;line-height:1.7;letter-spacing:0;'
+      report.innerHTML = `
+        <style>
+          h1{font-size:26px;margin:0 0 8px;color:#111827}h2{font-size:18px;margin:24px 0 10px;padding-bottom:6px;border-bottom:2px solid #1d4ed8;color:#172554}
+          h3{font-size:15px;margin:6px 0;color:#111827}p{font-size:13px;margin:5px 0}.meta{font-size:11px;color:#64748b}article{break-inside:avoid;border-left:3px solid #cbd5e1;padding:8px 12px;margin:10px 0;background:#f8fafc}
+          ul{margin:6px 0;padding-left:22px}li{font-size:13px;margin:4px 0}.summary{border-left:4px solid #2563eb;background:#eff6ff;padding:12px 16px;margin:16px 0}.empty{color:#94a3b8}.footer{margin-top:28px;padding-top:10px;border-top:1px solid #cbd5e1;font-size:10px;color:#64748b}
+        </style>
+        <h1>多源影响推演报告</h1><p>${escapeReportHtml(prediction.topic)}</p>
+        <p class="meta">生成时间：${escapeReportHtml(new Date(prediction.generated_at || Date.now()).toLocaleString('zh-CN'))}　分析模型：${escapeReportHtml(modelName)}</p>
+        <p class="meta">证据支持度：${escapeReportHtml(prediction.knowledge_basis.support_level || '待评估')}（${Math.round(prediction.confidence * 100)}分）　来源：${prediction.knowledge_basis.evidence_articles || 0}篇　知识点：${prediction.knowledge_basis.knowledge_points || 0}个　已审核关系：${prediction.knowledge_basis.cross_document_relations || 0}条</p>
+        <div class="summary"><h3>核心研判</h3><p>${escapeReportHtml(interpretation.executive_judgment)}</p><p>${escapeReportHtml(interpretation.event_summary)}</p></div>
+        <h2>信号含义</h2><p><strong>${escapeReportHtml(interpretation.signal_assessment?.label)}</strong>　${escapeReportHtml(interpretation.signal_assessment?.meaning)}</p><p>${escapeReportHtml(interpretation.signal_assessment?.evidence)}</p>
+        <h2>经济、政策与产业影响</h2>${impacts || '<p class="empty">暂无</p>'}
+        <h2>未来可能发生的具体变化</h2>${developments || '<p class="empty">暂无</p>'}
+        <h2>可把握的机会</h2>${opportunities || '<p class="empty">暂无</p>'}
+        <h2>需要应对的挑战</h2>${challenges || '<p class="empty">暂无</p>'}
+        <h2>推动因素</h2>${reportList(interpretation.drivers)}<h2>推演失效风险</h2>${reportList(interpretation.risks)}
+        <h2>下一步跟踪指标</h2>${reportList(interpretation.watch_indicators)}
+        <h2>来源文章</h2>${reportList(prediction.knowledge_basis.evidence_titles)}
+        <div class="footer">本报告区分来源事实与模型推断，仅用于线索研判和持续跟踪，不作为确定性决策依据。</div>`
+      document.body.appendChild(report)
+      const canvas = await html2canvas(report, {
+        scale: 1.5,
+        useCORS: true,
+        backgroundColor: '#ffffff',
+        onclone: (clonedDocument) => {
+          clonedDocument.querySelectorAll('head link[rel="stylesheet"], head style').forEach((node) => node.remove())
+          clonedDocument.documentElement.style.background = '#ffffff'
+          clonedDocument.body.style.background = '#ffffff'
+        },
+      })
+      const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true })
+      const pageWidthMm = 182
+      const pageHeightMm = 273
+      const pageHeightPx = Math.floor(canvas.width * pageHeightMm / pageWidthMm)
+      for (let offsetY = 0, pageIndex = 0; offsetY < canvas.height; offsetY += pageHeightPx, pageIndex += 1) {
+        if (pageIndex > 0) pdf.addPage()
+        const sliceHeight = Math.min(pageHeightPx, canvas.height - offsetY)
+        const pageCanvas = document.createElement('canvas')
+        pageCanvas.width = canvas.width
+        pageCanvas.height = sliceHeight
+        const context = pageCanvas.getContext('2d')
+        if (!context) throw new Error('无法创建 PDF 页面画布')
+        context.fillStyle = '#ffffff'
+        context.fillRect(0, 0, pageCanvas.width, pageCanvas.height)
+        context.drawImage(canvas, 0, offsetY, canvas.width, sliceHeight, 0, 0, canvas.width, sliceHeight)
+        const renderedHeightMm = sliceHeight * pageWidthMm / canvas.width
+        pdf.addImage(pageCanvas.toDataURL('image/jpeg', 0.92), 'JPEG', 14, 12, pageWidthMm, renderedHeightMm, undefined, 'FAST')
+      }
+      const safeName = prediction.topic.replace(/[\\/:*?"<>|]/g, '_').slice(0, 48) || '多源影响推演报告'
+      pdf.save(`${safeName}.pdf`)
+    } catch (error) {
+      console.error('导出 PDF 失败:', error)
+      alert('PDF 导出失败，请稍后重试。')
+    } finally {
+      report.remove()
+      setExportingPdf(false)
     }
   }
 
@@ -352,6 +569,44 @@ export default function SelfEnhancementPage() {
         <Card><CardHeader className="pb-2"><CardTitle className="text-sm text-gray-500">证据覆盖率</CardTitle></CardHeader><CardContent><div className="text-3xl font-bold">{Math.round(evidenceCoverage * 100)}%</div><p className="mt-1 text-xs text-gray-500">知识点带原文证据的比例</p></CardContent></Card>
       </div>
 
+      <Card className="mb-6 border-amber-200 bg-amber-50/40">
+        <CardHeader className="flex flex-row items-start justify-between gap-4 pb-3">
+          <div>
+            <CardTitle className="text-base">手动处理文档</CardTitle>
+            <p className="mt-1 text-sm text-gray-600">
+              将尚未完成知识增强的文档批量加入处理队列，已完成文档会自动跳过，不会重复生成知识点。
+            </p>
+          </div>
+          <Button onClick={processPendingDocuments} disabled={startingManualProcess || loadingPendingDocuments || !pendingDocuments.length}>
+            {startingManualProcess ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
+            {startingManualProcess ? '正在提交' : '处理待处理文档'}
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-3 pt-0">
+          <div className="flex flex-wrap items-center gap-3 text-sm">
+            <Badge variant={pendingDocuments.length ? 'secondary' : 'outline'}>
+              {loadingPendingDocuments ? '正在检查' : `待处理 ${pendingDocuments.length} 篇`}
+            </Badge>
+            {manualProcessStatus && <span className="text-gray-600">
+              本次已入队 {manualProcessStatus.queued} 篇，跳过 {manualProcessStatus.skipped} 篇，失败 {manualProcessStatus.failed} 篇
+            </span>}
+          </div>
+          {manualProcessStatus && manualProcessStatus.status === 'running' && (
+            <div>
+              <div className="mb-1 flex justify-between text-xs text-gray-600">
+                <span>{manualProcessStatus.current_article?.title || '正在加入处理队列'}</span>
+                <span>{manualProcessStatus.percentage}%</span>
+              </div>
+              <div className="h-2 overflow-hidden rounded-full bg-amber-100">
+                <div className="h-full rounded-full bg-amber-500 transition-all" style={{ width: `${manualProcessStatus.percentage}%` }} />
+              </div>
+            </div>
+          )}
+          {manualProcessStatus?.status === 'completed' && <p className="text-xs text-emerald-700">文档已加入知识增强队列，后台会继续处理；处理完成后“已处理文档”会自动增长。</p>}
+          {!loadingPendingDocuments && !pendingDocuments.length && !manualProcessStatus && <p className="text-xs text-emerald-700">当前没有待处理文档。</p>}
+        </CardContent>
+      </Card>
+
       <Tabs defaultValue="events">
         <TabsList className="mb-4">
           <TabsTrigger value="events">候选事件与交叉分析</TabsTrigger>
@@ -410,9 +665,14 @@ export default function SelfEnhancementPage() {
               <CardHeader>
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div><CardTitle>多源影响推演</CardTitle><p className="mt-1 text-sm text-gray-500">{prediction.topic}</p></div>
-                  <Badge variant={prediction.interpretation?.analysis_status === 'unavailable' ? 'destructive' : 'default'}>
-                    {prediction.interpretation?.analysis_status === 'unavailable' ? '深度分析未完成' : '深度分析完成'}
-                  </Badge>
+                  <div className="flex items-center gap-2">
+                    <Button size="sm" variant="outline" onClick={exportPredictionPdf} disabled={prediction.interpretation?.analysis_status !== 'complete' || exportingPdf}>
+                      {exportingPdf ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Download className="mr-1 h-4 w-4" />}{exportingPdf ? '正在生成' : '导出 PDF'}
+                    </Button>
+                    <Badge variant={prediction.interpretation?.analysis_status === 'unavailable' ? 'destructive' : 'default'}>
+                      {prediction.interpretation?.analysis_status === 'unavailable' ? '深度分析未完成' : '深度分析完成'}
+                    </Badge>
+                  </div>
                 </div>
               </CardHeader>
               <CardContent className="space-y-5">

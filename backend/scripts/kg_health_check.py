@@ -45,10 +45,21 @@ async def main() -> None:
             r = await session.run("MATCH (a:Article) RETURN count(a) AS c")
             articles_count = (await r.single())["c"]
             r2 = await session.run(
-                "MATCH (e:Entity) WHERE e.source_articles IS NOT NULL AND size(e.source_articles) > 0 RETURN count(e) AS c"
+                """
+                MATCH (e:Entity)
+                WHERE e.entity_type IN $article_entity_types
+                  AND e.source_articles IS NOT NULL
+                  AND size(e.source_articles) > 0
+                RETURN count(e) AS c
+                """,
+                article_entity_types=[
+                    "PERSON", "ORGANIZATION", "LOCATION", "TECHNOLOGY",
+                    "EVENT", "CONCEPT", "DATE",
+                ],
             )
             covered = (await r2.single())["c"]
-        coverage = covered / stats["total_nodes"] if stats.get("total_nodes") else 0.0
+        article_entity_count = stats.get("article_entities", 0)
+        coverage = covered / article_entity_count if article_entity_count else 0.0
         report = analyze(stats, articles_in_kg=articles_count)
         report["summary"]["source_articles_coverage"] = round(coverage, 4)
     finally:

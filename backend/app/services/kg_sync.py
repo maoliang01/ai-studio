@@ -27,6 +27,10 @@ _sync_state = {
     "active_count": 0,            # 当前并发任务数
     "total_processed": 0,         # 本次启动以来已处理数
     "total_failed": 0,            # 本次启动以来失败数
+    "batch_total": 0,             # 最近一批任务总数
+    "batch_processed": 0,         # 最近一批已完成数
+    "batch_failed": 0,            # 最近一批失败数
+    "batch_started_at": None,
     "started_at": None,           # 本次启动时间
     "last_finished_at": None,     # 上次完成时间
 }
@@ -45,8 +49,10 @@ def _set_in_progress(delta: int, success: bool = True) -> None:
         if delta < 0:
             if success:
                 _sync_state["total_processed"] += 1
+                _sync_state["batch_processed"] += 1
             else:
                 _sync_state["total_failed"] += 1
+                _sync_state["batch_failed"] += 1
             _sync_state["last_finished_at"] = datetime.utcnow().isoformat()
 
 
@@ -252,6 +258,7 @@ async def process_pending_articles(
     limit: int = 200,
     include_failed: bool = False,
     include_success: bool = False,
+    include_partial: bool = False,
 ) -> dict:
     """
     启动时把 kg_status in (NULL, 'pending') 的文章批量抽实体。
@@ -265,6 +272,8 @@ async def process_pending_articles(
         retry_statuses.append("failed")
     if include_success:
         retry_statuses.append("success")
+    if include_partial:
+        retry_statuses.append("partial")
     pending = db.query(Article).filter(
         Article.status == "success",
         (Article.kg_status.is_(None)) | (Article.kg_status.in_(retry_statuses))
@@ -299,6 +308,10 @@ async def process_pending_articles(
     # 标记本次启动时间,供前端显示
     with _sync_state_lock:
         _sync_state["started_at"] = datetime.utcnow().isoformat()
+        _sync_state["batch_started_at"] = _sync_state["started_at"]
+        _sync_state["batch_total"] = len(pending_ids)
+        _sync_state["batch_processed"] = 0
+        _sync_state["batch_failed"] = 0
 
     logger.info(f"process_pending_articles: 扫描 {len(pending)} 篇,启动 {len(tasks)} 个抽取任务")
 
@@ -351,8 +364,13 @@ async def reconcile(apply: bool, db: Session) -> dict:
             "orphans_deleted": 0,
             "dirty_marked": 0,
             "orphan_entities_deleted": 0,
+            "article_entity_sources_backfilled": 0,
             "failed_retried": 0,
         }
+        # 先补齐已有 Article-实体边的来源元数据；只追加来源，不重建实体/关系。
+        fixed["article_entity_sources_backfilled"] = (
+            await neo4j.backfill_article_entity_sources()
+        )
         # 1) 删孤儿
         for aid in orphan_in_kg:
             ok = await neo4j.delete_article_full(aid)

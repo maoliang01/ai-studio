@@ -30,6 +30,7 @@ def mock_neo4j():
         instance.clear_article_knowledge = AsyncMock(return_value=True)
         instance.close = AsyncMock(return_value=None)
         instance.cleanup_orphan_entities = AsyncMock(return_value=0)
+        instance.backfill_article_entity_sources = AsyncMock(return_value=0)
         instance.find_orphan_articles = AsyncMock(return_value=[])
         instance.find_dirty_articles = AsyncMock(return_value=[])
         instance._get_kg_article_ids = AsyncMock(return_value=set())

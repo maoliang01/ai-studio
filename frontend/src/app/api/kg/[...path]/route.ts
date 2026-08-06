@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8080";
+export const maxDuration = 200;
 
 /**
  * 知识图谱 API 代理 (catch-all 路由)

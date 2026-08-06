@@ -40,6 +40,11 @@ backend/data/settings.json
 __pycache__/
 .env.local
 *.env
+.env.kg
+backend/.env.kg
+
+# Temp files
+tmp/
 
 # Build artifacts
 *.bundle.js

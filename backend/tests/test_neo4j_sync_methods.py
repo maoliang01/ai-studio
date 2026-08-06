@@ -130,11 +130,11 @@ async def test_delete_article_full_keeps_shared_entities(neo4j_service):
 
 
 @pytest.mark.asyncio
-async def test_cleanup_orphan_entities_removes_entity_only_graph(neo4j_service):
+async def test_cleanup_orphan_entities_removes_article_entity_only_graph(neo4j_service):
     e1, e2 = f"orphan-{uuid.uuid4()}", f"orphan-{uuid.uuid4()}"
     async with neo4j_service._driver.session() as session:
         await session.run(
-            "CREATE (e1:Entity {name: $e1, entity_type: 'ORG'})"
+            "CREATE (e1:Entity {name: $e1, entity_type: 'ORGANIZATION'})"
             "-[:RELATES_TO]->"
             "(e2:Entity {name: $e2, entity_type: 'EVENT'})",
             e1=e1,
@@ -147,7 +147,54 @@ async def test_cleanup_orphan_entities_removes_entity_only_graph(neo4j_service):
     async with neo4j_service._driver.session() as session:
         r = await session.run("MATCH (e:Entity) RETURN count(e) AS c")
         row = await r.single()
-        assert row["c"] == 0
+    assert row["c"] == 0
+
+
+@pytest.mark.asyncio
+async def test_cleanup_orphan_entities_preserves_knowledge_points(neo4j_service):
+    name = f"kp-{uuid.uuid4()}"
+    async with neo4j_service._driver.session() as session:
+        await session.run(
+            "CREATE (:Entity {name: $name, entity_type: 'KnowledgePoint'})",
+            name=name,
+        )
+
+    deleted = await neo4j_service.cleanup_orphan_entities()
+    assert deleted == 0
+
+    async with neo4j_service._driver.session() as session:
+        r = await session.run("MATCH (e:Entity {name: $name}) RETURN e", name=name)
+        assert await r.single() is not None
+
+
+@pytest.mark.asyncio
+async def test_backfill_article_entity_sources_is_non_destructive(neo4j_service):
+    aid = f"a-{uuid.uuid4()}"
+    eid = f"entity-{uuid.uuid4()}"
+    async with neo4j_service._driver.session() as session:
+        await session.run("CREATE (:Article {id: $aid})", aid=aid)
+        await session.run(
+            "CREATE (:Entity {name: $eid, entity_type: 'PERSON', description: 'keep'})",
+            eid=eid,
+        )
+        await session.run(
+            "MATCH (a:Article {id: $aid}), (e:Entity {name: $eid}) "
+            "CREATE (a)-[:CONTAINS_ENTITY]->(e)",
+            aid=aid,
+            eid=eid,
+        )
+
+    updated = await neo4j_service.backfill_article_entity_sources()
+    assert updated == 1
+
+    async with neo4j_service._driver.session() as session:
+        r = await session.run(
+            "MATCH (e:Entity {name: $eid}) RETURN e.source_articles AS sources, e.description AS description",
+            eid=eid,
+        )
+        row = await r.single()
+        assert row["sources"] == [aid]
+        assert row["description"] == "keep"
 
 
 @pytest.mark.asyncio

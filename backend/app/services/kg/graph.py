@@ -25,6 +25,13 @@ from app.services.kg.mining import (
 
 logger = logging.getLogger("ai-studio")
 
+# Article 抽取实体与 KnowledgePoint/KnowledgeSynthesis 共用 :Entity 标签。
+# 文章级清理和对账必须限制在这个集合内，避免误删自增强知识。
+ARTICLE_ENTITY_TYPES = (
+    "PERSON", "ORGANIZATION", "LOCATION", "TECHNOLOGY",
+    "EVENT", "CONCEPT", "DATE",
+)
+
 # Neo4j 配置
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
@@ -2106,16 +2113,22 @@ class Neo4jService:
             stats = {}
             queries = {
                 "articles": "MATCH (a:Article) RETURN count(a) as count",
+                "articles_with_entities": "MATCH (a:Article)-[:CONTAINS_ENTITY]->(:Entity) RETURN count(DISTINCT a) as count",
+                "articles_without_entities": "MATCH (a:Article) WHERE NOT (a)-[:CONTAINS_ENTITY]->(:Entity) RETURN count(a) as count",
                 "entities": "MATCH (e:Entity) RETURN count(e) as count",
-                "orphan_entities": "MATCH (e:Entity) WHERE NOT (e)<-[:CONTAINS_ENTITY]-(:Article) RETURN count(e) as count",
-                "entities_without_relations": "MATCH (e:Entity) WHERE NOT (e)-[:RELATES_TO]-(:Entity) RETURN count(e) as count",
+                "article_entities": "MATCH (e:Entity) WHERE e.entity_type IN $article_entity_types RETURN count(e) as count",
+                "orphan_entities": "MATCH (e:Entity) WHERE e.entity_type IN $article_entity_types AND NOT (e)<-[:CONTAINS_ENTITY]-(:Article) RETURN count(e) as count",
+                "entities_without_relations": "MATCH (e:Entity) WHERE e.entity_type IN $article_entity_types AND NOT (e)-[:RELATES_TO]-(:Entity) RETURN count(e) as count",
                 "article_entity_links": "MATCH ()-[r:CONTAINS_ENTITY]->() RETURN count(r) as count",
                 "entity_relations": "MATCH ()-[r:RELATES_TO]->() RETURN count(r) as count",
             }
 
             for key, cql in queries.items():
                 try:
-                    result = await session.run(cql)
+                    result = await session.run(
+                        cql,
+                        {"article_entity_types": list(ARTICLE_ENTITY_TYPES)},
+                    )
                     record = await result.single()
                     stats[key] = record["count"] if record else 0
                 except Exception as e:
@@ -2162,11 +2175,15 @@ class Neo4jService:
             MATCH (a:Article {id: $article_id})-[r:CONTAINS_ENTITY]->(e:Entity)
             DELETE r
             WITH a, e
-            WHERE NOT (e)<-[:CONTAINS_ENTITY]-()
+            WHERE e.entity_type IN $article_entity_types
+              AND NOT (e)<-[:CONTAINS_ENTITY]-()
             DETACH DELETE e
             """
             try:
-                await session.run(query, {"article_id": article_id})
+                await session.run(query, {
+                    "article_id": article_id,
+                    "article_entity_types": list(ARTICLE_ENTITY_TYPES),
+                })
                 return True
             except Exception as e:
                 logger.error(f"删除文章知识图谱失败: {e}")
@@ -2280,18 +2297,50 @@ class Neo4jService:
         async with self._driver.session() as session:
             query = """
             MATCH (e:Entity)
-            WHERE NOT (e)<-[:CONTAINS_ENTITY]-(:Article)
+            WHERE e.entity_type IN $article_entity_types
+              AND NOT (e)<-[:CONTAINS_ENTITY]-(:Article)
             WITH collect(e) AS entities, count(e) AS deleted
             UNWIND entities AS e
             DETACH DELETE e
             RETURN deleted
             """
             try:
-                result = await session.run(query)
+                result = await session.run(
+                    query,
+                    {"article_entity_types": list(ARTICLE_ENTITY_TYPES)},
+                )
                 record = await result.single()
                 return int(record["deleted"]) if record else 0
             except Exception as e:
                 logger.error(f"cleanup_orphan_entities 失败: {e}")
+                return 0
+
+    async def backfill_article_entity_sources(self) -> int:
+        """从已有 Article-实体边补齐来源，不重建或删除任何图谱内容。"""
+        if not self._driver:
+            await self.connect()
+
+        async with self._driver.session() as session:
+            query = """
+            MATCH (a:Article)-[:CONTAINS_ENTITY]->(e:Entity)
+            WHERE e.entity_type IN $article_entity_types
+            WITH e, collect(DISTINCT a.id) AS article_ids
+            SET e.source_articles = REDUCE(
+                acc = coalesce(e.source_articles, []),
+                article_id IN article_ids |
+                CASE WHEN article_id IN acc THEN acc ELSE acc + article_id END
+            )
+            RETURN count(e) AS updated
+            """
+            try:
+                result = await session.run(
+                    query,
+                    {"article_entity_types": list(ARTICLE_ENTITY_TYPES)},
+                )
+                record = await result.single()
+                return int(record["updated"]) if record else 0
+            except Exception as e:
+                logger.error(f"回填文章实体来源失败: {e}")
                 return 0
 
     async def find_orphan_articles(self, sqlite_ids: set) -> list:
@@ -2354,14 +2403,24 @@ class Neo4jService:
             # 导出节点(同时取 entity_type 和 subtype)
             nodes_query = """
             MATCH (n)
-            WHERE ('Article' IN labels(n) OR 'Entity' IN labels(n))
-              AND coalesce(n.subtype, '') <> 'KEYWORD_FALLBACK'
+            WHERE 'Article' IN labels(n)
+               OR (
+                    'Entity' IN labels(n)
+                    AND n.entity_type IN $article_entity_types
+                    AND coalesce(n.subtype, '') <> 'KEYWORD_FALLBACK'
+                  )
             OPTIONAL MATCH (n)-[r]-(neighbor)
             WHERE type(r) IN ['CONTAINS_ENTITY', 'RELATES_TO']
-              AND ('Article' IN labels(neighbor) OR 'Entity' IN labels(neighbor))
+              AND (
+                    'Article' IN labels(neighbor)
+                    OR (
+                        'Entity' IN labels(neighbor)
+                        AND neighbor.entity_type IN $article_entity_types
+                    )
+                  )
               AND coalesce(neighbor.subtype, '') <> 'KEYWORD_FALLBACK'
             WITH n, labels(n) AS labels, count(r) AS degree
-            WHERE degree > 0
+            WHERE 'Article' IN labels(n) OR degree > 0
             RETURN n, labels, elementId(n) AS element_id, degree
             ORDER BY degree DESC, coalesce(n.updated_at, n.created_at) DESC
             LIMIT $limit
@@ -2378,7 +2437,10 @@ class Neo4jService:
             """
 
             try:
-                nodes_result = await session.run(nodes_query, {"limit": limit})
+                nodes_result = await session.run(nodes_query, {
+                    "limit": limit,
+                    "article_entity_types": list(ARTICLE_ENTITY_TYPES),
+                })
                 nodes_records = await nodes_result.data()
 
                 node_ids = [record["element_id"] for record in nodes_records]

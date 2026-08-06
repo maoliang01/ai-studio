@@ -198,7 +198,21 @@ fi
 ok "npm $(npm --version)"
 
 # ---------- 1c. Python 3 + pip ----------
-if ! command -v python3 &>/dev/null; then
+# Windows 上可能使用 py 命令，先检测
+PYTHON_CMD=""
+if command -v python3 &>/dev/null; then
+    PYTHON_CMD="python3"
+elif command -v python &>/dev/null; then
+    # 检查 python 是否是 Python 3
+    if python --version 2>&1 | grep -q "Python 3"; then
+        PYTHON_CMD="python"
+    fi
+elif command -v py &>/dev/null; then
+    # Windows py launcher
+    PYTHON_CMD="py -3"
+fi
+
+if [ -z "$PYTHON_CMD" ]; then
     warn "Python 3 未安装，正在自动安装..."
     case "${OS_TYPE}" in
         linux)
@@ -213,22 +227,44 @@ if ! command -v python3 &>/dev/null; then
             choco install python3 -y 2>/dev/null || true
             ;;
     esac
+    # 重新检测
+    if command -v python3 &>/dev/null; then
+        PYTHON_CMD="python3"
+    elif command -v py &>/dev/null; then
+        PYTHON_CMD="py -3"
+    fi
 fi
 
-if command -v python3 &>/dev/null; then
-    ok "Python $(python3 --version 2>&1)"
+if [ -n "$PYTHON_CMD" ]; then
+    ok "Python $($PYTHON_CMD --version 2>&1)"
 else
     err "Python 3 自动安装失败，请手动安装: https://www.python.org/downloads/"
     exit 1
 fi
 
-# pip
-if ! command -v pip3 &>/dev/null; then
-    warn "pip3 未安装，正在安装..."
-    python3 -m ensurepip --upgrade 2>/dev/null || python3 <(curl -sS https://bootstrap.pypa.io/get-pip.py) 2>/dev/null || true
-    command -v pip3 &>/dev/null || { err "pip3 安装失败"; exit 1; }
+# 创建 python3 别名（如果需要）
+if [ "$PYTHON_CMD" = "py -3" ] && ! command -v python3 &>/dev/null; then
+    # 创建一个临时的 python3 脚本
+    mkdir -p ~/.local/bin 2>/dev/null || true
+    cat > ~/.local/bin/python3 << 'EOF'
+#!/bin/bash
+py -3 "$@"
+EOF
+    chmod +x ~/.local/bin/python3 2>/dev/null || true
+    export PATH="$HOME/.local/bin:$PATH"
+    ok "已创建 python3 别名指向 py -3"
 fi
-ok "pip $(pip3 --version 2>&1 | awk '{print $2}')"
+
+# pip - 使用 python -m pip 方式，更可靠
+if ! $PYTHON_CMD -m pip --version &>/dev/null; then
+    warn "pip 未安装，正在安装..."
+    $PYTHON_CMD -m ensurepip --upgrade 2>/dev/null || $PYTHON_CMD <(curl -sS https://bootstrap.pypa.io/get-pip.py) 2>/dev/null || true
+    if ! $PYTHON_CMD -m pip --version &>/dev/null; then
+        err "pip 安装失败"
+        exit 1
+    fi
+fi
+ok "pip $($PYTHON_CMD -m pip --version 2>&1 | awk '{print $2}')"
 
 # ---------- 1d. Git ----------
 if ! command -v git &>/dev/null; then

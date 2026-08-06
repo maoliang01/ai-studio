@@ -896,8 +896,8 @@ class ScrapeOptions:
 
     @classmethod
     def for_background_task(cls, timeout: int) -> "ScrapeOptions":
-        """Background crawls must stay deterministic and never wait on per-page LLM calls."""
-        return cls(timeout=timeout, extract_metadata=False)
+        """Background crawls with metadata extraction enabled for style classification."""
+        return cls(timeout=timeout, extract_metadata=True)
 
 
 @dataclass
@@ -2498,10 +2498,16 @@ class WebScraper:
                 if result.style:
                     logger.info(f"文体已识别: {result.style}")
 
-                # 将摘要组合到内容前面
-                if result.summary:
-                    result.content = format_content_with_summary(result.content, result.summary)
-                    logger.info("摘要已添加到内容前面")
+            # 来源被跳过 LLM 文体分析，或模型调用失败时，必须保留本地可解释兜底。
+            if not result.style and (result.title or result.content):
+                from app.services.article_enrichment import infer_article_style_locally
+                result.style = infer_article_style_locally(result.title, result.content)
+                logger.info(f"文体使用本地规则识别: {result.style}")
+
+            # 将摘要组合到内容前面
+            if result.summary:
+                result.content = format_content_with_summary(result.content, result.summary)
+                logger.info("摘要已添加到内容前面")
 
             result.status = "success"
             logger.info(f"爬取成功: {url}, 字数: {result.word_count}, 日期: {result.published_at}")

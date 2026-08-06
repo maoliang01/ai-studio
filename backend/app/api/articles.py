@@ -390,6 +390,7 @@ async def backfill_article_metadata(
         "authors": 0,
         "keywords": 0,
         "word_counts": 0,
+        "styles": 0,
     }
     samples = []
 
@@ -398,9 +399,9 @@ async def backfill_article_metadata(
         if not changes:
             continue
         stats["articles_changed"] += 1
-        for field in ("summary", "author", "word_count"):
+        for field in ("summary", "author", "word_count", "style"):
             if field in changes:
-                stats[{"summary": "summaries", "author": "authors", "word_count": "word_counts"}[field]] += 1
+                stats[{"summary": "summaries", "author": "authors", "word_count": "word_counts", "style": "styles"}[field]] += 1
                 if apply:
                     setattr(article, field, changes[field])
         if "keywords" in changes:

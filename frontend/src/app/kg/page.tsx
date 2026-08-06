@@ -63,6 +63,7 @@ interface Stats {
   drift_detected?: boolean;  // 数量不一致
   entities: number;
   orphan_entities?: number;
+  articles_without_entities?: number;
   article_entity_links: number;
   entity_relations: number;
   entities_by_type?: Record<string, number>;
@@ -81,6 +82,7 @@ interface SyncStatus {
   total_in_db: number;
   total_in_kg: number;
   orphan_entities?: number;
+  articles_without_entities?: number;
   drift_detected: boolean;
   failed_articles: Array<{ id: string; title: string; error?: string }>;
   partial_articles: Array<{ id: string; title: string; warning?: string }>;
@@ -89,6 +91,10 @@ interface SyncStatus {
     active_count: number;
     total_processed: number;
     total_failed: number;
+    batch_total?: number;
+    batch_processed?: number;
+    batch_failed?: number;
+    batch_started_at?: string | null;
     started_at: string | null;
     last_finished_at: string | null;
   };
@@ -708,12 +714,12 @@ function KnowledgeGraphPageContent() {
   const handleBatchProcess = async (limit = 50) => {
     setIsProcessing(true);
     try {
-      const response = await fetch(`/api/kg/batch-process?limit=${limit}`, {
+      const response = await fetch(`/api/kg/process-pending?limit=${limit}&include_failed=true&include_partial=true`, {
         method: "POST",
       });
       const data = await response.json();
       if (data.status === "success") {
-        alert(
+        toast.success(
           `处理完成！成功: ${data.results.success}, 跳过: ${data.results.skipped}, 失败: ${data.results.failed}`
         );
         loadGraphData();
@@ -1278,6 +1284,41 @@ function KnowledgeGraphPageContent() {
                 </span>
               )}
             </div>
+            {(syncStatus.sync_state.batch_total ?? 0) > 0 && (
+              <div className="mb-3 rounded-lg border border-indigo-100 bg-indigo-50/60 p-3">
+                <div className="mb-1 flex items-center justify-between text-xs text-indigo-900">
+                  <span>图谱处理进度</span>
+                  <span className="font-semibold">
+                    {Math.min(
+                      100,
+                      Math.round(((syncStatus.sync_state.batch_processed ?? 0) + (syncStatus.sync_state.batch_failed ?? 0)) /
+                        Math.max(1, syncStatus.sync_state.batch_total ?? 1) * 100),
+                    )}%
+                  </span>
+                </div>
+                <div className="h-2 overflow-hidden rounded-full bg-indigo-100">
+                  <div
+                    className="h-full rounded-full bg-indigo-600 transition-all duration-500"
+                    style={{
+                      width: `${Math.min(
+                        100,
+                        (((syncStatus.sync_state.batch_processed ?? 0) + (syncStatus.sync_state.batch_failed ?? 0)) /
+                          Math.max(1, syncStatus.sync_state.batch_total ?? 1)) * 100,
+                      )}%`,
+                    }}
+                  />
+                </div>
+                <div className="mt-1 flex justify-between text-[10px] text-indigo-700">
+                  <span>
+                    已完成 {syncStatus.sync_state.batch_processed ?? 0} / {syncStatus.sync_state.batch_total}
+                  </span>
+                  <span>
+                    处理中 {syncStatus.sync_state.active_count}
+                    {(syncStatus.sync_state.batch_failed ?? 0) > 0 && ` · 失败 ${syncStatus.sync_state.batch_failed}`}
+                  </span>
+                </div>
+              </div>
+            )}
             <div className="grid grid-cols-6 gap-1 text-center text-xs">
               <div className="bg-white p-2 rounded">
                 <div className="text-base font-semibold text-emerald-600">
@@ -1511,18 +1552,29 @@ function KnowledgeGraphPageContent() {
 
         {/* 状态信息 */}
         <div className="p-4 border-t mt-auto">
-          <div className="flex items-center gap-2 text-sm">
-            {health?.neo4j?.connected ? (
-              <>
-                <CheckCircle2 className="w-4 h-4 text-emerald-500" />
-                <span className="text-emerald-600">Neo4j 已连接</span>
-              </>
-            ) : (
-              <>
-                <AlertCircle className="w-4 h-4 text-red-500" />
-                <span className="text-red-600">Neo4j 未连接</span>
-              </>
-            )}
+          <div className="flex items-center justify-between gap-2 text-sm">
+            <div className="flex items-center gap-2">
+              {health?.neo4j?.connected ? (
+                <>
+                  <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+                  <span className="text-emerald-600">Neo4j 已连接</span>
+                </>
+              ) : (
+                <>
+                  <AlertCircle className="w-4 h-4 text-red-500" />
+                  <span className="text-red-600">Neo4j 未连接</span>
+                </>
+              )}
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={checkHealth}
+              className="h-7 text-xs"
+            >
+              <RefreshCw className="w-3 h-3 mr-1" />
+              测试连接
+            </Button>
           </div>
         </div>
       </div>
@@ -1533,6 +1585,11 @@ function KnowledgeGraphPageContent() {
         <div className="h-12 border-b bg-white flex items-center px-4 gap-4">
           <span className="text-sm text-gray-500">
             {graphData.nodes.length} 节点 / {graphData.edges.length} 边
+          </span>
+          <span className="text-xs text-gray-400">
+            Article {graphData.nodes.filter((node) => node.type === "Article").length}
+            {' / '}
+            Entity {graphData.nodes.filter((node) => node.type !== "Article").length}
           </span>
           <Separator orientation="vertical" className="h-6" />
           <span className="text-xs text-gray-400">
@@ -1563,18 +1620,18 @@ function KnowledgeGraphPageContent() {
                 </Button>
               </div>
               <Tabs value={exploreTab} onValueChange={changeExploreTab} className="max-h-[calc(100vh-12rem)]">
-                <TabsList className="mx-4 mt-3 grid h-auto w-[calc(100%-2rem)] grid-cols-5 gap-1">
-                  <TabsTrigger value="path"><Route className="w-4 h-4 mr-1" />路径</TabsTrigger>
-                  <TabsTrigger value="profile"><BookOpen className="w-4 h-4 mr-1" />档案</TabsTrigger>
-                  <TabsTrigger value="community"><Users className="w-4 h-4 mr-1" />社区</TabsTrigger>
-                  <TabsTrigger value="inference"><BrainCircuit className="w-4 h-4 mr-1" />推理</TabsTrigger>
-                  <TabsTrigger value="timeline"><Clock3 className="w-4 h-4 mr-1" />时序</TabsTrigger>
-                  <TabsTrigger value="prediction"><Link2 className="w-4 h-4 mr-1" />预测</TabsTrigger>
-                  <TabsTrigger value="similar"><Boxes className="w-4 h-4 mr-1" />相似</TabsTrigger>
-                  <TabsTrigger value="causal"><GitBranch className="w-4 h-4 mr-1" />因果</TabsTrigger>
-                  <TabsTrigger value="cross-document"><GitMerge className="w-4 h-4 mr-1" />共现</TabsTrigger>
-                  <TabsTrigger value="aliases"><ScanSearch className="w-4 h-4 mr-1" />别名</TabsTrigger>
-                  <TabsTrigger value="governance"><ShieldCheck className="w-4 h-4 mr-1" />治理</TabsTrigger>
+                <TabsList className="mx-4 mt-3 flex flex-wrap h-auto w-[calc(100%-2rem)] gap-1 bg-gray-100 p-1">
+                  <TabsTrigger value="path" className="flex-none px-3 py-1.5 bg-transparent data-active:bg-white data-active:shadow-sm"><Route className="w-4 h-4 mr-1" />路径</TabsTrigger>
+                  <TabsTrigger value="profile" className="flex-none px-3 py-1.5 bg-transparent data-active:bg-white data-active:shadow-sm"><BookOpen className="w-4 h-4 mr-1" />档案</TabsTrigger>
+                  <TabsTrigger value="community" className="flex-none px-3 py-1.5 bg-transparent data-active:bg-white data-active:shadow-sm"><Users className="w-4 h-4 mr-1" />社区</TabsTrigger>
+                  <TabsTrigger value="inference" className="flex-none px-3 py-1.5 bg-transparent data-active:bg-white data-active:shadow-sm"><BrainCircuit className="w-4 h-4 mr-1" />推理</TabsTrigger>
+                  <TabsTrigger value="timeline" className="flex-none px-3 py-1.5 bg-transparent data-active:bg-white data-active:shadow-sm"><Clock3 className="w-4 h-4 mr-1" />时序</TabsTrigger>
+                  <TabsTrigger value="prediction" className="flex-none px-3 py-1.5 bg-transparent data-active:bg-white data-active:shadow-sm"><Link2 className="w-4 h-4 mr-1" />预测</TabsTrigger>
+                  <TabsTrigger value="similar" className="flex-none px-3 py-1.5 bg-transparent data-active:bg-white data-active:shadow-sm"><Boxes className="w-4 h-4 mr-1" />相似</TabsTrigger>
+                  <TabsTrigger value="causal" className="flex-none px-3 py-1.5 bg-transparent data-active:bg-white data-active:shadow-sm"><GitBranch className="w-4 h-4 mr-1" />因果</TabsTrigger>
+                  <TabsTrigger value="cross-document" className="flex-none px-3 py-1.5 bg-transparent data-active:bg-white data-active:shadow-sm"><GitMerge className="w-4 h-4 mr-1" />共现</TabsTrigger>
+                  <TabsTrigger value="aliases" className="flex-none px-3 py-1.5 bg-transparent data-active:bg-white data-active:shadow-sm"><ScanSearch className="w-4 h-4 mr-1" />别名</TabsTrigger>
+                  <TabsTrigger value="governance" className="flex-none px-3 py-1.5 bg-transparent data-active:bg-white data-active:shadow-sm"><ShieldCheck className="w-4 h-4 mr-1" />治理</TabsTrigger>
                 </TabsList>
                 <TabsContent value="path" className="m-0 p-4">
                   <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
