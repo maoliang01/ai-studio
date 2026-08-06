@@ -27,6 +27,62 @@ from app.services.extractors.base import ExtractedContent
 logger = logging.getLogger(__name__)
 
 
+def _extract_publish_date_from_html(html: str) -> Optional[str]:
+    """
+    从 HTML 中提取发布日期
+
+    支持多种日期格式：
+    - meta 标签中的日期
+    - 正文中的日期（如 2024-08-01、2024年8月1日）
+    """
+    from datetime import datetime
+
+    # 1. 尝试从 meta 标签提取
+    meta_patterns = [
+        r'<meta[^>]*name=["\']publishdate["\'][^>]*content=["\']([^"\']+)["\']',
+        r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*name=["\']publishdate["\']',
+        r'<meta[^>]*name=["\']pubdate["\'][^>]*content=["\']([^"\']+)["\']',
+        r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*name=["\']pubdate["\']',
+        r'<meta[^>]*property=["\']article:published_time["\'][^>]*content=["\']([^"\']+)["\']',
+        r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*property=["\']article:published_time["\']',
+    ]
+
+    for pattern in meta_patterns:
+        match = re.search(pattern, html, re.IGNORECASE)
+        if match:
+            date_str = match.group(1).strip()
+            # 尝试解析日期
+            try:
+                # 常见格式：2024-08-01 10:00:00 或 2024-08-01T10:00:00
+                for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d']:
+                    try:
+                        dt = datetime.strptime(date_str[:19], fmt)
+                        return dt.strftime('%Y-%m-%d')
+                    except ValueError:
+                        continue
+            except Exception:
+                pass
+
+    # 2. 尝试从正文提取日期
+    content_patterns = [
+        r'(\d{4})[-年](\d{1,2})[-月](\d{1,2})[日号]?',
+        r'发布时间[：:]\s*(\d{4})[-年](\d{1,2})[-月](\d{1,2})',
+        r'发布日期[：:]\s*(\d{4})[-年](\d{1,2})[-月](\d{1,2})',
+    ]
+
+    for pattern in content_patterns:
+        match = re.search(pattern, html[:5000])  # 只搜索前5000字符
+        if match:
+            try:
+                year, month, day = match.group(1), match.group(2), match.group(3)
+                dt = datetime(int(year), int(month), int(day))
+                return dt.strftime('%Y-%m-%d')
+            except (ValueError, IndexError):
+                continue
+
+    return None
+
+
 # ============================================================
 # 语义噪声块裁剪
 # ============================================================

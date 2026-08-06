@@ -2799,6 +2799,133 @@ class WebScraper:
         # 默认：不轻易认为是列表页，保留内容
         return False
 
+    async def _extract_articles_from_json_source(self, html: str, base_url: str) -> List[Dict[str, str]]:
+        """
+        通用机制：从页面的 JavaScript 代码中自动检测并提取 JSON 数据源
+
+        很多网站（如 gov.cn）使用 JavaScript 动态加载文章列表，实际数据来自 JSON 文件。
+        这个方法会分析 HTML 中的 JavaScript 代码，自动识别 JSON 数据源的 URL 模式。
+
+        Args:
+            html: 列表页 HTML 内容
+            base_url: 列表页 URL
+
+        Returns:
+            List[Dict]: 文章列表，每项包含 {title, url, date}
+        """
+        articles = []
+        parsed = urlparse(base_url)
+
+        logger.info(f"开始检测 JSON 数据源，HTML 长度: {len(html)}, URL: {base_url}")
+
+        # 检查 HTML 中是否包含 .json 关键词
+        if '.json' not in html:
+            logger.info("HTML 中不包含 .json 关键词，跳过 JSON 数据源检测")
+            return articles
+
+        logger.info("HTML 中包含 .json 关键词，继续检测...")
+
+        # 常见的 JSON 数据源 URL 模式
+        json_url_patterns = [
+            # 模式 1: $.ajax({url: "./data.json"}) 或 fetch("./data.json")
+            r'(?:url|fetch)\s*[:=]\s*["\'](\./[^"\']+\.json)["\']',
+            # 模式 2: url = "./data.json" 或 url = '../data.json'
+            r'url\s*=\s*["\'](\.{1,2}/[^"\']+\.json)["\']',
+            # 模式 3: var dataUrl = "/api/data.json"
+            r'(?:dataUrl|jsonUrl|listUrl)\s*=\s*["\'](/[^"\']+\.json)["\']',
+            # 模式 4: 绝对路径 JSON
+            r'(?:url|fetch)\s*[:=]\s*["\'](https?://[^"\']+\.json)["\']',
+        ]
+
+        json_url = None
+        for i, pattern in enumerate(json_url_patterns):
+            match = re.search(pattern, html, re.IGNORECASE)
+            if match:
+                json_path = match.group(1)
+                logger.info(f"匹配到模式 {i+1}: {json_path}")
+                # 构建完整的 JSON URL
+                if json_path.startswith('./'):
+                    # 相对路径，基于当前页面的目录
+                    base_dir = base_url.rsplit('/', 1)[0]
+                    json_url = f"{base_dir}/{json_path[2:]}"
+                elif json_path.startswith('../'):
+                    # 上级目录相对路径
+                    base_dir = base_url.rsplit('/', 2)[0]
+                    json_url = f"{base_dir}/{json_path[3:]}"
+                elif json_path.startswith('/'):
+                    # 绝对路径
+                    json_url = f"{parsed.scheme}://{parsed.netloc}{json_path}"
+                elif json_path.startswith('http'):
+                    # 完整 URL
+                    json_url = json_path
+                else:
+                    # 其他相对路径
+                    json_url = f"{base_url.rsplit('/', 1)[0]}/{json_path}"
+                break
+
+        if not json_url:
+            logger.info("未检测到 JSON 数据源模式")
+            return articles
+
+        logger.info(f"检测到 JSON 数据源: {json_url}")
+
+        try:
+            # 获取 JSON 数据
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                response = await client.get(json_url)
+                response.raise_for_status()
+                json_data = response.json()
+
+            if not isinstance(json_data, list):
+                logger.warning(f"JSON 数据格式不正确: {type(json_data)}")
+                return articles
+
+            # 自动识别 JSON 字段映射
+            # 常见的字段名模式
+            url_fields = ['URL', 'url', 'link', 'href', 'articleUrl', 'detail_url']
+            title_fields = ['TITLE', 'title', 'name', 'headline', 'articleTitle']
+            date_fields = ['DOCRELPUBTIME', 'DOCRELDATE', 'published_at', 'publishDate', 'date', 'createTime', 'pubTime']
+
+            # 找到第一个非空的字段映射
+            url_field = next((f for f in url_fields if f in json_data[0]), None)
+            title_field = next((f for f in title_fields if f in json_data[0]), None)
+            date_field = next((f for f in date_fields if f in json_data[0]), None)
+
+            if not url_field:
+                logger.warning(f"JSON 数据中未找到 URL 字段，可用字段: {list(json_data[0].keys())}")
+                return articles
+
+            # 提取文章信息
+            for item in json_data:
+                if not isinstance(item, dict):
+                    continue
+
+                url = str(item.get(url_field, '')).strip()
+                title = str(item.get(title_field, '')).strip() if title_field else ''
+                date_str = str(item.get(date_field, '')).strip() if date_field else ''
+
+                if not url:
+                    continue
+
+                # 确保 URL 是完整的
+                if url.startswith('/'):
+                    url = f"{parsed.scheme}://{parsed.netloc}{url}"
+                elif not url.startswith('http'):
+                    url = f"{base_url.rsplit('/', 1)[0]}/{url}"
+
+                articles.append({
+                    'url': url,
+                    'title': title,
+                    'date': date_str
+                })
+
+            logger.info(f"从 JSON 数据源提取到 {len(articles)} 篇文章")
+
+        except Exception as e:
+            logger.error(f"获取 JSON 数据失败: {e}")
+
+        return articles
+
     def extract_list_page_articles(self, content: str, links: List[str], base_url: str) -> List[Dict[str, str]]:
         """
         从列表页提取文章信息
@@ -2914,8 +3041,12 @@ class WebScraper:
         if list_result.status != "success":
             return {"status": "error", "message": f"列表页爬取失败：{list_result.error_message}"}
 
-        # 2. 提取文章链接
-        articles = self.extract_list_page_articles(list_result.content, list_result.links, list_url)
+        # 2. 尝试从 JSON 数据源提取文章（通用机制）
+        articles = await self._extract_articles_from_json_source(list_result.html or "", list_url)
+
+        # 3. 如果 JSON 数据源没有结果，从 HTML 中提取链接
+        if not articles:
+            articles = self.extract_list_page_articles(list_result.content, list_result.links, list_url)
         if not articles:
             return {"status": "error", "message": "未找到文章链接"}
 
@@ -3147,15 +3278,25 @@ class WebScraper:
             list_item_dates.update(structured_dates)
             list_item_titles.update(structured_titles)
 
-        # 2. 识别文章链接（基于 URL 模式）
-        article_links = self._filter_article_links(
-            list_page.links, url, trusted_list_urls=set(list_item_dates)
-        )
+        # 2. 识别文章链接
+        # 2.1 先尝试从 JSON 数据源提取（通用机制，支持 gov.cn 等动态加载网站）
+        json_articles = await self._extract_articles_from_json_source(list_page.html or "", url)
+
+        if json_articles:
+            # 从 JSON 数据源提取成功
+            article_links = [a['url'] for a in json_articles if a.get('url')]
+            logger.info(f"从 JSON 数据源提取到 {len(article_links)} 个文章链接")
+        else:
+            # 2.2 回退到基于 URL 模式的识别
+            article_links = self._filter_article_links(
+                list_page.links, url, trusted_list_urls=set(list_item_dates)
+            )
+
         # 使用回调更新进度
         cb = progress_callback or self._progress_callback
         if cb:
             cb(2, "正在爬取文章", f"识别到 {len(article_links)} 个链接，开始爬取...")
-        
+
         logger.info(f"识别到 {len(article_links)} 个文章链接")
 
         if not article_links:
