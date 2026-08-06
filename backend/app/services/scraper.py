@@ -2379,6 +2379,30 @@ class WebScraper:
                 from app.services.alternate_scraper import _deduplicate_duplicate_blocks
                 raw_content = _deduplicate_duplicate_blocks(raw_content)
 
+            # 5.1 检测是否需要 JavaScript 渲染（通用机制）
+            # 当内容很少且页面有 JavaScript 框架标记时，尝试使用 Playwright 渲染
+            if len(raw_content) < 200 and self._detect_js_rendering_needed(raw_html):
+                logger.info(f"检测到页面需要 JavaScript 渲染，尝试使用 Playwright: {url}")
+                rendered_html = await self._render_with_playwright(url, raw_html)
+                if rendered_html and len(rendered_html) > len(raw_html):
+                    # 重新提取渲染后的内容
+                    raw_html = rendered_html
+                    # 使用 readability 从渲染后的 HTML 提取内容
+                    try:
+                        from readability import Document
+                        doc = Document(rendered_html)
+                        rendered_content = doc.summary()
+                        # 转换为纯文本
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(rendered_content, 'html.parser')
+                        rendered_text = soup.get_text(separator='\n', strip=True)
+                        if rendered_text and len(rendered_text) > len(raw_content):
+                            raw_content = rendered_text
+                            processed_content = rendered_text
+                            logger.info(f"Playwright 渲染成功，内容长度: {len(rendered_text)}")
+                    except Exception as e:
+                        logger.warning(f"从渲染后的 HTML 提取内容失败: {e}")
+
             # 清理内容（如果 content 已经是处理过的，只做轻微清理）
             if processed_content:
                 # 已经过正文提取，只需做轻度清理
@@ -2409,8 +2433,8 @@ class WebScraper:
             result.links = list(dict.fromkeys(adapter_links + html_links))
             result.word_count = len(result.content.replace("\n", "").replace(" ", ""))
 
-            # 6. 检测是否为列表页（通过内容判断）
-            if self._is_list_page(result.content, result.links):
+            # 6. 检测是否为列表页（通过内容判断，传入 HTML 以检测 JS 渲染特征）
+            if self._is_list_page(result.content, result.links, html=result.html):
                 logger.info(f"检测为列表页，跳过正文提取: {url}")
                 result.content = ""
                 result.word_count = 0
@@ -2677,7 +2701,173 @@ class WebScraper:
             logger.error(f"保存到数据库失败: {e}")
             return False, str(e)
 
-    def _is_list_page(self, content: str, links: List[str]) -> bool:
+    def _detect_js_rendering_needed(self, html: str) -> bool:
+        """
+        通用检测：页面是否需要 JavaScript 渲染才能获取完整内容
+
+        检测逻辑（基于通用特征，不针对特定网站）：
+        1. 检查是否有 JavaScript 框架标记（React, Vue, Angular 等）
+        2. 检查是否有异步加载的标记
+        3. 检查是否有特定的内容容器（如 <div id="app">, <div id="root">）
+        4. 检查是否有明显的动态加载特征
+
+        Args:
+            html: 原始 HTML 内容
+
+        Returns:
+            bool: 是否需要 JavaScript 渲染
+        """
+        if not html:
+            return False
+
+        # 1. 检查 JavaScript 框架标记
+        js_framework_indicators = [
+            # React
+            r'<div[^>]*id=["\']root["\'][^>]*>',
+            r'<div[^>]*id=["\']app["\'][^>]*>',
+            r'reactroot',
+            r'__NEXT_DATA__',
+            r'_next/static',
+            # Vue
+            r'<div[^>]*id=["\']app["\'][^>]*>',
+            r'v-cloak',
+            r'v-if=',
+            r'v-for=',
+            # Angular
+            r'<app-root[^>]*>',
+            r'ng-version',
+            # 其他框架
+            r'data-reactroot',
+            r'data-reactid',
+            r'__vue__',
+            r'__nuxt__',
+        ]
+
+        for pattern in js_framework_indicators:
+            if re.search(pattern, html, re.IGNORECASE):
+                logger.debug(f"检测到 JS 框架标记: {pattern}")
+                return True
+
+        # 2. 检查异步加载特征
+        async_loading_indicators = [
+            r'fetch\s*\(',
+            r'XMLHttpRequest',
+            r'axios\.get',
+            r'axios\.post',
+            r'\$\.ajax',
+            r'\$\.get',
+            r'\$\.post',
+            r'async\s+function',
+            r'await\s+fetch',
+            r'loadMore',
+            r'load_more',
+            r'infinite.?scroll',
+            r'lazy.?load',
+        ]
+
+        for pattern in async_loading_indicators:
+            if re.search(pattern, html, re.IGNORECASE):
+                logger.debug(f"检测到异步加载特征: {pattern}")
+                return True
+
+        # 3. 检查 JSON 数据源特征（已在 _extract_articles_from_json_source 中处理）
+        json_source_indicators = [
+            r'\.json\s*["\']',
+            r'json\.js',
+            r'data\.js',
+            r'config\.js',
+        ]
+
+        for pattern in json_source_indicators:
+            if re.search(pattern, html, re.IGNORECASE):
+                logger.debug(f"检测到 JSON 数据源特征: {pattern}")
+                return True
+
+        # 4. 检查是否有明显的动态内容容器（内容很少但有框架标记）
+        # 这些容器通常需要 JavaScript 渲染才能显示内容
+        dynamic_container_indicators = [
+            r'<div[^>]*class=["\'][^"\']*loading[^"\']*["\'][^>]*>',
+            r'<div[^>]*class=["\'][^"\']*skeleton[^"\']*["\'][^>]*>',
+            r'<div[^>]*class=["\'][^"\']*placeholder[^"\']*["\'][^>]*>',
+            r'<div[^>]*class=["\'][^"\']*spinner[^"\']*["\'][^>]*>',
+            r'正在加载',
+            r'Loading\.\.\.',
+            r'请稍候',
+        ]
+
+        for pattern in dynamic_container_indicators:
+            if re.search(pattern, html, re.IGNORECASE):
+                logger.debug(f"检测到动态内容容器: {pattern}")
+                return True
+
+        return False
+
+    async def _render_with_playwright(self, url: str, html: str) -> str:
+        """
+        通用机制：使用 Playwright 渲染 JavaScript 页面
+
+        当检测到页面需要 JavaScript 渲染时，使用 Playwright 执行 JavaScript 并等待页面加载完成，
+        然后返回渲染后的 HTML 内容。
+
+        Args:
+            url: 页面 URL
+            html: 原始 HTML 内容
+
+        Returns:
+            str: 渲染后的 HTML 内容，如果失败则返回原始 HTML
+        """
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            logger.warning("Playwright 未安装，无法渲染 JavaScript 页面")
+            return html
+
+        try:
+            logger.info(f"使用 Playwright 渲染页面: {url}")
+            async with async_playwright() as p:
+                # 优先使用系统 Chrome，失败则回退到 Playwright Chromium
+                browser = None
+                try:
+                    browser = await p.chromium.launch(
+                        channel="chrome",
+                        headless=True,
+                    )
+                    logger.debug("系统 Chrome 启动成功")
+                except Exception as exc:
+                    logger.warning("系统 Chrome 启动失败，回退到 Playwright Chromium: %s", exc)
+                    browser = await p.chromium.launch(headless=True)
+                    logger.debug("Playwright Chromium 启动成功")
+
+                try:
+                    page = await browser.new_page()
+
+                    # 设置合理的超时时间
+                    page.set_default_timeout(30000)  # 30 秒
+
+                    # 访问页面并等待网络空闲
+                    await page.goto(url, wait_until="networkidle", timeout=30000)
+
+                    # 等待页面内容加载（通用策略）
+                    # 等待 body 中有足够内容
+                    await page.wait_for_function(
+                        "document.body && document.body.innerText.length > 100",
+                        timeout=10000
+                    )
+
+                    # 获取渲染后的 HTML
+                    rendered_html = await page.content()
+
+                    logger.info(f"Playwright 渲染成功，HTML 长度: {len(rendered_html)}")
+                    return rendered_html
+
+                finally:
+                    await browser.close()
+
+        except Exception as e:
+            logger.error(f"Playwright 渲染失败: {e}")
+            return html
+
+    def _is_list_page(self, content: str, links: List[str], html: str = "") -> bool:
         """
         判断是否为列表页/导航页
         （优化版：更宽松的判断，避免误删有价值的内容）
@@ -2698,8 +2888,13 @@ class WebScraper:
             logger.debug(f"内容足够长 ({len(content)} 字)，认为是文章页")
             return False
 
-        # 内容很少时，才认为是导航页
+        # 内容很少时，检查是否是 JavaScript 渲染的页面
+        # 如果是 JS 渲染的页面，不应该误判为列表页
         if len(content) < 80 or len(lines) < 2:
+            # 检查是否有 JavaScript 渲染特征
+            if html and self._detect_js_rendering_needed(html):
+                logger.debug(f"内容很少但检测到 JS 渲染特征，不认为是列表页: {len(content)} 字")
+                return False
             return True
 
         # 检测导航关键词密度
