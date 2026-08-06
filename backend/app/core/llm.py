@@ -1,11 +1,14 @@
 import time
 import asyncio
 import json
+import logging
 from typing import AsyncIterator, Optional, Dict, Any, List
 from openai import AsyncOpenAI
 import httpx
 
 from app.core.config import get_llm_config, ModelConfig
+
+logger = logging.getLogger("ai-studio.llm")
 
 
 class LLMService:
@@ -35,7 +38,7 @@ class LLMService:
                     api_key=api_key,
                     base_url=base_url,
                     http_client=httpx.AsyncClient(
-                        timeout=httpx.Timeout(timeout=120.0, connect=30.0),
+                        timeout=httpx.Timeout(timeout=180.0, connect=30.0),
                         proxy=None,
                         trust_env=False,
                     ),
@@ -205,6 +208,7 @@ class LLMService:
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         model_config: Optional[Dict[str, Any]] = None,
+        response_format: Optional[Dict[str, str]] = None,
     ) -> str:
         """发送对话请求，返回完整响应（非流式）"""
         # 优先使用前端传递的配置
@@ -227,12 +231,28 @@ class LLMService:
 
         try:
             client = self.get_client(base_url, api_key)
-            response = await client.chat.completions.create(
-                model=config.get("model_name", "gpt-4o"),
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+            request_kwargs = {
+                "model": config.get("model_name", "gpt-4o"),
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            if response_format:
+                request_kwargs["response_format"] = response_format
+            try:
+                response = await client.chat.completions.create(**request_kwargs)
+            except Exception as exc:
+                error_text = str(exc).lower()
+                status_code = getattr(exc, "status_code", None)
+                unsupported_format = status_code in (400, 422) and any(
+                    marker in error_text
+                    for marker in ("response_format", "json_object", "structured output")
+                )
+                if not response_format or not unsupported_format:
+                    raise
+                logger.warning("模型接口不支持 response_format，自动降级为普通 JSON 提示")
+                request_kwargs.pop("response_format", None)
+                response = await client.chat.completions.create(**request_kwargs)
 
             # 处理响应
             content = ""

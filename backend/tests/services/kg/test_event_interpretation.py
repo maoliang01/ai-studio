@@ -88,10 +88,12 @@ class FakeLlm:
         self.result = result
         self.messages = None
         self.model_id = None
+        self.response_format = None
 
     async def non_stream_chat(self, **kwargs):
         self.messages = kwargs["messages"]
         self.model_id = kwargs["model_id"]
+        self.response_format = kwargs.get("response_format")
         return json.dumps(self.result, ensure_ascii=False)
 
 
@@ -116,6 +118,7 @@ async def test_interpretation_returns_specific_cross_domain_analysis():
     assert "正文中的产能数据" in llm.messages[0]["content"]
     assert "不得原样输出" in llm.messages[0]["content"]
     assert llm.model_id == "fast-model"
+    assert llm.response_format is None
 
 
 @pytest.mark.asyncio
@@ -177,6 +180,18 @@ def test_parse_reports_truncated_json_reason():
     assert "截断" in reason
 
 
+def test_parse_repairs_missing_comma_without_weakening_validation():
+    malformed = json.dumps(_specific_analysis(), ensure_ascii=False)
+    malformed = malformed.replace(', "event_summary"', ' "event_summary"', 1)
+
+    parsed, reason = EventInterpretationService._parse_with_reason(malformed)
+
+    assert reason == ""
+    assert parsed is not None
+    assert parsed["analysis_status"] == "complete"
+    assert len(parsed["next_developments"]) == 2
+
+
 @pytest.mark.asyncio
 async def test_one_weak_extra_item_does_not_discard_complete_analysis():
     analysis = _specific_analysis()
@@ -195,6 +210,22 @@ async def test_one_weak_extra_item_does_not_discard_complete_analysis():
     assert result["analysis_status"] == "complete"
     assert len(result["next_developments"]) == 3
     assert any("通用后续话术" in item for item in result["quality_warnings"])
+
+
+@pytest.mark.asyncio
+async def test_mechanism_does_not_require_specific_connector_words():
+    analysis = _specific_analysis()
+    analysis["next_developments"][0]["mechanism"] = "企业重新评估低毛利产线并把资源配置到差异化产品"
+    analysis["next_developments"][1]["mechanism"] = "地方部门基于项目风险敞口强化现场核查频率"
+    service = EventInterpretationService(FakeLlm(analysis), timeout_seconds=1)
+
+    result = await service.interpret(
+        {"title": "事件", "evidence_articles": [{"title": "甲"}, {"title": "乙"}]},
+        {"trend": "up", "model_id": "fast-model"},
+    )
+
+    assert result["analysis_status"] == "complete"
+    assert len(result["next_developments"]) == 2
 
 
 @pytest.mark.asyncio

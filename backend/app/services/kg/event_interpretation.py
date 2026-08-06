@@ -5,6 +5,8 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
+from json_repair import repair_json
+
 logger = logging.getLogger("ai-studio.event_interpretation")
 
 
@@ -23,9 +25,8 @@ class EventInterpretationService:
         "许可", "预算", "投资", "处罚", "发布日期", "实施日期", "数据",
     )
     VAGUE_PHRASES = ("产生影响", "行为变化", "政策变化", "持续关注", "进一步发展", "带来机遇")
-    CAUSAL_MARKERS = ("->", "→", "=>", "导致", "进而", "从而", "因此", "推动", "促使", "传导", "使得")
 
-    def __init__(self, llm_client=None, timeout_seconds: int = 90):
+    def __init__(self, llm_client=None, timeout_seconds: int = 95):
         self.llm_client = llm_client
         self.timeout_seconds = timeout_seconds
 
@@ -66,6 +67,8 @@ class EventInterpretationService:
 6. 不要把内部方向代码 up/down/stable 解释为股价、概率或确定结果。它仅是材料中推进词与约束词的粗略计数，可质疑或修正。
 7. 若材料不足以支持某个维度，明确写“证据不足”，不得编造政策名称、金额、企业行动或统计数据。
 8. 不要为了增加数量补写空泛条目；宁可输出 2-3 条完整推演，也不要输出没有主体、机制或验证信号的条目。
+9. 控制篇幅：impact_assessments 输出 3-4 条，next_developments 输出 2-3 条，opportunities 和 challenges 各输出 2 条；每个字符串字段不超过 180 个汉字。
+10. 所有字符串中的双引号必须转义，数组和对象之间必须使用英文逗号。输出前自行检查 JSON 可被解析。
 
 输出严格 JSON，不要输出 Markdown：
 {{
@@ -225,7 +228,14 @@ class EventInterpretationService:
             try:
                 data = json.loads(text)
             except (TypeError, json.JSONDecodeError) as exc:
-                return None, f"JSON 解析失败（{exc.msg}，位置 {exc.pos}），可能输出被截断"
+                try:
+                    repaired = repair_json(text, return_objects=True)
+                except Exception:
+                    repaired = None
+                if not isinstance(repaired, dict):
+                    return None, f"JSON 解析失败（{exc.msg}，位置 {exc.pos}），自动修复失败"
+                logger.info("事件深度推演 JSON 已自动修复: %s，位置 %s", exc.msg, exc.pos)
+                data = repaired
 
         required = {
             "executive_judgment", "event_summary", "current_phase", "signal_assessment",
@@ -253,8 +263,8 @@ class EventInterpretationService:
                 quality_warnings.append(f"未来变化第 {index} 条为通用后续话术")
                 continue
             mechanism = str(item.get("mechanism", "")).strip()
-            if len(mechanism) < 16 or not any(marker in mechanism for marker in cls.CAUSAL_MARKERS):
-                quality_warnings.append(f"未来变化第 {index} 条缺少明确因果机制")
+            if len(mechanism) < 12 or any(mechanism.endswith(phrase) for phrase in cls.VAGUE_PHRASES):
+                quality_warnings.append(f"未来变化第 {index} 条因果机制过短或模糊")
                 continue
             item["affected_parties"] = cls._as_list(item.get("affected_parties"))
             if not item.get("timeframe") or not item["affected_parties"] or not item.get("watch_for"):
@@ -283,8 +293,8 @@ class EventInterpretationService:
             if len(conclusion.strip()) < 8:
                 quality_warnings.append(f"影响分析第 {index} 条结论过短")
                 continue
-            if len(mechanism) < 18 or not any(marker in mechanism for marker in cls.CAUSAL_MARKERS):
-                quality_warnings.append(f"影响分析第 {index} 条缺少明确因果链")
+            if len(mechanism) < 12 or any(mechanism.endswith(phrase) for phrase in cls.VAGUE_PHRASES):
+                quality_warnings.append(f"影响分析第 {index} 条因果机制过短或模糊")
                 continue
             if any(conclusion.strip().endswith(phrase) for phrase in cls.VAGUE_PHRASES):
                 quality_warnings.append(f"影响分析第 {index} 条结论仍然模糊")

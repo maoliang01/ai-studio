@@ -25,3 +25,4 @@ scipy>=1.11.0
 scikit-learn>=1.4.0
 # Optional vector-model dependencies live in requirements-ml.txt.
 jieba>=0.42.1
+json-repair>=0.30,<1
