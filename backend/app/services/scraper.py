@@ -2430,7 +2430,14 @@ class WebScraper:
             # often expose only a small subset as literal HTML anchors.
             adapter_links = scrape_result.get("links", []) or []
             html_links = self._extract_links_from_html(raw_html, url, markdown)
-            result.links = list(dict.fromkeys(adapter_links + html_links))
+            # Crawl4AI 返回的 links 可能是 dict 列表（每个 link 是 {href, text, ...}），需要提取 URL 字符串
+            adapter_urls = []
+            for link in adapter_links:
+                if isinstance(link, dict):
+                    adapter_urls.append(link.get("href", "") or link.get("url", ""))
+                elif isinstance(link, str):
+                    adapter_urls.append(link)
+            result.links = list(dict.fromkeys([u for u in adapter_urls + html_links if u]))
             result.word_count = len(result.content.replace("\n", "").replace(" ", ""))
 
             # 6. 检测是否为列表页（通过内容判断，传入 HTML 以检测 JS 渲染特征）
@@ -2890,12 +2897,14 @@ class WebScraper:
 
         # 内容很少时，检查是否是 JavaScript 渲染的页面
         # 如果是 JS 渲染的页面，不应该误判为列表页
-        if len(content) < 80 or len(lines) < 2:
+        if len(content) < 200 or len(lines) < 2:
             # 检查是否有 JavaScript 渲染特征
             if html and self._detect_js_rendering_needed(html):
                 logger.debug(f"内容很少但检测到 JS 渲染特征，不认为是列表页: {len(content)} 字")
                 return False
-            return True
+            # 内容非常少且没有 JS 渲染特征，才认为是列表页
+            if len(content) < 80:
+                return True
 
         # 检测导航关键词密度
         nav_keywords = [
