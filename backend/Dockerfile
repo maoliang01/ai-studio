@@ -17,6 +17,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefer-binary --retries 8 -r requirements.txt
 
+# 安装 Playwright 浏览器和系统依赖（用于 JavaScript 渲染）
+RUN playwright install chromium && \
+    playwright install-deps chromium
+
 # 复制应用代码
 COPY . .
 
