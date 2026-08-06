@@ -493,6 +493,10 @@ class AlternateScraper:
                 result["success"] = True
                 result["metadata"]["status_code"] = response.status_code
                 result["metadata"]["final_url"] = str(response.url)
+                # 尝试从 HTML 中提取发布日期
+                published = _extract_publish_date_from_html(html)
+                if published:
+                    result["metadata"]["published_at"] = published
 
             # 提取阶段：每个 extractor 一次
             candidates: List[Dict[str, Any]] = []

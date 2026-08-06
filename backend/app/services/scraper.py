@@ -2826,18 +2826,26 @@ class WebScraper:
             # 检查是否是文章 URL（通常包含日期或特定模式）
             is_article = False
 
-            # 模式 1: URL 包含日期格式
-            if re.search(r'/\d{4}[-/]\d{1,2}[-/]\d{1,2}/', link) or re.search(r'/\d{8}', link):
+            # 模式 1: URL 包含日期格式（支持 /YYYY-MM-DD/、/YYYYMMDD/、文件名中的 8 位日期）
+            if re.search(r'/\d{4}[-/]\d{1,2}[-/]\d{1,2}/', link) or re.search(r'(?:\d{8})(?:/|\.)', link):
                 is_article = True
 
             # 模式 2: URL 包含 /tYYYYMMDD_ 或 .shtml .htm 等
             if '/t' in link and re.search(r't\d{8}', link):
                 is_article = True
-            if link.endswith(('.shtml', '.htm', '.html')):
-                is_article = True
+            if not is_article and link.endswith(('.shtml', '.htm', '.html')):
+                # 检查文件名是否包含 content_ 或 8 位日期（gov.cn 常见格式）
+                if re.search(r'/content_[a-zA-Z0-9_]+\.(?:html?|shtml)$', urlparse(link).path, re.IGNORECASE):
+                    is_article = True
+                elif re.search(r'\d{8}', link):  # 文件名含 8 位数字
+                    is_article = True
 
             # 模式 3: URL 是新闻/文章路径
             if any(p in link for p in ['/yw/', '/news/', '/article/', '/content/', '/info/']):
+                is_article = True
+
+            # 模式 4: 文件名包含 content_ 的 .htm 文件（gov.cn 文章特征）
+            if not is_article and re.search(r'/content_[\w]+\.(?:html?|shtml)$', urlparse(link).path, re.IGNORECASE):
                 is_article = True
 
             # 模式 4: 从链接文本提取标题（如果有）
@@ -2845,16 +2853,29 @@ class WebScraper:
                 seen_urls.add(link)
 
                 # 从 URL 提取日期
+                date_str = ""
                 date_match = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', link)
                 if date_match:
                     date_str = f"{date_match.group(1)}-{date_match.group(2).zfill(2)}-{date_match.group(3).zfill(2)}"
                 else:
+                    # 从文件名中提取 8 位日期：content_2024080101.htm → 2024-08-01
                     date_match = re.search(r'(\d{8})', link)
                     if date_match:
                         d = date_match.group(1)
-                        date_str = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
-                    else:
-                        date_str = ""
+                        # 验证是有效日期
+                        try:
+                            datetime.strptime(d, "%Y%m%d")
+                            date_str = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+                        except ValueError:
+                            # 尝试 6 位格式 YYYYMM
+                            date_match6 = re.search(r'(\d{6})', link)
+                            if date_match6:
+                                d6 = date_match6.group(1)
+                                try:
+                                    datetime.strptime(d6 + "01", "%Y%m%d")
+                                    date_str = f"{d6[:4]}-{d6[4:6]}-01"
+                                except ValueError:
+                                    date_str = ""
 
                 articles.append({
                     'url': link,
@@ -3360,8 +3381,8 @@ class WebScraper:
             link_parts = link_path.strip('/').split('/')
 
             # 文章链接特征检查
-            # 日期模式：/YYYYMM/ 或 /YYYYMMDD/ 或 tYYYYMMDD
-            has_date_in_url = bool(re.search(r'/(\d{6}|\d{8})/', link)) or bool(re.search(r'/t\d{8}', link))
+            # 日期模式：/YYYYMM/ 或 /YYYYMMDD/ 或 tYYYYMMDD 或 YYYYMMDD.shtml
+            has_date_in_url = bool(re.search(r'(?:\d{8})(?:/|\.)', link)) or bool(re.search(r'/(\d{6})(?:/|\.)', link)) or bool(re.search(r'/t\d{8}', link))
             # 文件扩展名
             has_file_ext = any(link.endswith(ext) for ext in ['.html', '.htm', '.shtml', '.php'])
             # 澎湃新闻频道页使用 /newsDetail_forward_数字 作为文章详情链接，
@@ -3375,6 +3396,15 @@ class WebScraper:
                 parsed.path,
                 re.IGNORECASE,
             ) is not None
+            # gov.cn 文章路径模式：/栏目/content_xxx[_xxx].htm
+            is_gov_content = (
+                domain.endswith('gov.cn')
+                and re.search(r'/content_[a-zA-Z0-9_]+\.(?:html?|shtml)$', parsed.path, re.IGNORECASE) is not None
+            )
+            # 允许无日期但有 content_ 特征的 .htm 文件（如 gov.cn）
+            is_content_file_link = has_file_ext and re.search(r'/content_', link, re.IGNORECASE) is not None
+            # 允许文件名中包含 8 位日期的 .htm 文件（如 content_2024080101.htm）
+            is_date_in_filename = has_file_ext and re.search(r'(?:^|[\s/_])\d{8}[\s._]', link) is not None
 
             # 栏目检查：只接受主栏目路径下的文章
             is_same_category = len(link_parts) > 1 and link_parts[0] == main_category
@@ -3397,6 +3427,9 @@ class WebScraper:
             elif is_explicit_article_path:
                 article_links.append(link)
                 logger.debug(f"  接受(明确详情路径): {link}")
+            elif is_gov_content or is_content_file_link:
+                article_links.append(link)
+                logger.debug(f"  接受(gov.cn 文章内容): {link}")
             elif has_file_ext and is_same_category:
                 article_links.append(link)
                 logger.debug(f"  接受(栏目匹配): {link}")
@@ -3405,7 +3438,12 @@ class WebScraper:
                 article_links.append(link)
                 logger.debug(f"  接受(栏目首页，根目录日期): {link}")
             elif has_file_ext and not is_same_category:
-                logger.debug(f"  过滤(不同栏目): {link}")
+                # 文件名包含日期也接受，即使栏目不同（跨栏目按日期组织的文章也常见）
+                if is_date_in_filename or has_date_in_url:
+                    article_links.append(link)
+                    logger.debug(f"  接受(跨栏目日期链接): {link}")
+                else:
+                    logger.debug(f"  过滤(不同栏目): {link}")
 
         logger.info(f"文章链接过滤完成: 识别到 {len(article_links)} 个文章链接")
         # 有序去重，避免 set 打乱列表页顺序后再被 max_articles 截断。
