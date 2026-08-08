@@ -60,8 +60,19 @@ htmlcov/
 .claude/plans/used/
 .superpowers/
 .worktrees/
-data/
+# 忽略 data 目录下的所有数据库和缓存文件
+backend/data/*.db
+backend/data/*.db-journal
+backend/data/*.db-wal
+backend/data/*.db-shm
+backend/data/*/cache/
+backend/data/*/temp/
+backend/data/settings.json
 backups/
+
+# 用户配置文件（明确跟踪，不忽略）
+!backend/data/scrape-sources.json
+!backend/data/scrape-sources.json.example
 # PID files
 .pids/
 

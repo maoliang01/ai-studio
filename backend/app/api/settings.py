@@ -85,6 +85,8 @@ class SaveSettingsRequest(BaseModel):
 # ============ 文件持久化存储 ============
 
 SETTINGS_FILE = Path(__file__).parent.parent.parent / "data" / "settings.json"
+# 用户配置文件：独立于 settings.json，部署到宿主机上，重启不丢失
+SCRAPE_SOURCES_FILE = Path(__file__).parent.parent.parent / "data" / "scrape-sources.json"
 
 # 内容存储根目录
 CONTENT_ROOT = Path(__file__).parent.parent.parent / "data" / "content"
@@ -132,6 +134,57 @@ class SettingsStore:
         """确保内容存储目录存在"""
         CONTENT_ROOT.mkdir(parents=True, exist_ok=True)
 
+    def _load_sources_from_list(self, sources_list: List[dict]):
+        """从列表格式加载爬取源（独立配置文件的格式）"""
+        for source in sources_list:
+            self._source_counter += 1
+            source_id = f"src_{self._source_counter}_{int(datetime.now().timestamp() * 1000) % 1000000}"
+            now = datetime.now().isoformat()
+            self.scrape_sources[source_id] = {
+                "id": source_id,
+                "name": source.get("name", ""),
+                "url": source.get("url", ""),
+                "category": source.get("category", "business"),
+                "description": source.get("description"),
+                "is_enabled": source.get("is_enabled", True),
+                "created_at": source.get("created_at", now),
+                "updated_at": now,
+            }
+
+    def _load_sources_from_dict(self, sources_dict: dict):
+        """从字典格式加载爬取源（旧的 settings.json 格式）"""
+        for source_id, source in sources_dict.items():
+            self.scrape_sources[source_id] = source
+            # 更新计数器
+            try:
+                parts = source_id.split("_")
+                if len(parts) >= 2:
+                    counter = int(parts[1])
+                    if counter > self._source_counter:
+                        self._source_counter = counter
+            except:
+                pass
+
+    def _save_sources_to_file(self):
+        """保存爬取源到独立配置文件"""
+        self._ensure_data_dir()
+        try:
+            sources_list = []
+            for source in self.scrape_sources.values():
+                sources_list.append({
+                    "name": source.get("name"),
+                    "url": source.get("url"),
+                    "category": source.get("category", "business"),
+                    "description": source.get("description"),
+                    "is_enabled": source.get("is_enabled", True),
+                })
+            data = {"sources": sources_list}
+            with open(SCRAPE_SOURCES_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            print(f"[设置] 爬取源已保存到: {SCRAPE_SOURCES_FILE}")
+        except Exception as e:
+            print(f"[设置] 保存爬取源配置文件失败: {e}")
+
     def _ensure_category_folder(self, category_id: str, folder_name: str):
         """确保分类对应的文件夹存在"""
         self._ensure_content_dir()
@@ -159,23 +212,33 @@ class SettingsStore:
 
     def _load_from_file(self):
         """从文件加载配置"""
+        # 优先从独立配置文件加载爬取源
+        if SCRAPE_SOURCES_FILE.exists():
+            try:
+                with open(SCRAPE_SOURCES_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    sources_list = data.get("sources", [])
+                    self._load_sources_from_list(sources_list)
+                    print(f"[设置] 从独立配置文件加载了 {len(self.scrape_sources)} 个爬取源: {SCRAPE_SOURCES_FILE}")
+            except Exception as e:
+                print(f"[设置] 加载爬取源配置文件失败: {e}")
+
+        # 从 settings.json 加载其余配置
         if SETTINGS_FILE.exists():
             try:
                 with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.settings = data.get("settings", self.settings)
-                    self.scrape_sources = data.get("scrape_sources", {})
                     self.categories = data.get("categories", {})
-                    # 更新计数器到最大值
-                    for source_id in self.scrape_sources.keys():
-                        try:
-                            parts = source_id.split("_")
-                            if len(parts) >= 2:
-                                counter = int(parts[1])
-                                if counter > self._source_counter:
-                                    self._source_counter = counter
-                        except:
-                            pass
+                    # 如独立配置文件不存在或为空，从 settings.json 加载爬取源
+                    if not SCRAPE_SOURCES_FILE.exists() or not self.scrape_sources:
+                        old_sources = data.get("scrape_sources", {})
+                        if old_sources and not self.scrape_sources:
+                            self._load_sources_from_dict(old_sources)
+                            print(f"[设置] 从旧配置文件迁移了 {len(self.scrape_sources)} 个爬取源")
+                            # 写入新配置文件
+                            self._save_sources_to_file()
+                    # 更新分类计数器
                     for cat_id in self.categories.keys():
                         try:
                             parts = cat_id.split("_")
@@ -189,7 +252,7 @@ class SettingsStore:
                     if "firecrawl" not in self.settings:
                         self.settings["firecrawl"] = FirecrawlConfig().model_dump()
             except Exception as e:
-                print(f"加载配置文件失败: {e}")
+                print(f"[设置] 加载配置文件失败: {e}")
 
     def _save_to_file(self):
         """保存配置到文件"""
@@ -432,6 +495,7 @@ class SettingsStore:
         self.scrape_sources[source_id] = new_source
         self._save_to_file()
         self._sync_to_database()
+        self._save_sources_to_file()
         return ScrapeSourceResponse(**new_source)
 
     def update_scrape_source(self, source_id: str, updates: dict) -> Optional[ScrapeSourceResponse]:
@@ -444,12 +508,14 @@ class SettingsStore:
         source["updated_at"] = datetime.now().isoformat()
         self._save_to_file()
         self._sync_to_database()
+        self._save_sources_to_file()
         return ScrapeSourceResponse(**source)
 
     def delete_scrape_source(self, source_id: str) -> bool:
         if source_id in self.scrape_sources:
             del self.scrape_sources[source_id]
             self._save_to_file()
+            self._save_sources_to_file()
             return True
         return False
 
@@ -461,6 +527,7 @@ class SettingsStore:
         source["updated_at"] = datetime.now().isoformat()
         self._save_to_file()
         self._sync_to_database()
+        self._save_sources_to_file()
         return ScrapeSourceResponse(**source)
 
 
