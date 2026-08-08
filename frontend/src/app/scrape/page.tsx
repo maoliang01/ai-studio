@@ -1057,7 +1057,38 @@ export default function ScrapePage() {
                       disabled={isScraping}
                     />
                   </div>
-                  <Button
+                  {/* 分类选择（从后端网页配置动态加载） */}
+                    <Select
+                      value={selectedCategory}
+                      onValueChange={(value) => value && setSelectedCategory(value as string)}
+                      disabled={isScraping}
+                    >
+                      <SelectTrigger className="w-[140px] gap-1">
+                        <Tag className="h-4 w-4 text-muted-foreground shrink-0" />
+                        <SelectValue placeholder="选择分类" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {categories.length === 0 ? (
+                          <div className="px-2 py-1.5 text-sm text-muted-foreground">
+                            暂无分类
+                          </div>
+                        ) : (
+                          categories.map((cat) => (
+                            <SelectItem key={cat.id} value={cat.id}>
+                              <span className="flex items-center gap-2">
+                                <span
+                                  className="inline-block h-2 w-2 rounded-full"
+                                  style={{ backgroundColor: cat.color }}
+                                />
+                                {cat.name}
+                              </span>
+                            </SelectItem>
+                          ))
+                        )}
+                      </SelectContent>
+                    </Select>
+
+                    <Button
                       variant="outline"
                       onClick={() => setShowSourceSelector(true)}
                       className="gap-1"
