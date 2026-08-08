@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8080";
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8500";
 
 /** 将浏览器健康检查代理到 FastAPI，避免客户端依赖具体部署主机。 */
 export async function GET() {

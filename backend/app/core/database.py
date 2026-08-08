@@ -1,7 +1,8 @@
 """
 数据库配置模块
 
-支持 PostgreSQL 数据库连接管理
+支持 PostgreSQL 和 SQLite 数据库连接管理
+当 PostgreSQL 不可用时自动回退到 SQLite
 """
 import os
 import json
@@ -20,6 +21,7 @@ logger = logging.getLogger("ai-studio")
 # 配置数据文件路径
 CONFIG_DIR = Path(__file__).parent.parent.parent
 SETTINGS_FILE = CONFIG_DIR / "data" / "settings.json"
+SQLITE_DB_PATH = CONFIG_DIR / "data" / "ai_studio.db"
 
 # 无论从 Windows、Linux、Docker 还是 IDE 启动，都使用 backend/.env。
 # 已由部署平台注入的环境变量优先，不会被文件覆盖。
@@ -113,21 +115,62 @@ _engine = None
 _SessionLocal = None
 
 
+def _test_postgresql_connection(url: str) -> bool:
+    """测试 PostgreSQL 连接是否可用"""
+    try:
+        test_engine = create_engine(url, pool_pre_ping=True, connect_args={"connect_timeout": 3})
+        with test_engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        test_engine.dispose()
+        return True
+    except Exception:
+        return False
+
+
 def get_engine():
-    """获取数据库引擎（延迟初始化）"""
+    """获取数据库引擎（延迟初始化）
+
+    DB_TYPE 环境变量行为:
+      - "postgresql" : 强制使用 PostgreSQL，连不上直接报错，绝不回退 SQLite
+      - "sqlite"     : 强制使用 SQLite
+      - 未设置       : 优先 PostgreSQL，连接失败回退 SQLite（向后兼容）
+    """
     global _engine
     if _engine is None:
-        config = get_database_config()
+        db_type = os.getenv("DB_TYPE", "").lower()
+
+        if db_type != "sqlite":
+            config = get_database_config()
+            if _test_postgresql_connection(config.url):
+                _engine = create_engine(
+                    config.url,
+                    poolclass=QueuePool,
+                    pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
+                    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
+                    pool_timeout=int(os.getenv("DB_POOL_TIMEOUT", "60")),
+                    pool_pre_ping=True,
+                    echo=os.getenv("SQL_ECHO", "false").lower() == "true",
+                )
+                logger.info(f"✅ 使用 PostgreSQL: {config.host}:{config.port}/{config.database}")
+                return _engine
+            elif db_type == "postgresql":
+                # 明确要求 PostgreSQL 但连不上 → 直接报错，不静默回退
+                raise RuntimeError(
+                    f"DB_TYPE=postgresql 但无法连接 PostgreSQL ({config.host}:{config.port}/{config.database})。"
+                    "请检查 PostgreSQL 是否启动、端口和密码是否正确。"
+                )
+            else:
+                logger.warning("⚠️ PostgreSQL 不可用，回退到 SQLite")
+
+        # 使用 SQLite
+        SQLITE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        sqlite_url = f"sqlite:///{SQLITE_DB_PATH}"
         _engine = create_engine(
-            config.url,
-            poolclass=QueuePool,
-            pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
-            max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
-            pool_timeout=int(os.getenv("DB_POOL_TIMEOUT", "60")),
-            pool_pre_ping=True,  # 连接前测试
+            sqlite_url,
             echo=os.getenv("SQL_ECHO", "false").lower() == "true",
+            connect_args={"check_same_thread": False},  # SQLite 需要
         )
-        logger.info(f"数据库引擎已创建: {config.host}:{config.port}/{config.database}")
+        logger.info(f"✅ 使用 SQLite: {SQLITE_DB_PATH}")
     return _engine
 
 
@@ -181,6 +224,8 @@ def init_db():
 
 def _ensure_knowledge_job_columns(engine) -> None:
     """为已存在的任务表补齐异步任务载荷字段。"""
+    if engine.url.drivername == "sqlite":
+        return  # SQLite 表结构由 create_all 处理
     with engine.begin() as connection:
         connection.execute(text(
             "ALTER TABLE knowledge_jobs ADD COLUMN IF NOT EXISTS payload JSONB"
@@ -192,6 +237,8 @@ def _ensure_knowledge_job_columns(engine) -> None:
 
 def _ensure_prediction_columns(engine) -> None:
     """Keep prediction snapshots compatible with databases created before interpretation existed."""
+    if engine.url.drivername == "sqlite":
+        return
     with engine.begin() as connection:
         connection.execute(text(
             "ALTER TABLE prediction_records ADD COLUMN IF NOT EXISTS interpretation JSONB"
@@ -200,6 +247,8 @@ def _ensure_prediction_columns(engine) -> None:
 
 def _ensure_wechat_account_columns(engine) -> None:
     """为已有数据库补齐公众号低频发现所需字段。"""
+    if engine.url.drivername == "sqlite":
+        return  # SQLite 表结构由 create_all 处理
     statements = (
         "ALTER TABLE wechat_accounts ADD COLUMN IF NOT EXISTS fakeid VARCHAR(200)",
         "ALTER TABLE wechat_accounts ADD COLUMN IF NOT EXISTS min_crawl_interval_minutes INTEGER DEFAULT 60",
@@ -277,8 +326,13 @@ def sync_settings_to_database(categories: dict, scrape_sources: dict) -> dict:
 
 
 def _create_fts_index(engine):
-    """创建全文搜索索引"""
+    """创建全文搜索索引（仅 PostgreSQL）"""
     from sqlalchemy import text
+
+    # SQLite 不支持 PostgreSQL 的全文搜索功能
+    if engine.url.drivername == "sqlite":
+        logger.info("SQLite 数据库，跳过全文搜索索引创建")
+        return
 
     with engine.connect() as conn:
         # 检查 search_vector 列是否存在

@@ -917,6 +917,7 @@ class ScrapedResult:
     summary: Optional[str] = None
     keywords: List[str] = field(default_factory=list)
     style: Optional[str] = None  # 文体（新闻、通知、纪要等）
+    metadata: Optional[Dict[str, Any]] = None  # 元数据（如 is_final_content 标记）
 
     def __post_init__(self):
         if self.links is None:
@@ -1113,11 +1114,18 @@ class DateExtractor:
             r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']article:published_time["\']',
             r'<meta[^>]+(?:name|itemprop)=["\'](?:publishdate|pubdate|datepublished|date)["\'][^>]+content=["\']([^"\']+)',
             r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:name|itemprop)=["\'](?:publishdate|pubdate|datepublished)["\']',
+            # 政府网站常用: firstpublishedtime, lastmodifiedtime
+            r'<meta[^>]+name=["\']firstpublishedtime["\'][^>]+content=["\']([^"\']+)',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']firstpublishedtime["\']',
+            r'<meta[^>]+name=["\']lastmodifiedtime["\'][^>]+content=["\']([^"\']+)',
         ]
         for pattern in meta_patterns:
             match = re.search(pattern, html)
             if match:
                 date_str = match.group(1).split('T')[0]
+                # 处理非标准日期格式: 2026-07-31-23:02:00 -> 2026-07-31
+                if re.match(r'\d{4}-\d{2}-\d{2}-\d{2}:\d{2}:\d{2}', date_str):
+                    date_str = date_str[:10]
                 if cls._validate_date(date_str):
                     return date_str
 
@@ -2064,6 +2072,74 @@ class WebScraper:
                 },
             }
 
+        # 微博热搜：直接调用 AJAX API 获取数据
+        if host in ("s.weibo.com", "weibo.com") and re.search(r"/top/summary", parsed.path, re.IGNORECASE):
+            api_url = "https://weibo.com/ajax/side/hotSearch"
+            api_headers = {
+                **headers,
+                "Referer": "https://s.weibo.com/top/summary",
+                "Accept": "application/json, text/plain, */*",
+                "X-Requested-With": "XMLHttpRequest",
+            }
+            if not cookies:
+                return {
+                    "success": False,
+                    "error": "anti_bot_detected",
+                    "error_detail": "微博热搜需要登录 Cookie 才能访问，请在浏览器登录微博后复制 Cookie",
+                    "domain": host,
+                }
+            try:
+                async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=api_headers) as client:
+                    response = await client.get(api_url)
+                    response.raise_for_status()
+                payload = response.json()
+                realtime = (payload.get("data") or {}).get("realtime") or []
+                if not realtime:
+                    return {"success": False, "error": "weibo_api_empty", "error_detail": "微博热搜 API 返回空数据"}
+                # 格式化热搜列表
+                lines = ["# 微博热搜榜\n"]
+                links = []
+                for i, item in enumerate(realtime):
+                    rank = item.get("rank", i)
+                    title = str(item.get("word") or item.get("note") or "").strip()
+                    num = item.get("num", 0)
+                    category = str(item.get("category") or "").strip()
+                    label = item.get("label_name", "")
+                    if not title:
+                        continue
+                    entry = f"{rank + 1}. {title}"
+                    if num:
+                        entry += f" - 热度: {num}"
+                    if category:
+                        entry += f" [{category}]"
+                    if label:
+                        entry += f" ({label})"
+                    lines.append(entry)
+                    # 构建热搜话题链接（使用搜索结果页，包含实际文章）
+                    word_id = item.get("word_scheme") or item.get("word")
+                    if word_id:
+                        # 使用搜索结果页格式，包含实际的微博文章
+                        search_url = f"https://s.weibo.com/weibo?q=%23{word_id}%23"
+                        links.append(search_url)
+                content = "\n".join(lines)
+                # 返回热搜列表和文章链接，支持深度爬取
+                return {
+                    "success": True,
+                    "content": content,
+                    "markdown": content,
+                    "title": "微博热搜榜",
+                    "links": links,  # 返回文章链接，支持深度爬取
+                    "html": "",
+                    "metadata": {
+                        "published_at": current_local_date().isoformat(),
+                    },
+                }
+            except httpx.TimeoutException:
+                return {"success": False, "error": "weibo_api_timeout", "error_detail": "微博热搜 API 请求超时"}
+            except Exception as e:
+                logger.warning("微博热搜 API 请求失败: %s", e)
+                return {"success": False, "error": f"weibo_api_error: {e}"}
+
         xinhua_match = re.search(r"/(?:share|detail)/(\d+)", parsed.path, re.IGNORECASE)
         if host == "h.xinhuaxmt.com" and xinhua_match:
             article_id = xinhua_match.group(1)
@@ -2299,6 +2375,15 @@ class WebScraper:
                     result.error_message = scrape_result.get("error_detail") or scrape_result.get("error")
                     logger.warning("外部新闻正文不可公开抓取，停止重试: %s, %s", url, result.error_message)
                     return result
+                elif scrape_result and scrape_result.get("error") == "anti_bot_detected":
+                    # 特定站点处理器已检测到反爬（如微博需要 Cookie），直接返回
+                    result.status = "anti_bot_blocked"
+                    result.error_message = scrape_result.get("error_detail", "网站有反爬保护")
+                    domain = scrape_result.get("domain", "")
+                    if domain:
+                        result.error_message += f" ({domain})"
+                    logger.warning("站点处理器检测到反爬保护: %s, %s", url, result.error_message)
+                    return result
                 elif scrape_result:
                     logger.warning("外部新闻结构化抓取未命中，回退通用链路: %s, %s", url, scrape_result.get("error"))
                     scrape_result = None
@@ -2463,6 +2548,9 @@ class WebScraper:
             if content_author and not result.author:
                 result.author = content_author
                 logger.debug(f"内容作者: {content_author}")
+
+            # 保存元数据（包含 is_final_content 等标记）
+            result.metadata = fast_metadata
 
             # 澎湃已有稳定的结构化解析。逐篇调用 LLM 会让后台深爬稳定撞上
             # 总超时，因此即使调用方误开 extract_metadata 也必须走本地元数据提取。
@@ -2815,6 +2903,55 @@ class WebScraper:
 
         return False
 
+    async def _render_list_page_for_links(self, url: str, html: str) -> str:
+        """
+        为 cas.cn 等网站专门渲染列表页以获取动态加载的文章链接
+
+        Args:
+            url: 页面 URL
+            html: 原始 HTML（可能不包含真实文章链接）
+
+        Returns:
+            str: 渲染后的 HTML，如果失败则返回空字符串
+        """
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            logger.warning("Playwright 未安装，无法渲染列表页")
+            return ""
+
+        try:
+            logger.info(f"渲染列表页获取文章链接: {url}")
+            async with async_playwright() as p:
+                browser = None
+                try:
+                    browser = await p.chromium.launch(channel="chrome", headless=True)
+                except Exception as exc:
+                    logger.warning("系统 Chrome 启动失败，回退到 Playwright Chromium: %s", exc)
+                    browser = await p.chromium.launch(headless=True)
+
+                try:
+                    page = await browser.new_page()
+                    page.set_default_timeout(30000)
+
+                    # 访问页面并等待网络空闲
+                    await page.goto(url, wait_until="networkidle", timeout=45000)
+
+                    # 等待一些动态内容加载
+                    await page.wait_for_timeout(3000)
+
+                    # 返回渲染后的 HTML
+                    rendered_html = await page.content()
+                    logger.info(f"列表页渲染成功，HTML 长度: {len(rendered_html)}")
+                    return rendered_html
+
+                finally:
+                    if page:
+                        await page.close()
+        except Exception as e:
+            logger.warning(f"列表页渲染失败: {e}")
+            return ""
+
     async def _render_with_playwright(self, url: str, html: str) -> str:
         """
         通用机制：使用 Playwright 渲染 JavaScript 页面
@@ -3037,9 +3174,11 @@ class WebScraper:
 
         # 常见的 JSON 数据源 URL 模式
         json_url_patterns = [
+            # 模式 0: 直接引用 ./xxx.json 或 '../xxx.json"（gov.cn 等政府网站常用格式）
+            r'["\'](\.{1,2}/[^"\']+\.json)["\']',
             # 模式 1: $.ajax({url: "./data.json"}) 或 fetch("./data.json")
             r'(?:url|fetch)\s*[:=]\s*["\'](\./[^"\']+\.json)["\']',
-            # 模式 2: url = "./data.json" 或 url = '../data.json'
+            # 模式 2: url = "./data.json" 或 url = '../data.json"
             r'url\s*=\s*["\'](\.{1,2}/[^"\']+\.json)["\']',
             # 模式 3: var dataUrl = "/api/data.json"
             r'(?:dataUrl|jsonUrl|listUrl)\s*=\s*["\'](/[^"\']+\.json)["\']',
@@ -3461,7 +3600,7 @@ class WebScraper:
         if scrape_id is None:
             scrape_id = str(uuid.uuid4())[:8]
 
-        logger.info(f"深度爬取开始 | URL: {url} | 日期范围: {date_range or custom_date_range}")
+        logger.info(f"[DEEP_SCRAPE] 深度爬取开始 | URL: {url} | 日期范围: {date_range or custom_date_range}")
 
         if options is None:
             options = ScrapeOptions()
@@ -3473,6 +3612,13 @@ class WebScraper:
 
         if list_page.status != "success":
             return list_page, []
+
+        # 检查是否为最终内容（如微博热搜等聚合页面）
+        # 这类页面的内容本身就是最终结果，不需要进一步爬取文章
+        logger.info(f"检查是否为最终内容: metadata={list_page.metadata}")
+        if list_page.metadata and list_page.metadata.get("is_final_content"):
+            logger.info(f"检测到最终内容页面，直接返回: {url}")
+            return list_page, [list_page]
 
         # 列表页显示日期仅作为详情页明确发布日期缺失时的站点级兜底。
         list_item_dates = DateExtractor.extract_list_item_dates(list_page.html, url)
@@ -3497,10 +3643,76 @@ class WebScraper:
             article_links = [a['url'] for a in json_articles if a.get('url')]
             logger.info(f"从 JSON 数据源提取到 {len(article_links)} 个文章链接")
         else:
-            # 2.2 回退到基于 URL 模式的识别
+            # 先尝试通用 URL 模式过滤
             article_links = self._filter_article_links(
                 list_page.links, url, trusted_list_urls=set(list_item_dates)
             )
+
+            # 如果过滤结果少于5个，检查是否需要 Playwright 渲染（如 cas.cn）
+            if len(article_links) < 5:
+                parsed_url = urlparse(url)
+                needs_playwright_render = (
+                    parsed_url.netloc == 'www.cas.cn'
+                )
+
+                if needs_playwright_render:
+                    logger.info(f"检测到 cas.cn 网站，使用 Playwright 渲染获取文章链接")
+                    rendered_html = await self._render_list_page_for_links(url, list_page.html)
+                    if rendered_html and len(rendered_html) > len(list_page.html or ""):
+                        # 从渲染后的 HTML 提取链接和日期
+                        from bs4 import BeautifulSoup
+                        soup = BeautifulSoup(rendered_html, 'html.parser')
+                        from urllib.parse import urljoin
+
+                        playwright_links = []
+                        # 查找所有文章链接
+                        for link in soup.find_all('a', href=True):
+                            href = link.get('href', '')
+                            text = link.get_text(strip=True)
+                            if href and text and len(text) > 3:
+                                # 构建完整 URL
+                                full_url = urljoin(url, href)
+                                # 检查是否是 cas.cn 的文章链接
+                                if 'cas.cn' in full_url and (
+                                    '/syky/' in full_url or '/yw/' in full_url
+                                    or '/cg/' in full_url or '/rcjy/' in full_url
+                                ) and '.shtml' in full_url:
+                                    if full_url not in playwright_links:
+                                        playwright_links.append(full_url)
+                                    # 从链接所在区域提取日期
+                                    parent = link.find_parent(['li', 'tr', 'p'])
+                                    if parent:
+                                        date_text = parent.get_text()
+                                        date_match = re.search(r'(20\d{2})[-年]?(\d{1,2})[-月]?(\d{1,2})', date_text)
+                                        if date_match:
+                                            date_str = f"{date_match.group(1)}-{date_match.group(2).zfill(2)}-{date_match.group(3).zfill(2)}"
+                                            if date_str not in list_item_dates:
+                                                list_item_dates[full_url] = date_str
+
+                        if playwright_links:
+                            # 修正相对路径
+                            base_domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
+                            fixed_links = []
+                            for link in playwright_links:
+                                if '../' in link:
+                                    # 处理向上目录的相对路径
+                                    parts = link.replace(base_domain, '').split('/')
+                                    new_parts = []
+                                    for part in parts:
+                                        if part == '..':
+                                            if new_parts:
+                                                new_parts.pop()
+                                        elif part and part != '.':
+                                            new_parts.append(part)
+                                    fixed_url = base_domain + '/' + '/'.join(new_parts)
+                                    fixed_links.append(fixed_url)
+                                else:
+                                    fixed_links.append(link)
+                            article_links = fixed_links
+                            logger.info(f"Playwright 渲染后提取到 {len(article_links)} 个文章链接")
+
+            # 去重
+            article_links = list(dict.fromkeys(article_links))
 
         # 使用回调更新进度
         cb = progress_callback or self._progress_callback
@@ -3605,10 +3817,22 @@ class WebScraper:
                                 )
             before_count = len(output_results)
             if not is_thepaper_listing:
-                output_results = [
-                    r for r in output_results
-                    if r.published_at and self._date_in_range(r.published_at, start_date, end_date)
-                ]
+                # 判断是否为聚合类页面（微博热搜、知乎热榜等）
+                # 这类页面的文章通常没有发布日期，需要保留
+                is_aggregation = any(x in url.lower() for x in ['/top/', '/hot', '/trending', '/rank', 'tophub'])
+
+                if is_aggregation:
+                    # 聚合页面：保留所有文章（包括没有日期的）
+                    output_results = [
+                        r for r in output_results
+                        if not r.published_at or self._date_in_range(r.published_at, start_date, end_date)
+                    ]
+                else:
+                    # 普通页面：严格过滤，只保留有日期且在范围内的文章
+                    output_results = [
+                        r for r in output_results
+                        if r.published_at and self._date_in_range(r.published_at, start_date, end_date)
+                    ]
             logger.info(f"发布日期过滤: {before_count} -> {len(output_results)} 篇")
 
         # 5. 按日期排序（最新的在前）
@@ -3641,6 +3865,9 @@ class WebScraper:
 
         # 判断是否为热榜/聚合类页面（允许外部链接）
         is_aggregation_page = any(x in base_url.lower() for x in ['/n/', '/hot', '/trending', '/rank', 'tophub', 'weibo.com', 'zhihu.com/'])
+
+        # 特殊处理：微博热搜页面的话题链接
+        is_weibo_hot = 'weibo.com' in base_url.lower() and '/top/' in base_url.lower()
 
         article_links = []
         trusted_list_urls = trusted_list_urls or set()
@@ -3676,6 +3903,7 @@ class WebScraper:
         ]
 
         # 文章链接特征（更严格的要求）
+        logger.info(f"开始过滤链接: 输入 {len(links)} 个链接, is_weibo_hot={is_weibo_hot}")
         for link in links:
             if not link or link.startswith(('javascript:', '#', 'mailto:')):
                 continue
@@ -3685,6 +3913,12 @@ class WebScraper:
             list_key = link.split("#", 1)[0]
             is_trusted_list_url = list_key in trusted_list_urls
             is_external = bool(parsed.netloc and parsed.netloc != domain)
+
+            # 微博热搜话题链接特殊处理（搜索结果页和话题页）
+            if is_weibo_hot and ('/weibo?' in link or '/topic/' in parsed.path):
+                article_links.append(link)
+                logger.debug(f"  接受(微博热搜): {link}")
+                continue
 
             # Structured list data is the source site's explicit article feed.
             # Accept its external targets before generic index/share navigation rules.
@@ -3743,7 +3977,7 @@ class WebScraper:
                 and re.search(r'/newsDetail_forward_\d+', parsed.path, re.IGNORECASE) is not None
             )
             is_explicit_article_path = re.search(
-                r'/(?:article|articles|news|detail|content|post)/[^/]+(?:\.(?:html?|shtml|php))?$',
+                r'/(?:article|articles|news|detail|content|post)/(?:[^/]+/)?[^/]+(?:\.(?:html?|shtml|php))?$',
                 parsed.path,
                 re.IGNORECASE,
             ) is not None
@@ -3754,8 +3988,13 @@ class WebScraper:
             )
             # 允许无日期但有 content_ 特征的 .htm 文件（如 gov.cn）
             is_content_file_link = has_file_ext and re.search(r'/content_', link, re.IGNORECASE) is not None
-            # 允许文件名中包含 8 位日期的 .htm 文件（如 content_2024080101.htm）
-            is_date_in_filename = has_file_ext and re.search(r'(?:^|[\s/_])\d{8}[\s._]', link) is not None
+            # 允许文件名中包含日期的 .htm 文件
+            # 支持格式：/YYYYMMDD/、/YYYYMM/ + tYYYYMMDD_、content_2024080101.htm 等
+            is_date_in_filename = has_file_ext and (
+                re.search(r'(?:^|[\s/_])\d{8}[\s._]', link) is not None  # 8位日期
+                or re.search(r'/\d{6}/t\d{8}', link) is not None  # 202607/t20260731 (空天院格式)
+                or re.search(r'/\d{6}/', link) is not None  # 年月目录 (YYYYMM)
+            )
 
             # 栏目检查：只接受主栏目路径下的文章
             is_same_category = len(link_parts) > 1 and link_parts[0] == main_category

@@ -274,20 +274,24 @@ async def scrape_deep(request: ScrapeDeepRequest):
     scrape_id = request.scrape_id or str(uuid.uuid4())[:8]
 
     # 手动深度爬取也写入现有历史表，避免任务完成或服务重启后无法追踪。
-    from app.core.database import get_session_local
-    from app.models.scheduled_task import ScrapeHistory, TaskStatus
     history_id = str(uuid.uuid4())
-    history_db = get_session_local()()
     try:
-        history_db.add(ScrapeHistory(
-            id=history_id,
-            task_id=None,
-            url=request.url,
-            status=TaskStatus.RUNNING.value,
-        ))
-        history_db.commit()
-    finally:
-        history_db.close()
+        from app.core.database import get_session_local
+        from app.models.scheduled_task import ScrapeHistory, TaskStatus
+        history_db = get_session_local()()
+        try:
+            history_db.add(ScrapeHistory(
+                id=history_id,
+                task_id=None,
+                url=request.url,
+                status=TaskStatus.RUNNING.value,
+            ))
+            history_db.commit()
+        finally:
+            history_db.close()
+    except Exception as db_err:
+        api_logger.warning(f"无法写入爬取历史记录（数据库不可用）: {db_err}")
+        history_id = None
 
     # 初始化进度状态
     progress_manager.set_progress(scrape_id, {
@@ -334,18 +338,23 @@ async def scrape_deep(request: ScrapeDeepRequest):
     def do_scrape():
         """在后台线程中执行爬取"""
         def update_history(status: str, articles_count: int = 0, article_title: str = "", error_message: str = ""):
-            db = get_session_local()()
+            if not history_id:
+                return
             try:
-                history = db.query(ScrapeHistory).filter(ScrapeHistory.id == history_id).first()
-                if history:
-                    history.status = status
-                    history.articles_count = articles_count
-                    history.article_title = article_title[:500] if article_title else ("无文章" if articles_count == 0 else None)
-                    history.error_message = error_message[:4000] if error_message else None
-                    history.finished_at = datetime.utcnow()
-                    db.commit()
-            finally:
-                db.close()
+                db = get_session_local()()
+                try:
+                    history = db.query(ScrapeHistory).filter(ScrapeHistory.id == history_id).first()
+                    if history:
+                        history.status = status
+                        history.articles_count = articles_count
+                        history.article_title = article_title[:500] if article_title else ("无文章" if articles_count == 0 else None)
+                        history.error_message = error_message[:4000] if error_message else None
+                        history.finished_at = datetime.utcnow()
+                        db.commit()
+                finally:
+                    db.close()
+            except Exception as e:
+                api_logger.warning(f"更新爬取历史失败: {e}")
 
         try:
             # 创建新的事件循环

@@ -68,3 +68,11 @@ backups/
 # Docker
 docker-compose.override.yml
 postgres_data/
+
+# 爬虫调试产物
+backend/scripts/auto_cookie_result.json
+backend/scripts/sogou_*.html
+backend/scripts/sogou_result.png
+backend/scripts/sogou_test_result.json
+backend/scripts/debug_*.py
+backend/scripts/test_sogou_monitor.py

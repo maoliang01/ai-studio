@@ -167,32 +167,78 @@ npm run dev
 - API Key 通过环境变量或配置文件管理
 - 使用 .gitignore 排除敏感文件
 
-## 🚀 部署
+## 🚀 部署 (Docker)
 
-### 部署检查清单
+### 前置要求
 
-**⚠️ 新设备部署时必须确认：**
+- **Docker Desktop** - [下载地址](https://www.docker.com/products/docker-desktop/)
+- **PostgreSQL** - Windows 可用 Chocolatey/Winget 自动安装，或访问 [postgres.org](https://www.postgresql.org/download/)
 
-1. **后端端口配置一致**
-   - 后端默认启动端口: `8080`
-   - 前端 API 代理配置: `frontend/.env.local` 中的 `BACKEND_URL`
-   - 确保两者端口一致，否则所有 API 请求会返回 500 错误
+### 快速开始
 
-2. **环境变量配置**
-   ```bash
-   # 创建 frontend/.env.local
-   echo "BACKEND_URL=http://localhost:8080" > frontend/.env.local
-   ```
+```bash
+# 首次部署（自动安装 PostgreSQL）
+./start.sh
 
-3. **数据库配置**
-   - PostgreSQL 连接信息: `backend/.env`
-   - 默认数据库: `ai_studio`，用户: `postgres`，密码: `postgres`
+# 打开浏览器访问 http://localhost:3000
+```
 
-4. **验证配置**
-   ```bash
-   # 检查前端 API 代理是否指向正确的后端
-   grep -r "localhost:8[0-9][0-9][0-9]" frontend/src/app/api/
-   ```
+**首次启动流程：**
+1. 自动检测 PostgreSQL 是否安装
+2. 未安装时自动下载安装（Windows: Winget/Choco，Linux: apt，Mac: Homebrew）
+3. 自动创建 `ai_studio` 数据库
+4. 启动 Neo4j、后端、前端服务
+
+### 部署架构
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    本地机器                             │
+├─────────────────────────────────────────────────────────┤
+│  PostgreSQL (本地安装)  ←───  你爬取的数据              │
+│         │                                              │
+│         ▼                                              │
+│  ┌──────────────────────────────┐                      │
+│  │  Docker 容器                 │                      │
+│  │  ┌─────────┐  ┌──────────┐  │                      │
+│  │  │  Neo4j  │  │ Backend  │  │  Port 8500           │
+│  │  └─────────┘  └────┬─────┘  │                      │
+│  │                    │        │                      │
+│  │               ┌────┴────┐   │                      │
+│  │               │ Frontend│   │  Port 3000           │
+│  │               └─────────┘   │                      │
+│  └──────────────────────────────┘                      │
+└─────────────────────────────────────────────────────────┘
+```
+
+### ⚠️ 重要
+
+- PostgreSQL 数据**存储在本地**，不在 Docker 中
+- 换设备后数据清零（符合你的需求）
+- Neo4j 数据仍保存在 Docker volume 中
+
+### 常用命令
+
+| 命令 | 说明 |
+|------|------|
+| `./start.sh` | 启动服务（自动检测安装 PostgreSQL） |
+| `./stop.sh` | 暂停所有容器（PostgreSQL 不受影响） |
+| `docker compose -f docker-compose-local-db.yml logs -f` | 查看日志 |
+
+### 安装 PostgreSQL（可选手动）
+
+如果自动安装失败，可手动安装：
+
+```bash
+# Windows (使用 Winget)
+winget install PostgreSQL.PostgreSQL
+
+# Ubuntu
+sudo apt install postgresql postgresql-contrib
+
+# macOS
+brew install postgresql@15
+```
 
 ## 🧪 开发命令
 

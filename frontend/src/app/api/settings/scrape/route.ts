@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8080";
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8500";
 
 // 获取所有爬取源
 export async function GET() {
@@ -54,8 +54,16 @@ export async function PUT(request: Request) {
 // 删除爬取源
 export async function DELETE(request: Request) {
   try {
-    const { searchParams } = new URL(request.url);
-    const sourceId = searchParams.get("id");
+    // 从 URL 路径中提取 source_id
+    const url = new URL(request.url);
+    const pathParts = url.pathname.split('/');
+    const sourceIdIndex = pathParts.findIndex(part => part === 'scrape') + 1;
+    const sourceId = pathParts[sourceIdIndex];
+
+    if (!sourceId) {
+      return NextResponse.json({ error: "Source ID required" }, { status: 400 });
+    }
+
     const res = await fetch(`${BACKEND_URL}/settings/scrape/${sourceId}`, {
       method: "DELETE",
     });

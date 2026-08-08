@@ -34,6 +34,7 @@ import {
   Link2,
   Boxes,
   GitBranch,
+  TrendingUp,
 } from "lucide-react";
 import { toast } from "sonner";
 import EntitySourcePopover from "@/components/kg/EntitySourcePopover";
@@ -232,6 +233,14 @@ interface SimilarEntity {
   score: number;
 }
 
+interface EntityRankingItem {
+  name: string;
+  entity_type: string;
+  subtype?: string;
+  occurrence_count: number;
+  source_articles: string[];
+}
+
 interface CausalCandidate {
   source: string;
   target: string;
@@ -326,6 +335,7 @@ function KnowledgeGraphPageContent() {
   const [causalSource, setCausalSource] = useState("");
   const [causalTarget, setCausalTarget] = useState("");
   const [causalChains, setCausalChains] = useState<CausalChain[]>([]);
+  const [entityRanking, setEntityRanking] = useState<EntityRankingItem[]>([]);
   const [exploreLoading, setExploreLoading] = useState(false);
 
   const svgRef = useRef<SVGSVGElement>(null);
@@ -580,6 +590,20 @@ function KnowledgeGraphPageContent() {
     }
   };
 
+  const loadEntityRanking = async () => {
+    setExploreLoading(true);
+    try {
+      const response = await fetch("/api/kg/explore/entity-ranking?limit=50");
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "实体排行加载失败");
+      setEntityRanking(data.entities || []);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "实体排行加载失败");
+    } finally {
+      setExploreLoading(false);
+    }
+  };
+
   const changeExploreTab = (value: string) => {
     setExploreTab(value);
     if (value === "community" && communities.length === 0) loadMiningResults("community");
@@ -591,6 +615,7 @@ function KnowledgeGraphPageContent() {
     if (value === "timeline" && timelineEvents.length === 0) loadMiningResults("timeline");
     if (value === "causal" && causalCandidates.length === 0) loadMiningResults("causal");
     if (value === "similar" && !embeddingStatus) loadEmbeddingDiagnostics();
+    if (value === "ranking" && entityRanking.length === 0) loadEntityRanking();
   };
 
   const undoMiningReview = async (reviewId: string) => {
@@ -1632,6 +1657,7 @@ function KnowledgeGraphPageContent() {
                   <TabsTrigger value="cross-document" className="flex-none px-3 py-1.5 bg-transparent data-active:bg-white data-active:shadow-sm"><GitMerge className="w-4 h-4 mr-1" />共现</TabsTrigger>
                   <TabsTrigger value="aliases" className="flex-none px-3 py-1.5 bg-transparent data-active:bg-white data-active:shadow-sm"><ScanSearch className="w-4 h-4 mr-1" />别名</TabsTrigger>
                   <TabsTrigger value="governance" className="flex-none px-3 py-1.5 bg-transparent data-active:bg-white data-active:shadow-sm"><ShieldCheck className="w-4 h-4 mr-1" />治理</TabsTrigger>
+                  <TabsTrigger value="ranking" className="flex-none px-3 py-1.5 bg-transparent data-active:bg-white data-active:shadow-sm"><TrendingUp className="w-4 h-4 mr-1" />排行</TabsTrigger>
                 </TabsList>
                 <TabsContent value="path" className="m-0 p-4">
                   <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-2">
@@ -2106,6 +2132,75 @@ function KnowledgeGraphPageContent() {
                         </div>
                       </div>
                     ))}
+                  </ScrollArea>
+                </TabsContent>
+                <TabsContent value="ranking" className="m-0 p-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-medium">实体出现次数排行</div>
+                      <div className="text-xs text-gray-500">按文章引用次数排序</div>
+                    </div>
+                    <Button size="icon" variant="outline" onClick={loadEntityRanking} disabled={exploreLoading} title="刷新排行">
+                      <RefreshCw className={`w-4 h-4 ${exploreLoading ? "animate-spin" : ""}`} />
+                    </Button>
+                  </div>
+                  <ScrollArea className="mt-3 h-[25rem] pr-3">
+                    {entityRanking.length === 0 && !exploreLoading ? (
+                      <div className="py-12 text-center text-sm text-gray-400">暂无实体排行数据</div>
+                    ) : (
+                      <div className="space-y-2">
+                        {entityRanking.map((item, index) => {
+                          const maxCount = entityRanking[0]?.occurrence_count || 1;
+                          const percentage = (item.occurrence_count / maxCount) * 100;
+                          const typeColors: Record<string, string> = {
+                            PERSON: "bg-amber-100 text-amber-700",
+                            ORGANIZATION: "bg-blue-100 text-blue-700",
+                            LOCATION: "bg-violet-100 text-violet-700",
+                            TECHNOLOGY: "bg-pink-100 text-pink-700",
+                            EVENT: "bg-red-100 text-red-700",
+                            CONCEPT: "bg-cyan-100 text-cyan-700",
+                            DATE: "bg-slate-100 text-slate-700",
+                          };
+                          return (
+                            <div
+                              key={item.name}
+                              className="border-b py-2 first:pt-0 last:border-0 cursor-pointer hover:bg-gray-50 transition-colors"
+                              onClick={() => {
+                                // 高亮该实体节点及其邻居
+                                const entityNode = graphData.nodes.find((n) => n.id === item.name || n.label === item.name);
+                                if (entityNode) {
+                                  const neighborIds = new Set<string>([entityNode.id]);
+                                  graphData.edges.forEach((e) => {
+                                    if (e.source === entityNode.id) neighborIds.add(e.target);
+                                    if (e.target === entityNode.id) neighborIds.add(e.source);
+                                  });
+                                  setHighlightedNodeIds(neighborIds);
+                                  setExploreOpen(false);
+                                }
+                              }}
+                              title={`点击聚焦图谱中的 "${item.name}"`}
+                            >
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <span className="text-xs font-mono text-gray-400 w-5 text-right">{index + 1}</span>
+                                  <span className="text-sm font-medium truncate">{item.name}</span>
+                                  <span className={`text-[10px] px-1.5 py-0.5 rounded ${typeColors[item.entity_type] || "bg-gray-100 text-gray-700"}`}>
+                                    {item.entity_type}
+                                  </span>
+                                </div>
+                                <span className="text-sm font-semibold text-indigo-600 shrink-0">{item.occurrence_count}</span>
+                              </div>
+                              <div className="mt-1.5 h-1.5 bg-gray-100 rounded-full overflow-hidden ml-7">
+                                <div
+                                  className="h-full bg-indigo-500 rounded-full transition-all"
+                                  style={{ width: `${percentage}%` }}
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </ScrollArea>
                 </TabsContent>
               </Tabs>

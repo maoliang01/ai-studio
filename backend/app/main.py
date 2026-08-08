@@ -140,18 +140,34 @@ async def health():
 @app.get("/health/db")
 async def health_db():
     """数据库健康检查"""
-    from app.core.database import check_db_connection, get_database_config
+    from app.core.database import check_db_connection, get_engine, SQLITE_DB_PATH
 
-    config = get_database_config()
+    # 获取引擎（会触发初始化）
+    engine = get_engine()
     is_connected = check_db_connection()
+
+    # 判断数据库类型
+    if engine.url.drivername == "sqlite":
+        db_info = {
+            "type": "SQLite",
+            "path": str(SQLITE_DB_PATH),
+            "exists": SQLITE_DB_PATH.exists(),
+        }
+    else:
+        from app.core.database import get_database_config
+        config = get_database_config()
+        db_info = {
+            "type": "PostgreSQL",
+            "host": config.host,
+            "port": config.port,
+            "database": config.database,
+        }
 
     return {
         "status": "healthy" if is_connected else "unhealthy",
         "database": {
             "connected": is_connected,
-            "host": config.host,
-            "port": config.port,
-            "database": config.database,
+            **db_info
         }
     }
 

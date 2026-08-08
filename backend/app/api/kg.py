@@ -950,6 +950,50 @@ async def explore_entity_profile(
     return {"status": "success", **profile}
 
 
+@router.get("/explore/entity-ranking")
+async def explore_entity_ranking(
+    limit: int = Query(default=50, ge=1, le=200),
+    entity_type: Optional[str] = Query(default=None),
+):
+    """返回按出现次数（文章引用数）排序的实体排行。"""
+    neo4j = Neo4jService()
+    try:
+        query = """
+            MATCH (e:Entity)
+            WHERE e.source_articles IS NOT NULL AND size(e.source_articles) > 0
+        """
+        params = {"limit": limit}
+
+        if entity_type:
+            query += " AND e.entity_type = $entity_type"
+            params["entity_type"] = entity_type
+
+        query += """
+            WITH e, size(e.source_articles) AS occurrence_count
+            ORDER BY occurrence_count DESC
+            LIMIT $limit
+            RETURN e.name AS name, e.entity_type AS entity_type,
+                   e.subtype AS subtype, occurrence_count,
+                   e.source_articles AS source_articles
+        """
+
+        records = await neo4j.execute(query, params)
+        entities = [
+            {
+                "name": r["name"],
+                "entity_type": r["entity_type"],
+                "subtype": r.get("subtype"),
+                "occurrence_count": r["occurrence_count"],
+                "source_articles": r.get("source_articles", []),
+            }
+            for r in records
+        ]
+    finally:
+        await neo4j.close()
+
+    return {"status": "success", "count": len(entities), "entities": entities}
+
+
 class AliasReviewRequest(BaseModel):
     source: str = Field(min_length=1, max_length=500)
     target: str = Field(min_length=1, max_length=500)

@@ -1172,6 +1172,16 @@ function ArticlesPageContent() {
                     <Button
                       variant="outline"
                       size="sm"
+                      onClick={() => loadArticles(1)}
+                      disabled={page <= 1}
+                    >
+                      <ChevronLeft className="w-4 h-4 mr-1 scale-75" />
+                      <ChevronLeft className="w-4 h-4 -ml-2 scale-75" />
+                      首页
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
                       onClick={() => loadArticles(page - 1)}
                       disabled={page <= 1}
                     >
@@ -1186,6 +1196,16 @@ function ArticlesPageContent() {
                     >
                       下一页
                       <ChevronRight className="w-4 h-4 ml-1" />
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => loadArticles(totalPages)}
+                      disabled={page >= totalPages}
+                    >
+                      末页
+                      <ChevronRight className="w-4 h-4 ml-1 scale-75" />
+                      <ChevronRight className="w-4 h-4 -ml-2 scale-75" />
                     </Button>
                   </div>
                 </div>

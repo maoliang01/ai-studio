@@ -741,7 +741,7 @@ export default function ScrapePage() {
     } else {
       // 单页爬取
       const { scrapeUrl } = useScrapeStore.getState();
-      await scrapeUrl(pendingScrapeParams.url, pendingScrapeParams.options);
+      await scrapeUrl(pendingScrapeParams.url, pendingScrapeParams.options, cookieInput.trim());
     }
   };
 
@@ -999,9 +999,17 @@ export default function ScrapePage() {
                   variant="outline"
                   onClick={(e) => {
                     e.stopPropagation();
+                    // 判断是否为列表页（需要深度爬取）
+                    const isListPage = !isArticleUrl(item.url);
                     openCookieDialog(item.blockedDomain || "", {
                       url: item.url,
-                      isDeepScrape: false,
+                      isDeepScrape: isListPage,
+                      maxArticles: maxArticles,
+                      dateRange: dateRange?.preset,
+                      customDateRange: dateRange?.custom,
+                      scrapeLevel: scrapeLevel,
+                      categoryId: selectedCategory,
+                      sourceId: selectedSource?.id,
                     });
                   }}
                 >

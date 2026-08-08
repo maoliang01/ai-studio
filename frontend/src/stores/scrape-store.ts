@@ -66,7 +66,7 @@ interface ScrapeStore {
   tabError: string | null;           // 页签分析错误
 
   // Actions
-  scrapeUrl: (url: string, options?: Partial<ScrapeOptions>) => Promise<ScrapeResult | null>;
+  scrapeUrl: (url: string, options?: Partial<ScrapeOptions>, cookies?: string) => Promise<ScrapeResult | null>;
   scrapeBatch: (urls: string[], options?: Partial<ScrapeOptions>) => Promise<ScrapeResult[]>;
   scrapeSources: (sourceIds?: string[], options?: Partial<ScrapeOptions>) => Promise<ScrapeResult[]>;
   deepScrape: (
@@ -117,14 +117,17 @@ export const useScrapeStore = create<ScrapeStore>((set, get) => ({
   /**
    * 爬取单个 URL
    */
-  scrapeUrl: async (url: string, options?: Partial<ScrapeOptions>) => {
+  scrapeUrl: async (url: string, options?: Partial<ScrapeOptions>, cookies?: string) => {
     set({ isScraping: true, error: null });
 
     try {
-      const requestData = {
+      const requestData: Record<string, unknown> = {
         url,
         options: { ...defaultOptions, ...options },
       };
+      if (cookies) {
+        requestData.cookies = cookies;
+      }
 
       const res = await fetch("/api/scrape", {
         method: "POST",
@@ -329,6 +332,20 @@ export const useScrapeStore = create<ScrapeStore>((set, get) => ({
               const articles: ScrapeResult[] = (progress.results.articles || []).map((r: Record<string, unknown>) =>
                 normalizeScrapeResult(r)
               );
+
+              // 检查列表页是否被反爬拦截
+              const listPage = progress.results.list_page;
+              if (articles.length === 0 && listPage && listPage.status === "anti_bot_blocked") {
+                // 返回一个特殊的结果，让页面层处理 Cookie 对话框
+                const blockedResult = normalizeScrapeResult(listPage);
+                set({
+                  results: [blockedResult],
+                  currentResult: blockedResult,
+                  isScraping: false,
+                  progress: null,
+                });
+                return;
+              }
 
               set({
                 // 替换为新结果（不再追加旧结果）

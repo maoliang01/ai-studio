@@ -664,29 +664,17 @@ async def run_task_now(task_id: str, db: Session = Depends(get_db)):
                 logger.info("[立即执行进度] %s%s: %s", message, position, detail)
 
             for url in worker_urls:
-                elapsed = (datetime.utcnow() - start_time).total_seconds()
-                remaining = IMMEDIATE_TASK_MAX_RUNTIME_SECONDS - elapsed
-                if remaining <= 0:
-                    final_status = TaskStatus.FAILED.value
-                    errors.append(
-                        f"任务总超时（超过 {IMMEDIATE_TASK_MAX_RUNTIME_SECONDS} 秒）"
-                    )
-                    break
-
                 logger.info(f"[立即执行] 深度爬取: {url}")
                 try:
-                    timeout_seconds = min(IMMEDIATE_URL_TIMEOUT_SECONDS, remaining)
+                    # 不再设置总超时，让爬取自然完成
                     list_page, article_results = loop.run_until_complete(
-                        asyncio.wait_for(
-                            scraper.deep_scrape(
-                                url=url,
-                                options=options,
-                                max_articles=IMMEDIATE_MAX_ARTICLES,
-                                date_range=scrape_range,
-                                scrape_level="deep",
-                                progress_callback=progress,
-                            ),
-                            timeout=timeout_seconds,
+                        scraper.deep_scrape(
+                            url=url,
+                            options=options,
+                            max_articles=IMMEDIATE_MAX_ARTICLES,
+                            date_range=scrape_range,
+                            scrape_level="deep",
+                            progress_callback=progress,
                         )
                     )
                     logger.info(f"  [立即执行] 识别到 {len(article_results)} 篇文章")
@@ -707,16 +695,6 @@ async def run_task_now(task_id: str, db: Session = Depends(get_db)):
                                 scraped_articles.append(title)
                                 logger.info(f"    [立即执行] 已保存: {title[:50]}")
 
-                except asyncio.TimeoutError:
-                    message = f"爬取超时（{int(timeout_seconds)} 秒）: {url}"
-                    logger.error(f"  [立即执行] {message}")
-                    errors.append(message)
-                    if timeout_seconds >= remaining:
-                        final_status = TaskStatus.FAILED.value
-                        errors.append(
-                            f"任务总超时（超过 {IMMEDIATE_TASK_MAX_RUNTIME_SECONDS} 秒）"
-                        )
-                        break
                 except Exception as url_error:
                     logger.error(f"  [立即执行] 爬取失败: {url_error}")
                     errors.append(f"{url}: {url_error}")
