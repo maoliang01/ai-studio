@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useScrapeStore } from "@/stores/scrape-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { Button } from "@/components/ui/button";
@@ -120,6 +120,7 @@ export default function ScrapePage() {
   const [selectedForExport, setSelectedForExport] = useState<Set<string>>(new Set());
 
   const [selectedCategory, setSelectedCategory] = useState<string>("");  // 保存到数据库的分类
+
   const [isExporting, setIsExporting] = useState(false);
   const [exportSuccess, setExportSuccess] = useState<string | null>(null);
 
@@ -154,6 +155,18 @@ export default function ScrapePage() {
   } = useScrapeStore();
 
   const { scrapeSources, categories, syncFromBackend } = useSettingsStore();
+
+  // 根据当前选中的分类 ID 解析中文名（用于下拉框显示）
+  const selectedCategoryName = useMemo(() => {
+    const found = categories.find((c) => c.id === selectedCategory);
+    if (found) return found.name;
+    const fallback: Record<string, string> = {
+      government: "党政类",
+      business: "商务类",
+      academic: "学术类",
+    };
+    return selectedCategory ? fallback[selectedCategory] || selectedCategory : "";
+  }, [selectedCategory, categories]);
 
   // 页面加载时同步配置数据
   useEffect(() => {
@@ -1057,36 +1070,38 @@ export default function ScrapePage() {
                       disabled={isScraping}
                     />
                   </div>
-                  {/* 分类选择（从后端网页配置动态加载） */}
-                    <Select
-                      value={selectedCategory}
-                      onValueChange={(value) => value && setSelectedCategory(value as string)}
-                      disabled={isScraping}
-                    >
-                      <SelectTrigger className="w-[140px] gap-1">
-                        <Tag className="h-4 w-4 text-muted-foreground shrink-0" />
-                        <SelectValue placeholder="选择分类" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {categories.length === 0 ? (
-                          <div className="px-2 py-1.5 text-sm text-muted-foreground">
-                            暂无分类
-                          </div>
-                        ) : (
-                          categories.map((cat) => (
-                            <SelectItem key={cat.id} value={cat.id}>
-                              <span className="flex items-center gap-2">
-                                <span
-                                  className="inline-block h-2 w-2 rounded-full"
-                                  style={{ backgroundColor: cat.color }}
-                                />
-                                {cat.name}
-                              </span>
-                            </SelectItem>
-                          ))
-                        )}
-                      </SelectContent>
-                    </Select>
+                  {/* 分类选择（从后端网页配置动态加载，显示中文名） */}
+                  <Select
+                    value={selectedCategory}
+                    onValueChange={(value) => value && setSelectedCategory(value as string)}
+                    disabled={isScraping}
+                  >
+                    <SelectTrigger className="w-[150px] gap-1">
+                      <Tag className="h-4 w-4 text-muted-foreground shrink-0" />
+                      <span className="text-foreground">
+                        {selectedCategoryName || "选择分类"}
+                      </span>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {categories.length === 0 ? (
+                        <div className="px-2 py-1.5 text-sm text-muted-foreground">
+                          暂无分类
+                        </div>
+                      ) : (
+                        categories.map((cat) => (
+                          <SelectItem key={cat.id} value={cat.id}>
+                            <span className="flex items-center gap-2">
+                              <span
+                                className="inline-block h-2 w-2 rounded-full"
+                                style={{ backgroundColor: cat.color }}
+                              />
+                              {cat.name}
+                            </span>
+                          </SelectItem>
+                        ))
+                      )}
+                    </SelectContent>
+                  </Select>
 
                     <Button
                       variant="outline"

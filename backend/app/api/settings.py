@@ -85,8 +85,6 @@ class SaveSettingsRequest(BaseModel):
 # ============ 文件持久化存储 ============
 
 SETTINGS_FILE = Path(__file__).parent.parent.parent / "data" / "settings.json"
-# 用户配置文件：独立于 settings.json，部署到宿主机上，重启不丢失
-SCRAPE_SOURCES_FILE = Path(__file__).parent.parent.parent / "data" / "scrape-sources.json"
 
 # 内容存储根目录
 CONTENT_ROOT = Path(__file__).parent.parent.parent / "data" / "content"
@@ -123,6 +121,8 @@ class SettingsStore:
         self._source_counter = 0
         self._category_counter = 0
         self._load_from_file()
+        # 从数据库恢复用户配置的爬取源（文件可能被覆盖，数据库是权威持久化来源）
+        self._recover_from_database()
         # 确保默认分类存在
         self._ensure_default_categories()
 
@@ -133,57 +133,6 @@ class SettingsStore:
     def _ensure_content_dir(self):
         """确保内容存储目录存在"""
         CONTENT_ROOT.mkdir(parents=True, exist_ok=True)
-
-    def _load_sources_from_list(self, sources_list: List[dict]):
-        """从列表格式加载爬取源（独立配置文件的格式）"""
-        for source in sources_list:
-            self._source_counter += 1
-            source_id = f"src_{self._source_counter}_{int(datetime.now().timestamp() * 1000) % 1000000}"
-            now = datetime.now().isoformat()
-            self.scrape_sources[source_id] = {
-                "id": source_id,
-                "name": source.get("name", ""),
-                "url": source.get("url", ""),
-                "category": source.get("category", "business"),
-                "description": source.get("description"),
-                "is_enabled": source.get("is_enabled", True),
-                "created_at": source.get("created_at", now),
-                "updated_at": now,
-            }
-
-    def _load_sources_from_dict(self, sources_dict: dict):
-        """从字典格式加载爬取源（旧的 settings.json 格式）"""
-        for source_id, source in sources_dict.items():
-            self.scrape_sources[source_id] = source
-            # 更新计数器
-            try:
-                parts = source_id.split("_")
-                if len(parts) >= 2:
-                    counter = int(parts[1])
-                    if counter > self._source_counter:
-                        self._source_counter = counter
-            except:
-                pass
-
-    def _save_sources_to_file(self):
-        """保存爬取源到独立配置文件"""
-        self._ensure_data_dir()
-        try:
-            sources_list = []
-            for source in self.scrape_sources.values():
-                sources_list.append({
-                    "name": source.get("name"),
-                    "url": source.get("url"),
-                    "category": source.get("category", "business"),
-                    "description": source.get("description"),
-                    "is_enabled": source.get("is_enabled", True),
-                })
-            data = {"sources": sources_list}
-            with open(SCRAPE_SOURCES_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            print(f"[设置] 爬取源已保存到: {SCRAPE_SOURCES_FILE}")
-        except Exception as e:
-            print(f"[设置] 保存爬取源配置文件失败: {e}")
 
     def _ensure_category_folder(self, category_id: str, folder_name: str):
         """确保分类对应的文件夹存在"""
@@ -212,32 +161,24 @@ class SettingsStore:
 
     def _load_from_file(self):
         """从文件加载配置"""
-        # 优先从独立配置文件加载爬取源
-        if SCRAPE_SOURCES_FILE.exists():
-            try:
-                with open(SCRAPE_SOURCES_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    sources_list = data.get("sources", [])
-                    self._load_sources_from_list(sources_list)
-                    print(f"[设置] 从独立配置文件加载了 {len(self.scrape_sources)} 个爬取源: {SCRAPE_SOURCES_FILE}")
-            except Exception as e:
-                print(f"[设置] 加载爬取源配置文件失败: {e}")
-
-        # 从 settings.json 加载其余配置
         if SETTINGS_FILE.exists():
             try:
                 with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.settings = data.get("settings", self.settings)
+                    self.scrape_sources = data.get("scrape_sources", {})
                     self.categories = data.get("categories", {})
-                    # 如独立配置文件不存在或为空，从 settings.json 加载爬取源
-                    if not SCRAPE_SOURCES_FILE.exists() or not self.scrape_sources:
-                        old_sources = data.get("scrape_sources", {})
-                        if old_sources and not self.scrape_sources:
-                            self._load_sources_from_dict(old_sources)
-                            print(f"[设置] 从旧配置文件迁移了 {len(self.scrape_sources)} 个爬取源")
-                            # 写入新配置文件
-                            self._save_sources_to_file()
+
+                    # 更新计数器到最大值
+                    for source_id in self.scrape_sources.keys():
+                        try:
+                            parts = source_id.split("_")
+                            if len(parts) >= 2:
+                                counter = int(parts[1])
+                                if counter > self._source_counter:
+                                    self._source_counter = counter
+                        except:
+                            pass
                     # 更新分类计数器
                     for cat_id in self.categories.keys():
                         try:
@@ -275,6 +216,35 @@ class SettingsStore:
             sync_settings_to_database(self.categories, self.scrape_sources)
         except Exception as e:
             print(f"同步配置到数据库失败: {e}")
+
+    def _recover_from_database(self):
+        """从数据库恢复用户配置的爬取源。
+
+        数据库是权威持久化来源，持久化了用户界面添加的爬取源。当 settings.json
+        因被覆盖等原因缺失用户数据时，启动时将数据库中的爬取源合并进来并写回文件，
+        保证重启后界面仍能显示用户配置的完整的爬取网站列表。
+        """
+        try:
+            from app.core.database import load_scrape_sources_from_database
+            db_sources = load_scrape_sources_from_database()
+            if not db_sources:
+                return
+            # 合并：数据库中有而文件缺失的来源，补入内存
+            merged = False
+            for name, src in db_sources.items():
+                exists = any(
+                    s.get("name") == name for s in self.scrape_sources.values()
+                )
+                if not exists:
+                    self._source_counter += 1
+                    src["id"] = f"src_{self._source_counter}_{int(datetime.now().timestamp() * 1000) % 1000000}"
+                    self.scrape_sources[src["id"]] = src
+                    merged = True
+            if merged:
+                self._save_to_file()
+                print(f"[设置] 已从数据库恢复 {sum(1 for s in self.scrape_sources.values() if s.get('name') in db_sources)} 个爬取源")
+        except Exception as e:
+            print(f"[设置] 从数据库恢复爬取源失败: {e}")
 
     def _get_category_source_count(self, category_id: str) -> int:
         """获取分类下的来源数量"""
@@ -495,7 +465,6 @@ class SettingsStore:
         self.scrape_sources[source_id] = new_source
         self._save_to_file()
         self._sync_to_database()
-        self._save_sources_to_file()
         return ScrapeSourceResponse(**new_source)
 
     def update_scrape_source(self, source_id: str, updates: dict) -> Optional[ScrapeSourceResponse]:
@@ -508,14 +477,12 @@ class SettingsStore:
         source["updated_at"] = datetime.now().isoformat()
         self._save_to_file()
         self._sync_to_database()
-        self._save_sources_to_file()
         return ScrapeSourceResponse(**source)
 
     def delete_scrape_source(self, source_id: str) -> bool:
         if source_id in self.scrape_sources:
             del self.scrape_sources[source_id]
             self._save_to_file()
-            self._save_sources_to_file()
             return True
         return False
 
@@ -527,7 +494,6 @@ class SettingsStore:
         source["updated_at"] = datetime.now().isoformat()
         self._save_to_file()
         self._sync_to_database()
-        self._save_sources_to_file()
         return ScrapeSourceResponse(**source)
 
 

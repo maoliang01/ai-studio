@@ -60,18 +60,20 @@ htmlcov/
 .claude/plans/used/
 .superpowers/
 .worktrees/
-# 忽略 data 目录下的所有数据库和缓存文件
+# 忽略 data 目录下的所有数据库、缓存和运行时配置
 backend/data/*.db
 backend/data/*.db-journal
 backend/data/*.db-wal
 backend/data/*.db-shm
-backend/data/*/cache/
-backend/data/*/temp/
 backend/data/settings.json
+backend/data/scrape-sources.json
+# 忽略 Neo4j 数据目录（运行时生成，勿提交）
+backend/data/neo4j/
+backend/data/neo4j_logs/
+data/
 backups/
 
-# 用户配置文件（明确跟踪，不忽略）
-!backend/data/scrape-sources.json
+# 配置文件模板（供用户参考，跟踪版本）
 !backend/data/scrape-sources.json.example
 # PID files
 .pids/

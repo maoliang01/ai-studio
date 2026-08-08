@@ -1309,7 +1309,9 @@ export default function ScrapeSettingsPage() {
                   }
                 >
                   <SelectTrigger>
-                    <SelectValue placeholder="选择网页种类" />
+                    <span className="text-foreground">
+                      {scrapeForm.category ? getCategoryLabel(scrapeForm.category) : "选择网页种类"}
+                    </span>
                   </SelectTrigger>
                   <SelectContent>
                     {categories.map((cat) => (

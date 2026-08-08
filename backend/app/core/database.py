@@ -325,6 +325,46 @@ def sync_settings_to_database(categories: dict, scrape_sources: dict) -> dict:
         db.close()
 
 
+def load_scrape_sources_from_database() -> dict:
+    """从数据库读取所有爬取源，返回 {name: {...}}。
+
+    数据库持久化了用户界面添加的爬取源；当 settings.json 被覆盖导致数据缺失时，
+    启动阶段以数据库为权威来源恢复用户配置。同名记录按名称去重，优先保留启用、
+    其次保留创建更早的一条，避免内置示例重复累积。
+    """
+    from app.models.article import ScrapeSource
+
+    SessionLocal = get_session_local()
+    db = SessionLocal()
+    try:
+        sources = db.query(ScrapeSource).order_by(ScrapeSource.created_at.asc()).all()
+        by_name: dict = {}
+        for s in sources:
+            entry = {
+                "id": s.id,
+                "name": s.name,
+                "url": s.url,
+                "category": s.category_id or "business",
+                "description": s.description,
+                "is_enabled": s.is_enabled,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+                "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+            }
+            if s.name not in by_name:
+                by_name[s.name] = entry
+                continue
+            existing = by_name[s.name]
+            # 已启用则保留，否则用当前启用的一条替换
+            if not existing["is_enabled"] and entry["is_enabled"]:
+                by_name[s.name] = entry
+        return by_name
+    except Exception as e:
+        logger.warning(f"从数据库读取爬取源失败: {e}")
+        return {}
+    finally:
+        db.close()
+
+
 def _create_fts_index(engine):
     """创建全文搜索索引（仅 PostgreSQL）"""
     from sqlalchemy import text
