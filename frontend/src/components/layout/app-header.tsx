@@ -1,6 +1,6 @@
 "use client";
 
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   Header,
   HeaderLeft,
@@ -13,6 +13,7 @@ import {
   Menu,
   Bell,
   User,
+  Home,
 } from "lucide-react";
 import { useSidebar } from "@/components/ui/sidebar";
 import { useSettingsStore } from "@/stores/settings-store";
@@ -27,6 +28,7 @@ const pageTitles: Record<string, string> = {
 
 export function AppHeader() {
   const pathname = usePathname();
+  const router = useRouter();
   const { toggleSidebar } = useSidebar();
   const { settings, setTheme } = useSettingsStore();
 
@@ -49,6 +51,18 @@ export function AppHeader() {
         >
           <Menu className="h-4 w-4" />
         </Button>
+        {/* 非首页时显示"返回首页"按钮 */}
+        {pathname !== "/" && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => router.push("/")}
+            className="gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+          >
+            <Home className="h-4 w-4" />
+            返回首页
+          </Button>
+        )}
         <h1 className="text-lg font-semibold">{title}</h1>
       </HeaderLeft>
 
